@@ -469,7 +469,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
         record = await load(record.id);
       }
       const plan = record.kind === "sync" ? record.sync : record.live;
-      const source = await sources.create({ template: record.id, scope: {}, account, recipe_of: record.id });
+      const source = await sources.create({ template: record.id, scope: {}, account: account ?? plan.account, recipe_of: record.id });
       const synced = await sources.sync({ id: source.id, budgetMs, reason: once ? "manual" : "live" });
       if (once) return synced;
       if (plan.triggers?.length) {
