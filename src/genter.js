@@ -4,19 +4,90 @@ import { Composio } from "@composio/core";
 // Genter = Composio + recipes of past calls.
 // A call record is { id, tool, args, created_at, summary, digest, memory }: memory is the recipe description,
 // summary is a short retelling of the result (topics, names, ids to open it again). The raw result is never stored.
-// Every successful call is saved as a recipe right away; the agent can improve its description later.
+// Every successful call is saved as a recipe; the slow part (summary, embeddings, dedupe) runs after the result
+// is returned, through `defer` (default: tracked, awaited by flush()). A call merged into an older recipe of the same
+// call is kept as an alias of it, so every id execute returned stays valid.
 // Records are encrypted before they reach the store, so the store only sees rows { id, remembered, blob }
 // and needs: get(id), put(row), all() (remembered rows).
-export function createGenter({ composioApiKey, openrouterApiKey, userId, secret, store, minScore = 0.25, strongScore = 0.45 }) {
+export function createGenter({ composioApiKey, openrouterApiKey, userId, secret, store, defer, minScore = 0.25, strongScore = 0.45 }) {
   if (!secret) throw new Error("secret is required to encrypt stored calls");
   const composio = new Composio({ apiKey: composioApiKey });
-  const { seal, open } = cipher(`${secret}:${userId}`);
-  const load = async (id) => {
+  const { seal, open: decrypt } = cipher(`${secret}:${userId}`);
+  // Decrypted records are cached by their blob (a new seal has a new random iv), so search does not
+  // decrypt and parse every recipe on every call.
+  const open = (blob) => {
+    const key = `${userId}:${blob.slice(0, 40)}`;
+    let record = decrypted.get(key);
+    if (!record) {
+      record = unpack(decrypt(blob));
+      decrypted.set(key, record);
+      if (decrypted.size > 20000) decrypted.delete(decrypted.keys().next().value);
+    }
+    return record;
+  };
+  const load = async (id, hops = 0) => {
     const row = await store.get(id);
     if (!row) throw new Error(`Unknown id: ${id}`);
-    return open(row.blob);
+    const record = open(row.blob);
+    return record.alias && hops < 3 ? load(record.alias, hops + 1) : record;
   };
-  const save = (record) => store.put({ id: record.id, remembered: Boolean(record.memory), blob: seal(record) });
+  const save = (record, remembered = Boolean(record.memory)) => store.put({ id: record.id, remembered, blob: seal(pack(record)) });
+  const pending = new Set();
+  const later = (task) => {
+    const p = task.catch((e) => console.error("genter: saving a recipe failed:", e.message));
+    if (defer) return defer(p);
+    pending.add(p);
+    p.finally(() => pending.delete(p));
+  };
+
+  // OpenRouter chat call. The fastest provider for the model by default (OPENROUTER_SORT=throughput|latency|price).
+  async function chat(body, timeout = 30000) {
+    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${openrouterApiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: { sort: process.env.OPENROUTER_SORT || "throughput" }, ...body }),
+      signal: AbortSignal.timeout(timeout),
+    });
+    if (!res.ok) throw new Error(`OpenRouter ${res.status} ${await res.text()}`);
+    return (await res.json()).choices[0].message.content?.trim() ?? "";
+  }
+
+  // A search in another language than English: the English version and the key terms in both languages.
+  // Tool search (Composio) works in English, and keyword search in apps matches literal words, so data in English
+  // is not found by Russian words and the other way round. Cached, and shared by concurrent callers.
+  async function translate(query) {
+    if (!openrouterApiKey || !/(?![\x00-\x7F])\p{L}/u.test(query)) return null;
+    if (!translations.has(query)) {
+      translations.set(
+        query,
+        chat(
+          {
+            model: process.env.QUERY_MODEL || process.env.SUMMARY_MODEL || "openai/gpt-oss-20b",
+            reasoning: { effort: "low" },
+            response_format: { type: "json_object" },
+            messages: [
+              {
+                role: "user",
+                content:
+                  "A user searches their apps (email, chats, docs, issues) with this request. Translate it for searching. " +
+                  'Reply with JSON only: {"en": "<the request in English>", "terms": ["<key search terms in the original language>", ' +
+                  '"<the same terms in English, plus 1-2 close English synonyms>"]}. Keep names, emails, ids and quoted text as they are. ' +
+                  `Terms are short phrases that would appear in the data, not the whole request.\n\n${query}`,
+              },
+            ],
+          },
+          6000,
+        )
+          .then((text) => {
+            const out = JSON.parse(text);
+            return { en: String(out.en ?? "").trim() || null, terms: (out.terms ?? []).map(String).filter(Boolean).slice(0, 10) };
+          })
+          .catch(() => null),
+      );
+      if (translations.size > 1000) translations.delete(translations.keys().next().value);
+    }
+    return translations.get(query);
+  }
 
   // Embeddings via OpenRouter (OpenAI-compatible). Without a key, memory search is skipped.
   async function embed(text) {
@@ -33,29 +104,56 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
   // A short retelling of a result, so it can be found later by its topic. Skipped without an OpenRouter key.
   async function summarize(tool, data) {
     if (!openrouterApiKey) return null;
-    try {
-      const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${openrouterApiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: process.env.SUMMARY_MODEL || "openai/gpt-oss-20b",
-          reasoning: { effort: "low" },
-          messages: [
-            {
-              role: "user",
-              content:
-                `Retell in 1-3 sentences what this ${tool} result contains, so it can be found later by topic: ` +
-                "subjects, people, dates, and the ids or URLs needed to open it again. Write in English, but quote subjects, " +
-                "titles and names exactly as they are. Only say what is in the data, do not guess. No passwords, tokens or keys." +
-                `\n\n${JSON.stringify(data, decodeBase64).slice(0, 20000)}`,
-            },
-          ],
-        }),
-      });
-      return (await res.json()).choices[0].message.content.trim();
-    } catch {
-      return null; // a recipe without a summary is still useful
+    return chat({
+      model: process.env.SUMMARY_MODEL || "openai/gpt-oss-20b",
+      reasoning: { effort: "low" },
+      messages: [
+        {
+          role: "user",
+          content:
+            `Retell in 1-3 sentences what this ${tool} result contains, so it can be found later by topic: ` +
+            "subjects, people, dates, and the ids or URLs needed to open it again. Write in English, but quote subjects, " +
+            "titles and names exactly as they are. Only say what is in the data, do not guess. No passwords, tokens or keys." +
+            `\n\n${JSON.stringify(data, decodeBase64).slice(0, 20000)}`,
+        },
+      ],
+    }).catch(() => null); // a recipe without a summary is still useful
+  }
+
+  // Slow part of a call, after its result went back: summary, embedding, dedupe against the same call, recipe.
+  async function remember(record, data, { description, tags }) {
+    const sameCall = (await store.all())
+      .map((row) => open(row.blob))
+      .filter((r) => r.id !== record.id && !r.alias && r.tool === record.tool && JSON.stringify(r.args) === JSON.stringify(record.args));
+    let summary = sameCall.find((r) => r.digest === record.digest && r.summaryEmbedding)?.summary;
+    let summaryEmbedding;
+    if (!summary) {
+      summary = await summarize(record.tool, data);
+      summaryEmbedding = summary ? await embed(summary).catch(() => undefined) : undefined;
     }
+    // Same tool and args with the same result (identical, or a near-identical summary): refresh that recipe, keep this
+    // id as its alias. A different result, e.g. a new latest email, is a recipe of its own.
+    const similar = sameCall.find(
+      (r) => r.digest === record.digest || (r.summaryEmbedding && summaryEmbedding && cosine(r.summaryEmbedding, summaryEmbedding) >= 0.9),
+    );
+    let target = record;
+    if (similar) {
+      target = { ...similar, created_at: record.created_at, digest: record.digest, ...(summaryEmbedding && { summary, summaryEmbedding }) };
+      await save(target);
+      if (record.id !== similar.id) await save({ id: record.id, alias: similar.id }, false);
+    } else {
+      target = { ...record, summary, summaryEmbedding };
+      await save(target, false);
+    }
+    if (description) {
+      await api.save_recipes({ recipes: [{ id: target.id, description, tags }] });
+    } else if (!target.memory) {
+      const info = await composio.tools.getRawComposioToolBySlug(record.tool).catch(() => ({}));
+      await api.save_recipes({
+        recipes: [{ id: target.id, description: autoRecipe(info, record.tool, record.args), tags: [info.toolkit?.slug].filter(Boolean), auto: true }],
+      });
+    }
+    return summary;
   }
 
   const api = {
@@ -84,19 +182,24 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       };
     },
 
+    // The English version and bilingual key terms of a non-English query ({ en, terms }), or null.
+    translate,
+
     // Memory first (ready-made calls with args), plain Composio search as fallback.
+    // A non-English query is matched in its language and in English: recipes and summaries are mostly English.
     async search({ query, limit = 5 }) {
-      const vector = await embed(query);
+      const english = await translate(query);
+      const vector = await embed(english?.en ? `${query}\n${english.en}` : query).catch(() => null);
       const memories = vector
         ? (await store.all())
             .map((row) => open(row.blob))
-            .filter((r) => r.memory?.embedding)
+            .filter((r) => r.memory?.embedding && !r.alias)
             // Best of: how the recipe is described, and what its result was about.
-            .map((r) => ({ ...r, score: Math.max(...[r.memory.embedding, r.summaryEmbedding].filter(Boolean).map((e) => cosine(vector, e))) }))
-            .filter((r) => r.score >= minScore)
+            .map((r) => ({ r, score: Math.max(...[r.memory.embedding, r.summaryEmbedding].filter(Boolean).map((e) => cosine(vector, e))) }))
+            .filter(({ score }) => score >= minScore)
             .sort((a, b) => b.score - a.score)
             .slice(0, limit)
-            .map((r) => ({
+            .map(({ r, score }) => ({
               id: r.id,
               tool: r.tool,
               args: r.args,
@@ -105,12 +208,12 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
               summary: r.summary,
               when: r.created_at,
               status: r.memory.status,
-              score: Number(r.score.toFixed(2)),
+              score: Number(score.toFixed(2)),
             }))
         : [];
       if (memories.some((m) => m.status === "valid" && m.score >= strongScore)) return memories;
 
-      const tools = await composio.tools.getRawComposioTools({ search: query, limit });
+      const tools = await composio.tools.getRawComposioTools({ search: english?.en ?? query, limit });
       const found = tools.map((t) => ({
         id: null,
         tool: t.slug,
@@ -148,45 +251,37 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       };
       if (!result.successful) return { result, ...outdated }; // failed calls are not recipes
 
-      // Same tool and args with the same result (identical, or a near-identical summary): update that recipe.
-      // A different result, e.g. a new latest email, becomes a new recipe.
+      // The result goes back now; summary, embedding and the recipe are saved after (see remember).
+      // Repeating a recipe with its own args answers with its id; a new call gets an id of its own right away.
       const digest = createHash("sha256").update(JSON.stringify(result.data)).digest("hex");
-      const sameCall = (await store.all())
-        .map((row) => open(row.blob))
-        .filter((r) => r.tool === tool && JSON.stringify(r.args) === JSON.stringify(args));
-      let record = sameCall.find((r) => r.digest === digest && r.summaryEmbedding);
-      if (!record) {
-        const summary = await summarize(tool, result.data);
-        const summaryEmbedding = summary ? await embed(summary) : undefined;
-        const similar = sameCall.find(
-          (r) => r.digest === digest || (r.summaryEmbedding && summaryEmbedding && cosine(r.summaryEmbedding, summaryEmbedding) >= 0.9),
-        );
-        record = { ...(similar ?? { id: randomUUID(), tool, args }), created_at: new Date().toISOString(), digest, summary, summaryEmbedding };
-        await save(record);
+      const created_at = new Date().toISOString();
+      const repeat = previous && JSON.stringify(previous.args) === JSON.stringify(args);
+      const record = { id: repeat ? previous.id : randomUUID(), tool, args, created_at, digest };
+      if (repeat && previous.digest === digest) {
+        later(save({ ...previous, created_at }));
+        return { id: record.id, result, summary: previous.summary, ...outdated };
       }
-      const { summary } = record;
-
-      if (description) {
-        const [saved] = await api.save_recipes({ recipes: [{ id: record.id, description, tags }] });
-        return { id: record.id, result, summary, saved, ...outdated };
-      }
-      if (!record.memory) {
-        const info = await composio.tools.getRawComposioToolBySlug(tool);
-        await api.save_recipes({
-          recipes: [{ id: record.id, description: autoRecipe(info, tool, args), tags: [info.toolkit?.slug].filter(Boolean), auto: true }],
-        });
-      }
+      if (repeat) record.id = randomUUID(); // a new result of a known call: a new recipe, merged later if it is the same
+      await save(record, false);
+      const summary = remember(record, result.data, { description, tags });
+      later(summary);
       return {
         id: record.id,
         result,
-        summary,
+        summary: null, // being written; `pending` resolves to it
+        pending: summary.catch(() => null),
         ...outdated,
-        ...((!record.memory || record.memory.auto) && {
+        ...(!description && {
           note:
             "Saved as a recipe with Composio's generic description. Optional: improve it with save_recipes " +
             "(the user's intent in plain words, what it returns, pitfalls, tags in English and Russian).",
         }),
       };
+    },
+
+    // Waits for recipes still being saved (the CLI calls it before exiting).
+    async flush() {
+      await Promise.all([...pending]);
     },
 
     // Full argument schema of a tool, for the agent.
@@ -200,13 +295,13 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     async save_recipes({ recipes }) {
       return Promise.all(
         recipes.map(async ({ id, description, tags = [], status = "valid", auto }) => {
-          const record = await load(id);
+          const record = await load(id); // an alias resolves to the recipe it was merged into
           const created_at = new Date().toISOString();
           const embedding = await embed(
             `${description}\nresult: ${record.summary ?? ""}\ntags: ${tags.join(", ")}\ntool: ${record.tool}\nargs: ${JSON.stringify(record.args)}`,
           );
           await save({ ...record, memory: { created_at, tags, description, status, embedding, ...(auto && { auto }) } });
-          return { id, created_at, tags, description, status };
+          return { id: record.id, created_at, tags, description, status };
         }),
       );
     },
@@ -214,10 +309,32 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
   return api;
 }
 
+const decrypted = new Map(); // "<user>:<blob prefix>" -> record, shared by every genter in the process
+const translations = new Map(); // query -> Promise<{ en, terms } | null>
+
+// Embeddings are stored as base64 float32 (8 KB instead of ~30 KB of JSON numbers each); older records keep arrays.
+const VECTORS = ["summaryEmbedding"];
+function pack(record) {
+  const out = { ...record };
+  for (const key of VECTORS) if (out[key]) out[key] = toB64(out[key]);
+  if (out.memory?.embedding) out.memory = { ...out.memory, embedding: toB64(out.memory.embedding) };
+  return out;
+}
+function unpack(record) {
+  for (const key of VECTORS) if (typeof record[key] === "string") record[key] = fromB64(record[key]);
+  if (typeof record.memory?.embedding === "string") record.memory.embedding = fromB64(record.memory.embedding);
+  return record;
+}
+const toB64 = (v) => (typeof v === "string" ? v : Buffer.from(Float32Array.from(v).buffer).toString("base64"));
+const fromB64 = (s) => {
+  const b = Buffer.from(s, "base64"); // may sit unaligned in Node's pool: copy before viewing as floats
+  return new Float32Array(Uint8Array.from(b).buffer);
+};
+
 // A recipe in Markdown from Composio's generic tool description.
 function autoRecipe(info, tool, args) {
   const keys = Object.keys(args).join(", ");
-  return `### ${info.name || tool}\n\n\`${tool}\` · args: \`{${keys}}\`\n\n${(info.description ?? "").trim()}`;
+  return `### ${info?.name || tool}\n\n\`${tool}\` · args: \`{${keys}}\`\n\n${(info?.description ?? "").trim()}`;
 }
 
 // AES-256-GCM. Blob = iv (12 bytes) + auth tag (16 bytes) + ciphertext, base64.
