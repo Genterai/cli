@@ -128,16 +128,20 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       };
       if (!result.successful) return { result, ...outdated }; // failed calls are not recipes
 
-      // Same tool, args and result already saved: reuse that recipe instead of a duplicate.
+      // Same tool and args with the same result (identical, or a near-identical summary): update that recipe.
+      // A different result, e.g. a new latest email, becomes a new recipe.
       const digest = createHash("sha256").update(JSON.stringify(result.data)).digest("hex");
-      const same = (await store.all())
+      const sameCall = (await store.all())
         .map((row) => open(row.blob))
-        .find((r) => r.tool === tool && JSON.stringify(r.args) === JSON.stringify(args) && r.digest === digest);
-      let record = same ?? { id: randomUUID(), tool, args, created_at: new Date().toISOString(), digest };
-      if (!record.summaryEmbedding) {
-        // New call, or one saved by an older version without a searchable summary: (re)write the summary.
+        .filter((r) => r.tool === tool && JSON.stringify(r.args) === JSON.stringify(args));
+      let record = sameCall.find((r) => r.digest === digest && r.summaryEmbedding);
+      if (!record) {
         const summary = await summarize(tool, result.data);
-        record = { ...record, summary, summaryEmbedding: summary ? await embed(summary) : undefined };
+        const summaryEmbedding = summary ? await embed(summary) : undefined;
+        const similar = sameCall.find(
+          (r) => r.digest === digest || (r.summaryEmbedding && summaryEmbedding && cosine(r.summaryEmbedding, summaryEmbedding) >= 0.9),
+        );
+        record = { ...(similar ?? { id: randomUUID(), tool, args }), created_at: new Date().toISOString(), digest, summary, summaryEmbedding };
         await save(record);
       }
       const { summary } = record;
