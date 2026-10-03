@@ -140,6 +140,12 @@ like it. `write` with `edits` + `message` does it with no model step; in a run t
 `edit_file` tool, never with the whole file. Neither the read nor the commit is saved as a recipe
 (`execute({ remember: false })`).
 
+A file is read with the agent's `read_file` tool (a reference number, or owner + repo + path + branch): its text, cut
+at 20 000 characters, or a folder's entries, with a reference to cite and to edit. It is built in because tool search
+does not surface it ("read file" finds READMEs and gists, not `GITHUB_GET_REPOSITORY_CONTENT`), so a task like "find the
+recent commits, read their files, write a note" no longer stops at "there is no tool to read files". An answer that
+gives up on a part for want of a tool is sent back once, on the strong model, to find the tool and do it.
+
 ### Test scenarios
 
 `npm test` runs them with no keys: the model and the apps are stand-ins; the catalogues of the other apps are real
@@ -156,6 +162,7 @@ Composio schemas (`test/fixtures/catalogues.json`: Linear, Slack, Jira, Trello, 
 | S19–S20 | sync | knowledge hits of a GitHub project and of Google Tasks lists carry part, item and `where` |
 | A1–A3 | agent, GitHub | find → references → the agent sends only edits (`edit_file`), the file is read and committed once at its sha; `write` with edits and no model step; edits refused in a find; write at a link with no run |
 | A4–A7 | agent, other apps | an exact Gmail reply with no model call; Linear through its catalogue; a catalogue too slow for the answer; an answer with no marks |
+| R1–R5 | agent, reading files | `read_file` by owner, repo and path in a find: the text, a file reference, no recipe; a folder's entries; a missing file is an error; "no tool to read files" is sent back once on the strong model, never twice; a viewer cannot read |
 | A8–A10 | refused | a number without its run, an unknown number, a tool of another app, a viewer; `GENTER_WRITE` only where writing is on |
 
 ## Ready recipes
