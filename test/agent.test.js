@@ -44,45 +44,83 @@ describe("GitHub project: find, see the cited paths, write there", () => {
     const text = agentResultText(out, { write: true });
     assert.match(text, /References:\n\[1\] github file Genterai\/genter-cli\/src\/sync\.js — https:\/\/github\.com\/Genterai\/genter-cli\/blob\/main\/src\/sync\.js/);
     assert.match(text, /where \{"owner":"Genterai","repo":"genter-cli","path":"src\/sync\.js","branch":"main"\}/);
-    assert.match(text, /write GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS\(message, content\)/);
+    assert.match(text, /edit  \{edits: \[\{find, replace\}\], message\}: one commit, only those pieces change\n    write GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS\(message, content\)/);
     assert.match(text, /GENTER_WRITE \{run_id, ref: n, change\}/);
     assert.doesNotMatch(agentResultText(out), /write GITHUB_/); // without GENTER_WRITE: references only
   });
 
-  it("A2 write at [1] of that find: the agent gets the file, its write tool with the args, reads it and commits it", async () => {
-    const genter = fakeGenter({
-      connected: ["github"],
-      knowledge: [chunk],
-      results: {
-        GITHUB_GET_REPOSITORY_CONTENT: { content: { path: "src/sync.js", sha: "s1", content: Buffer.from("const a = 1;\n").toString("base64"), encoding: "base64" } },
-        GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS: { commit: { sha: "c2", html_url: "https://github.com/Genterai/genter-cli/commit/c2" } },
-      },
-    });
+  // The synced file as GitHub's contents API returns it.
+  const contents = (text, sha = "s1") => ({ content: { path: "src/sync.js", sha, content: Buffer.from(text).toString("base64"), encoding: "base64" } });
+  const file = "// paging\nconst limit = 10;\nexport default limit;\n";
+  const findThenAgent = async (results) => {
+    const genter = fakeGenter({ connected: ["github"], knowledge: [chunk], results });
     const agent = agentWith(genter);
     model = fakeModel([answer("Paging stops at a short page [1].")]);
     const found = await agent.start({ task: "when does paging stop?", mode: "find" });
     model.restore();
+    return { genter, agent, found };
+  };
+  const committed = (genter) => {
+    const commit = genter.executed.find((e) => e.tool === "GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS");
+    return commit && { ...commit, text: Buffer.from(commit.args.content, "base64").toString() };
+  };
 
+  it("A2 write at [1] of that find: the agent sends only the pieces to change, the file is read and committed once", async () => {
+    const { genter, agent, found } = await findThenAgent({ GITHUB_GET_REPOSITORY_CONTENT: contents(file), GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS: { commit: { sha: "c2", html_url: "https://github.com/Genterai/genter-cli/commit/c2" } } });
     let note;
     model = fakeModel([
       (body) => {
         note = lastOf(body, "user");
-        return call("execute", { tool: "GITHUB_GET_REPOSITORY_CONTENT", args: { owner: "Genterai", repo: "genter-cli", path: "src/sync.js", ref: "main" } });
+        return call("edit_file", { ref: 1, edits: [{ find: "const limit = 10;", replace: "const limit = 20;" }], message: "Raise the page limit" });
       },
-      call("execute", { tool: "GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS", args: { owner: "Genterai", repo: "genter-cli", path: "src/sync.js", branch: "main", message: "docs: note on paging", content: "// Paging: see README\nconst a = 1;\n" } }),
-      answer("Committed the note to src/sync.js [1]: https://github.com/Genterai/genter-cli/commit/c2"),
+      (body) => {
+        assert.deepEqual(JSON.parse(lastOf(body, "tool")), { ref: 1, committed: true, summary: "1 edit committed to Genterai/genter-cli/src/sync.js (4 → 4 lines)", commit: "https://github.com/Genterai/genter-cli/commit/c2" });
+        return answer("Raised the limit to 20 in src/sync.js [1]: https://github.com/Genterai/genter-cli/commit/c2");
+      },
     ]);
-    const out = await agent.write({ run_id: found.run_id, ref: 1, change: "add a comment line on top: // Paging: see README" });
+    const out = await agent.write({ run_id: found.run_id, ref: 1, change: "raise the page limit to 20" });
 
     assert.match(note, /^Write at \[1\]: github file Genterai\/genter-cli\/src\/sync\.js \(https:\/\/github\.com\/Genterai\/genter-cli\/blob\/main\/src\/sync\.js\)/);
-    assert.match(note, /- GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS \{"owner":"Genterai","repo":"genter-cli","path":"src\/sync\.js","branch":"main"\} \+ message, content/);
-    assert.match(note, /What is there now: GITHUB_GET_REPOSITORY_CONTENT \{"owner":"Genterai","repo":"genter-cli","path":"src\/sync\.js","ref":"main"\}/);
-    assert.match(note, /Change: add a comment line on top/);
-    // The find went on as a run, so the commit was not refused as a write in a read-only find.
-    assert.deepEqual(genter.executed.map((e) => e.tool), ["GITHUB_GET_REPOSITORY_CONTENT", "GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS"]);
+    assert.match(note, /Change this file with edit_file \{ref: 1, edits: \[\{find: .*never write the whole file out/);
+    assert.match(note, /read the file first: GITHUB_GET_REPOSITORY_CONTENT \{"owner":"Genterai","repo":"genter-cli","path":"src\/sync\.js","ref":"main"\}/);
+    assert.match(note, /Change: raise the page limit to 20/);
+    // Read, then one commit of the whole new text at the sha it was read at; neither saved as a recipe.
+    assert.deepEqual(genter.executed.map((e) => [e.tool, e.remember]), [["GITHUB_GET_REPOSITORY_CONTENT", false], ["GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS", false]]);
+    const commit = committed(genter);
+    assert.equal(commit.text, "// paging\nconst limit = 20;\nexport default limit;\n");
+    assert.deepEqual({ ...commit.args, content: undefined }, { owner: "Genterai", repo: "genter-cli", path: "src/sync.js", branch: "main", message: "Raise the page limit", sha: "s1", content: undefined });
     assert.equal(out.status, "done");
     assert.equal(out.run_id, found.run_id);
     assert.equal(out.references[0].path, "src/sync.js");
+  });
+
+  it("A2b GENTER_WRITE with edits: one commit with no model step; a find that is not there commits nothing", async () => {
+    const { genter, agent, found } = await findThenAgent({ GITHUB_GET_REPOSITORY_CONTENT: contents(file), GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS: { commit: { html_url: "https://github.com/Genterai/genter-cli/commit/c3" } } });
+    model = fakeModel([]); // any model call fails the test
+    const out = await agent.write({ run_id: found.run_id, ref: 1, edits: [{ append: "// see README\n" }], message: "Point to the README" });
+    assert.equal(out.status, "done");
+    assert.equal(out.usage.llm_calls, 0);
+    assert.equal(out.answer, "1 edit committed to Genterai/genter-cli/src/sync.js (4 → 5 lines). Commit: https://github.com/Genterai/genter-cli/commit/c3");
+    assert.equal(committed(genter).text, `${file}// see README\n`);
+
+    genter.executed.length = 0;
+    const missed = await agent.write({ run_id: found.run_id, ref: 1, edits: [{ find: "const limit = 99;", replace: "x" }], message: "m" });
+    assert.equal(missed.status, "failed");
+    assert.match(missed.answer, /^Not committed: edit 1: find is not in the file; lines like it: 2: "const limit = 10;"/);
+    assert.deepEqual(genter.executed.map((e) => e.tool), ["GITHUB_GET_REPOSITORY_CONTENT"]);
+  });
+
+  it("A2c a find never edits: edit_file is refused there like any write", async () => {
+    const genter = fakeGenter({ connected: ["github"], knowledge: [chunk] });
+    model = fakeModel([
+      call("edit_file", { ref: 1, edits: [{ append: "x" }], message: "m" }),
+      (body) => {
+        assert.match(lastOf(body, "tool"), /^Not allowed: editing a file changes it and this is a read-only find/);
+        return answer("I can only read here [1].");
+      },
+    ]);
+    await agentWith(genter).start({ task: "add x to src/sync.js", mode: "find" });
+    assert.equal(genter.executed.length, 0);
   });
 
   it("A3 write at a link with no run: a new run starts with the place and its write tools in the briefing", async () => {
@@ -203,6 +241,7 @@ describe("Writes that are refused", () => {
     await assert.rejects(agent.write({ run_id: found.run_id, ref: 7, change: "x" }), /has no reference \[7\]; it has \[1\]\.\.\[1\]/);
     await assert.rejects(agent.write({ run_id: found.run_id, ref: 1, tool: "SLACK_SEND_MESSAGE", args: {} }), /not a github tool/);
     await assert.rejects(agent.write({ run_id: found.run_id, ref: 1 }), /Pass change/);
+    await assert.rejects(agent.write({ edits: [{ append: "x" }], message: "m" }), /Pass ref/);
     await assert.rejects(agent.write({ ref: "https://example.com/x", change: "x" }), /Unknown place/);
     assert.equal(genter.executed.length, 0);
   });
@@ -222,5 +261,6 @@ describe("Writes that are refused", () => {
     assert.equal(tool.annotations.readOnlyHint, false);
     assert.deepEqual(tool.input.parse({ run_id: "r", ref: 3, change: "x" }), { run_id: "r", ref: 3, change: "x" });
     assert.deepEqual(tool.input.parse({ ref: "https://github.com/a/b/issues/1", tool: "GITHUB_CREATE_AN_ISSUE_COMMENT", args: { body: "hi" } }).args, { body: "hi" });
+    assert.deepEqual(tool.input.parse({ run_id: "r", ref: 1, edits: [{ find: "a", replace: "b" }, { append: "c" }], message: "m" }).edits, [{ find: "a", replace: "b" }, { append: "c" }]);
   });
 });

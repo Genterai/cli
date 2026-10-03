@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { citedRefs, refFromUrl, refLabel, refsOfResult, shapeRef, writeHints } from "../src/refs.js";
+import { applyEdits, citedRefs, fileEditor, refFromUrl, refLabel, refsOfResult, shapeRef, writeHints } from "../src/refs.js";
 import { catalogues } from "./helpers.js";
 
 // The references of one call's result, numbered like the agent numbers them.
@@ -43,7 +43,14 @@ describe("GitHub: a project synced as knowledge", () => {
     assert.equal(commit.tool, "GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS");
     assert.deepEqual(commit.args, { owner: "Genterai", repo: "genter-cli", path: "src/sync.js", branch: "main" });
     assert.deepEqual(commit.needs, ["message", "content"]);
-    assert.deepEqual(commit.read, { tool: "GITHUB_GET_REPOSITORY_CONTENT", args: { owner: "Genterai", repo: "genter-cli", path: "src/sync.js", ref: "main" } });
+    // Changing it takes only edits: it is read here and committed whole, with the sha it was read at.
+    const editor = fileEditor(ref);
+    assert.deepEqual(editor.read, { tool: "GITHUB_GET_REPOSITORY_CONTENT", args: { owner: "Genterai", repo: "genter-cli", path: "src/sync.js", ref: "main" } });
+    const { tool, args } = editor.write({ text: "SGVsbG8=", sha: "s1", message: "m" });
+    assert.equal(tool, "GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS");
+    assert.equal(Buffer.from(args.content, "base64").toString(), "SGVsbG8="); // a text that looks like base64 stays text
+    assert.deepEqual({ ...args, content: undefined }, { owner: "Genterai", repo: "genter-cli", path: "src/sync.js", branch: "main", message: "m", sha: "s1", content: undefined });
+    assert.equal(fileEditor(shapeRef({ app: "github", url: "https://github.com/a/b/issues/1" })), null);
   });
 
   it("S1 an item synced before items kept `where`: the path comes from the item id, owner/repo/branch from the recipe", () => {
@@ -228,6 +235,26 @@ describe("Any other app: write tools found in its own catalogue", () => {
     assert.deepEqual(writeHints(ref), []);
     assert.deepEqual(writeHints(ref, [{ slug: "UNKNOWNAPP_SEND_EMAIL", inputParameters: { properties: { to: {} }, required: ["to"] } }]), []);
     assert.deepEqual(writeHints(ref, catalogues.linear.tools), []); // another app's tools are never offered
+  });
+});
+
+describe("Editing a file: only the pieces that change", () => {
+  const file = "import a from \"a\";\n\nexport const limit = 10;\nexport const pages = 100;\n";
+  it("E1 find/replace changes the one place it is at, append adds at the end, the rest stays byte for byte", () => {
+    const out = applyEdits(file, [{ find: "export const limit = 10;", replace: "export const limit = 20;" }, { append: "export const max = 5;\n" }]);
+    assert.equal(out, "import a from \"a\";\n\nexport const limit = 20;\nexport const pages = 100;\nexport const max = 5;\n");
+    assert.equal(applyEdits("x", [{ append: "y" }]), "x\ny");
+    assert.equal(applyEdits(file, [{ find: "\nexport const pages = 100;", replace: "" }]), "import a from \"a\";\n\nexport const limit = 10;\n");
+  });
+  it("E2 a CRLF file keeps its line endings", () => {
+    assert.equal(applyEdits("a\r\nb\r\n", [{ find: "a\nb", replace: "x\ny" }, { append: "z\n" }]), "x\r\ny\r\nz\r\n");
+  });
+  it("E3 a find that is not there, or there twice, changes nothing and says why", () => {
+    assert.throws(() => applyEdits(file, [{ find: "export const limit = 10; ", replace: "" }]), /edit 1: find is not in the file; lines like it: 3: "export const limit = 10;"/);
+    assert.throws(() => applyEdits(file, [{ find: "export const", replace: "const" }]), /find is in the file 2 times/);
+    assert.throws(() => applyEdits(file, [{ find: "", replace: "x" }]), /find is empty/);
+    assert.throws(() => applyEdits(file, []), /edits is empty/);
+    assert.throws(() => applyEdits("a\u0000b", [{ append: "c" }]), /binary/);
   });
 });
 

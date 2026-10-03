@@ -103,6 +103,7 @@ Paging stops at the first page shorter than the page size [1].
 References:
 [1] github file Genterai/genter-cli/src/sync.js — https://github.com/Genterai/genter-cli/blob/main/src/sync.js
     where {"owner":"Genterai","repo":"genter-cli","path":"src/sync.js","branch":"main"}
+    edit  {edits: [{find, replace}], message}: one commit, only those pieces change
     write GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS(message, content)
 ```
 
@@ -121,14 +122,23 @@ that needs the id of something else is left out.
 ```bash
 genter find '{"question":"when does paging stop in genter-cli?"}'
 genter write '{"run_id":"...","ref":1,"change":"add a comment line on top: // Paging: see README"}'
+genter write '{"run_id":"...","ref":1,"edits":[{"find":"const limit = 10;","replace":"const limit = 20;"}],"message":"Raise the limit"}'
 genter write '{"run_id":"...","ref":3,"tool":"GMAIL_REPLY_TO_THREAD","args":{"message_body":"Thursday works"}}'
 genter write '{"ref":"https://github.com/Genterai/genter-cli/issues/42","change":"comment: fixed in #43"}'
 ```
 
 With `change`, the run goes on (it knows what it found, a find goes on as a run) with the place and its write tools,
-args filled in, in front of the model; a file is read first and written whole. With `tool` + `args`, that exact call
-runs at once with the reference's args under the given ones: no model step. A link works without a run: GitHub files,
-folders, issues, pull requests and repositories, Notion pages, Gmail threads, Calendar events.
+args filled in, in front of the model. With `tool` + `args`, that exact call runs at once with the reference's args
+under the given ones: no model step. A link works without a run: GitHub files, folders, issues, pull requests and
+repositories, Notion pages, Gmail threads, Calendar events.
+
+A file is changed by `edits`, not written out. An API commit always carries the whole new file (GitHub's contents and
+git data APIs have no patch), but nobody has to type it: the file is read (its text and sha), each `{find, replace}`
+replaces the one exact place it is at (`{append}` adds at the end, line endings are kept), and the result is committed
+once with the sha it was read at. A `find` that is not there, or is there twice, commits nothing and names the lines
+like it. `write` with `edits` + `message` does it with no model step; in a run the agent does the same with its
+`edit_file` tool, never with the whole file. Neither the read nor the commit is saved as a recipe
+(`execute({ remember: false })`).
 
 ### Test scenarios
 
@@ -137,13 +147,14 @@ Composio schemas (`test/fixtures/catalogues.json`: Linear, Slack, Jira, Trello, 
 
 | | scenario | what must hold |
 | --- | --- | --- |
-| S1–S4 | GitHub: a synced file, issue, pull request, repository; a file read live; links | path, link, `where`; the commit, comment or update tool with owner, repo, path or number filled |
+| S1–S4 | GitHub: a synced file, issue, pull request, repository; a file read live; links | path, link, `where`; the commit, comment or update tool with owner, repo, path or number filled; how the file is read and committed |
+| E1–E3 | edits of a file | one exact place per `find`, `append`, CRLF kept; not found or found twice: nothing changes, lines like it are named |
 | S5–S9 | Notion, Gmail (a list and synced mail), Calendar, Google Tasks | page id; thread and sender; calendar and event; task list and task |
 | S10–S15 | Linear, Slack, Jira, Trello, Airtable, HubSpot, from their catalogues | the right tool and id param; a channel or base only in the list's args still lands; no delete, archive or bulk; list filters never written back |
 | S16–S17 | an item of another kind, an unknown app | never the id of another kind; no hints and no error |
 | S18 | citations | `[n]`, `[n, m]` in order; no marks: what the answer names, then the round's calls, then the closest knowledge |
 | S19–S20 | sync | knowledge hits of a GitHub project and of Google Tasks lists carry part, item and `where` |
-| A1–A3 | agent, GitHub | find → references with write tools → write via the agent (read, then commit); write at a link with no run |
+| A1–A3 | agent, GitHub | find → references → the agent sends only edits (`edit_file`), the file is read and committed once at its sha; `write` with edits and no model step; edits refused in a find; write at a link with no run |
 | A4–A7 | agent, other apps | an exact Gmail reply with no model call; Linear through its catalogue; a catalogue too slow for the answer; an answer with no marks |
 | A8–A10 | refused | a number without its run, an unknown number, a tool of another app, a viewer; `GENTER_WRITE` only where writing is on |
 

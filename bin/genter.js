@@ -59,7 +59,7 @@ if (!tools[name] && !agentCommands[name]) {
   console.log(`  ${"run".padEnd(14)} {task, account?}: an agent does the task in your apps, recipes first`);
   console.log(`  ${"find".padEnd(14)} {question, account?}: read-only agent, answers from past results and live data`);
   console.log(`  ${"continue".padEnd(14)} {run_id, message}: answer a run's question or give a follow-up`);
-  console.log(`  ${"write".padEnd(14)} {run_id, ref, change} or {run_id, ref, tool, args}: write where a result's reference [n] (or a link) points\n`);
+  console.log(`  ${"write".padEnd(14)} {run_id, ref, change}, {run_id, ref, edits, message} (a file) or {run_id, ref, tool, args}: write where a reference [n] (or a link) points\n`);
   for (const [tool, { description }] of Object.entries(tools)) console.log(`  ${tool.padEnd(14)} ${description}`);
   console.log(`\nKeys: genter login '{"composio_api_key":"...","openrouter_api_key":"...","user_id":"me"}'`);
   console.log("or env COMPOSIO_API_KEY, OPENROUTER_API_KEY, GENTER_USER_ID");
