@@ -29,7 +29,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     return (await res.json()).data[0].embedding;
   }
 
-  return {
+  const api = {
     // Returns a Composio link the user opens to connect an app (gmail, github, ...).
     // callback_url: where Composio sends the user afterwards (with ?status=success|failed).
     async register_tool({ toolkit, callback_url }) {
@@ -81,10 +81,11 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       return [...memories, ...found];
     },
 
-    // Run a tool. Pass `id` to repeat a remembered call (args are merged on top).
-    async execute({ id, tool, args = {} }) {
-      if (id) {
-        const previous = await load(id);
+    // Run a tool. Pass `id` to repeat a saved recipe (args are merged on top).
+    // Pass `description` (and `tags`) to save the recipe in the same call.
+    async execute({ id, tool, args = {}, description, tags }) {
+      const previous = id && (await load(id));
+      if (previous) {
         tool ??= previous.tool;
         args = { ...previous.args, ...args };
       }
@@ -92,12 +93,31 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       const result = await composio.tools.execute(tool, { userId, arguments: args, dangerouslySkipVersionCheck: true });
       const record = { id: randomUUID(), tool, args, created_at: new Date().toISOString() };
       await save(record);
-      return { id: record.id, result, next: "Call add_memory with this id within an hour, or the call is forgotten." };
+
+      if (description && result.successful) {
+        return { id: record.id, result, saved: await api.save_recipe({ id: record.id, description, tags }) };
+      }
+      if (previous?.memory) {
+        return { id: record.id, result, next: `If this result does not match the saved description, call save_recipe with id ${id} and status "outdated" saying what changed.` };
+      }
+      return {
+        id: record.id,
+        result,
+        next: {
+          required: "Until saved, search will not find this call (unsaved calls are deleted after an hour).",
+          tool: "save_recipe",
+          args: {
+            id: record.id,
+            description: `<Verb> <object> — ${tool}, args: {${Object.keys(args).join(", ")}}. Returns <what and in what form>. For another target override <args>.`,
+            tags: [tool.split("_")[0].toLowerCase(), "<tags in English and Russian>"],
+          },
+        },
+      };
     },
 
-    // Describe what a call returned. The description is embedded for search.
-    // Use status "outdated" when a remembered call no longer does what its description says.
-    async add_memory({ id, description, tags = [], status = "valid" }) {
+    // Save a reusable recipe for a call: the description is embedded for search.
+    // Use status "outdated" when a saved recipe no longer does what its description says.
+    async save_recipe({ id, description, tags = [], status = "valid" }) {
       const record = await load(id);
       const created_at = new Date().toISOString();
       const embedding = await embed(`${description}\ntags: ${tags.join(", ")}\ntool: ${record.tool}\nargs: ${JSON.stringify(record.args)}`);
@@ -105,6 +125,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       return { id, created_at, tags, description, status };
     },
   };
+  return api;
 }
 
 // AES-256-GCM. Blob = iv (12 bytes) + auth tag (16 bytes) + ciphertext, base64.
