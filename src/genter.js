@@ -11,8 +11,9 @@ import { createSources, inferList } from "./sync.js";
 // Records are encrypted before they reach the store, so the store only sees rows { id, remembered, blob }
 // and needs: get(id), put(row), all() (remembered rows).
 // knowledge (optional) stores sources, see sync.js; without it there are no sources.
+// onSync(source, { reason }) (optional) is told about every sync run: manual, trigger, schedule or live.
 // triggers: true only where Composio's webhook reaches this code (the hosted backend); the CLI can not receive events.
-export function createGenter({ composioApiKey, openrouterApiKey, userId, secret, store, knowledge, triggers = false, defer, minScore = 0.25, strongScore = 0.45 }) {
+export function createGenter({ composioApiKey, openrouterApiKey, userId, secret, store, knowledge, triggers = false, defer, onSync, minScore = 0.25, strongScore = 0.45 }) {
   if (!secret) throw new Error("secret is required to encrypt stored calls");
   const composio = new Composio({ apiKey: composioApiKey });
   const { seal, open: decrypt } = cipher(`${secret}:${userId}`);
@@ -133,6 +134,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
         return composio.tools.execute(tool, { userId, arguments: args, ...(id && { connectedAccountId: id }), dangerouslySkipVersionCheck: true });
       },
       embedMany,
+      onSync,
       triggers: triggers && {
         create: async (slug, config, account) => {
           const id = await accountId(account, { strict: false });
@@ -467,7 +469,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       }
       const plan = record.kind === "sync" ? record.sync : record.live;
       const source = await sources.create({ template: record.id, scope: {}, account, recipe_of: record.id });
-      const synced = await sources.sync({ id: source.id, budgetMs });
+      const synced = await sources.sync({ id: source.id, budgetMs, reason: once ? "manual" : "live" });
       if (once) return synced;
       if (plan.triggers?.length) {
         const watched = await sources.watch({ id: source.id }).catch((e) => ({ watching: [], watch_error: e.message }));

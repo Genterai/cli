@@ -147,6 +147,7 @@ import { tools } from "genter-cli/tools";
 
 const genter = createGenter({ composioApiKey, openrouterApiKey, userId, secret, store, knowledge }); // store: get(id), put(row), all()
 // knowledge (optional, for sources): getSource, putSource, deleteSource, sources, items, putItems, deleteItems, allItems
+// onSync(source, { reason }) (optional): called after every sync run (manual, trigger, schedule, live), e.g. to log it
 await genter.search({ query: "send a slack message" });
 ```
 

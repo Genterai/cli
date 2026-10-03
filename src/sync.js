@@ -148,7 +148,7 @@ export const DEPTHS = ["titles", "summary", "full"];
 
 // triggers (optional): create(slug, config, account) -> trigger id (re-enables the same one if it exists), disable(id), remove(id).
 // recipes (optional): saved live sync recipes, get(id) -> recipe | null, list() -> [{ id, recipe }].
-export function createSources({ run, embedMany, summarize, triggers, recipes, seal, open, store, namespace = "" }) {
+export function createSources({ run, embedMany, summarize, triggers, recipes, seal, open, store, namespace = "", onSync }) {
   const loadSource = async (id) => {
     const row = await store.getSource(id);
     if (!row) throw new Error(`Unknown source: ${id}`);
@@ -305,7 +305,7 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
     }
   }
 
-  async function syncNow(source, { budgetMs = 240_000 } = {}) {
+  async function syncNow(source, { budgetMs = 240_000, reason } = {}) {
     const template = await templateOf(source);
     const started = Date.now();
     const stats = { listed: 0, added: 0, updated: 0, removed: 0, unchanged: 0, failed: 0, errors: [] };
@@ -378,7 +378,10 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
     // A partial sync continues soon; a done or failed one waits for its next turn.
     if (source.schedule) source.schedule.next = new Date(Date.now() + (source.status === "partial" ? 60_000 : source.schedule.every * 60_000)).toISOString();
     await saveSource(source);
-    return publicSource(source);
+    const out = publicSource(source);
+    // The host logs every run (e.g. a feed of calls); a failing log never fails the sync.
+    if (onSync) await Promise.resolve(onSync(out, { reason: reason ?? "manual" })).catch(() => {});
+    return out;
   }
 
   async function embedChunks(title, chunks) {
@@ -522,7 +525,8 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
 
     // Brings a source up to date. Shared by concurrent callers; budgetMs stops early, the next sync continues.
     // again: if a sync is running, run once more after it (an event arrived mid-sync), instead of piling up.
-    async sync({ id, budgetMs, again = false }) {
+    // reason: why it runs (manual | trigger | schedule | live), passed on to onSync.
+    async sync({ id, budgetMs, again = false, reason }) {
       const key = `${namespace}:${id}`;
       if (running.has(key)) {
         if (again) rerun.add(key);
@@ -536,7 +540,7 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
           source.status = "syncing";
           source.sync_started_at = new Date().toISOString();
           await saveSource(source);
-          out = await syncNow(source, { budgetMs });
+          out = await syncNow(source, { budgetMs, reason });
         } while (rerun.has(key));
         return out;
       })().finally(() => running.delete(key));
@@ -601,7 +605,7 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
     async onTrigger({ triggerId, budgetMs }) {
       const ids = new Set([triggerId].flat().filter(Boolean));
       const hit = (await store.sources()).map((row) => open(row.blob)).filter((src) => (src.watch ?? []).some((w) => ids.has(w.id)));
-      return Promise.all(hit.map((src) => api.sync({ id: src.id, budgetMs, again: true })));
+      return Promise.all(hit.map((src) => api.sync({ id: src.id, budgetMs, again: true, reason: "trigger" })));
     },
 
     async remove({ id }) {
