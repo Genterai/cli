@@ -143,6 +143,8 @@ export function createBuilder({ genter, openrouterApiKey, model = process.env.BU
       scope: {},
       list,
       ...(read && { read, exclude: FILE_EXCLUDE, maxSize: 300_000 }),
+      // The connected account it was made from: Live sync runs on it, not on the app's default one.
+      ...(account && { account }),
       triggers,
       every: triggers.length ? null : 60,
     };
