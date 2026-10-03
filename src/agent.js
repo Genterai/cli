@@ -103,6 +103,26 @@ export function createAgent({
           keep: JSON.stringify({ ...short, note: "raw data not stored; execute this id again for details" }),
         };
       }
+      case "search_knowledge": {
+        const hits = await genter.knowledge({ query: input.query, limit: 8, source: input.source });
+        return { content: JSON.stringify(hits.map(compactHit)) };
+      }
+      case "add_source": {
+        if (!genter.sources) return { content: "Sources are not available here." };
+        if (!canExecute) return { content: "Not allowed: this user can search but not add sources." };
+        const source = await genter.sources.create({ template: input.template, scope: input.scope ?? {}, depth: input.depth, account: input.account ?? run.account });
+        onEvent({ type: "step", tool: "sync_source", input: { source: source.title } });
+        const synced = await genter.sources.sync({ id: source.id, budgetMs: 60000 });
+        onEvent({ type: "tool", tool: "sync_source", ok: synced.status !== "failed", summary: syncText(synced) });
+        return { content: JSON.stringify({ ...synced, note: syncText(synced) }) };
+      }
+      case "sync_source": {
+        if (!genter.sources) return { content: "Sources are not available here." };
+        if (!canExecute) return { content: "Not allowed: this user can search but not sync sources." };
+        const synced = await genter.sources.sync({ id: input.id, budgetMs: 60000 });
+        onEvent({ type: "tool", tool: "sync_source", ok: synced.status !== "failed", summary: syncText(synced) });
+        return { content: JSON.stringify({ ...synced, note: syncText(synced) }) };
+      }
       case "save_recipes": {
         const saved = await genter.save_recipes({ recipes: input.recipes ?? [] });
         return { content: JSON.stringify(saved.map(({ id, status }) => ({ id, status }))) };
@@ -181,14 +201,16 @@ export function createAgent({
     async start({ task, mode = "run", account }) {
       onEvent({ type: "step", tool: "search_recipes", input: { query: task } });
       const searched = Date.now();
-      const [found, connected, english] = await Promise.all([
+      const [found, connected, english, sources, knowledge] = await Promise.all([
         genter.search({ query: task, limit: 8 }).catch(() => []),
         genter.login().then((l) => l.connected ?? []).catch(() => []),
         genter.translate ? genter.translate(task) : null, // shared with search, so no second model call
+        genter.sources ? genter.sources.list().catch(() => []) : [],
+        genter.knowledge ? genter.knowledge({ query: task, limit: 6 }).catch(() => []) : [],
       ]);
       const search_ms = Date.now() - searched;
       const recipes = found.filter((r) => r.id);
-      onEvent({ type: "recipes", recipes: recipes.map(({ id, tool, description, summary, score, status, tags, when, args }) => ({ id, tool, description, summary, score, status, tags, when, args })) });
+      onEvent({ type: "recipes", recipes: recipes.map(({ id, tool, description, short, summary, score, status, tags, when, args }) => ({ id, tool, description, short, summary, score, status, tags, when, args })) });
       const run = {
         id: randomUUID(),
         task,
@@ -199,7 +221,7 @@ export function createAgent({
         recipes: Object.fromEntries(recipes.map((r) => [r.id, r.tool])),
         steps: [],
         timing: { search_ms },
-        messages: [{ role: "user", content: briefing({ task, mode, account, found, connected, canExecute, english }) }],
+        messages: [{ role: "user", content: briefing({ task, mode, account, found, connected, canExecute, english, sources, knowledge }) }],
       };
       return loop(run);
     },
@@ -260,7 +282,21 @@ function compactSchema(schema) {
   );
 }
 
-function briefing({ task, mode, account, found, connected, canExecute, english }) {
+// A knowledge chunk as the model sees it.
+const compactHit = (h) => ({ source: h.source_title, title: h.title, url: h.url, score: h.score, text: h.text.slice(0, 1200) });
+
+const syncText = (s) =>
+  s.status === "failed"
+    ? `Sync failed: ${s.last_run?.error ?? "unknown error"}`
+    : `${s.title}: ${s.stats.items} items, ${s.stats.chunks} chunks` +
+      (s.last_run ? ` (+${s.last_run.added} new, ${s.last_run.updated} updated, ${s.last_run.removed} removed${s.last_run.failed ? `, ${s.last_run.failed} failed` : ""})` : "") +
+      (s.status === "partial" ? `; ${s.last_run?.left ?? "some"} items left — it continues on the next sync (dashboard → Sources, or sync_source).` : "");
+
+const TEMPLATE_HELP =
+  'Templates: github {owner, repo, branch?, path?} — files of a repository; notion {query?} — pages shared with Genter. ' +
+  'depth: "titles" (names and links only, fast), "summary" (a short summary per item), "full" (whole text, default).';
+
+function briefing({ task, mode, account, found, connected, canExecute, english, sources = [], knowledge = [] }) {
   const recipes = found.filter((r) => r.id).map(compactFound);
   const tools = found.filter((r) => !r.id).map(compactFound);
   const apps = connected.map((c) => `${c.toolkit}${c.alias ? ` (${c.alias}${c.default ? ", default" : ""})` : ""}${c.status && c.status !== "ACTIVE" ? ` [${c.status}]` : ""}`);
@@ -274,6 +310,8 @@ function briefing({ task, mode, account, found, connected, canExecute, english }
     `Connected apps: ${apps.join(", ") || "none"}`,
     `Saved recipes matching the task (best first):\n${recipes.length ? JSON.stringify(recipes) : "none"}`,
     tools.length && `Candidate Composio tools:\n${JSON.stringify(tools)}`,
+    sources.length && `Synced sources: ${JSON.stringify(sources.map((s) => ({ id: s.id, title: s.title, toolkit: s.toolkit, depth: s.depth, status: s.status, items: s.stats.items, synced_at: s.synced_at })))}`,
+    knowledge.length && `Knowledge from synced sources matching the task (best first):\n${JSON.stringify(knowledge.map(compactHit))}`,
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -282,15 +320,16 @@ function briefing({ task, mode, account, found, connected, canExecute, english }
 const SYSTEM = `You are Genter's task agent. You act in the user's connected apps through Composio tools, and you are judged on speed: the fewest steps that give a correct, complete result.
 
 The first message already holds everything for a fast start: saved recipes that match the task (proven past calls with their args and a summary of what they returned), candidate Composio tools with their args, and the connected apps.
-- If a recipe's result_summary already answers the question, answer right away without calling anything.
+- If a recipe's result_summary or the knowledge from synced sources already answers the question, answer right away without calling anything; cite the titles and links.
+- Synced sources are an app's content kept searchable (a GitHub repo, Notion pages). Use search_knowledge for more of it. When the user asks to remember, index or keep an app's content up to date, call add_source; to refresh one, sync_source.
 - If a recipe fits, execute it by id and override only the args that differ. This is the fastest path.
 - Otherwise pick a candidate tool and execute it. Call get_tool_schema only when the args are unclear; call search_tools only when nothing fits.
 - Make independent calls in the same step (parallel). Chain only when a call needs another's output.
 - Never invent tool slugs or argument names: use only slugs from the first message, search results or error hints.
 - Keyword search in apps (Gmail q, Slack, Drive, Notion, GitHub search) matches literal words, and the data is often in another language than the request (English emails, Russian request). Put the key terms in both languages in one query, joined with OR, e.g. Gmail: ("объединенные знания" OR "unified knowledge" OR "merged knowledge"). The first message lists the terms.
 - An empty result is not an answer: retry once with translated or broader terms before saying nothing was found.
-- When you execute a tool that did not come from a recipe and it is a reusable step, pass description and tags so the next run finds it:
-  description is a general Markdown recipe: "### <Verb> <object>", a line "\`TOOL_SLUG\` · args: \`{a, b?}\`", what it returns, how to reuse it, "- pitfall: ..." bullets; tags in English and Russian.
+- When you execute a tool that did not come from a recipe and it is a reusable step, pass description, short and tags so the next run finds it:
+  description is a general Markdown recipe: "### <Verb> <object>", a line "\`TOOL_SLUG\` · args: \`{a, b?}\`", what it returns, how to reuse it, "- pitfall: ..." bullets; short is one line under 100 characters for lists; tags in English and Russian.
 - If a recipe returned something different from its description, save it again with status "outdated" (save_recipes) and say why.
 - An app the task needs is not connected: call connect_app and stop.
 - The task is ambiguous in a way that matters (which person, which account, an irreversible action on an unclear target): call ask_user with one short question. Otherwise do not ask; pick the sensible default.
@@ -299,6 +338,7 @@ Final answer: short and concrete, in the user's language. Include the names, ids
 
 const recipeFields = {
   description: { type: "string", description: "General Markdown recipe for this call (see instructions)" },
+  short: { type: "string", description: "One line under 100 characters for compact lists, e.g. 'Fetch unread emails from the inbox'" },
   tags: { type: "array", items: { type: "string" }, description: "Tags in English and Russian" },
 };
 
@@ -344,6 +384,30 @@ const TOOLS = [
       },
       required: ["recipes"],
     },
+  },
+  {
+    name: "search_knowledge",
+    description: "Search the synced sources (repos, Notion pages) by meaning. Returns the closest text chunks with titles and links.",
+    parameters: { type: "object", properties: { query: { type: "string" }, source: { type: "string", description: "Only this source id" } }, required: ["query"] },
+  },
+  {
+    name: "add_source",
+    description: `Remember an app's content as searchable knowledge and sync it now (a large one continues on later syncs). ${TEMPLATE_HELP}`,
+    parameters: {
+      type: "object",
+      properties: {
+        template: { type: "string", enum: ["github", "notion"] },
+        scope: { type: "object", additionalProperties: true, description: "Template fields, e.g. {owner, repo}" },
+        depth: { type: "string", enum: ["titles", "summary", "full"] },
+        account: { type: "string", description: "Connection alias or id when the app is connected several times" },
+      },
+      required: ["template", "scope"],
+    },
+  },
+  {
+    name: "sync_source",
+    description: "Bring a synced source up to date: only new and changed items are read.",
+    parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
   },
   {
     name: "connect_app",

@@ -32,7 +32,8 @@ Returns a list of messages. For other filters override `query`.
 - pitfall: bodies are truncated, open one with `GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID`
 ```
 
-plus tags in English and Russian. The MCP server sends these rules to clients as `instructions`.
+plus `short`, one line for compact lists (the Markdown is shown when a recipe is opened), and tags in English and Russian.
+The MCP server sends these rules to clients as `instructions`.
 
 ## Install
 
@@ -51,15 +52,16 @@ Without it, `search` uses Composio only.
 | --- | --- | --- |
 | `register_tool` | `{toolkit, alias?}` | `{toolkit, connect_url, connection_id}` — open the URL to connect the app; an app can be connected several times |
 | `login` | `{}` | `{user_id, connected: [{toolkit, account, alias, status}]}` |
-| `search` | `{query, limit?}` | `[{id, tool, args, description, summary, when, tags, status}]` |
-| `execute` | `{tool, args}` or `{id, args?}`, optional `{account, description, tags}` | `{id, result, summary, saved?, note?}` |
-| `save_recipes` | `{recipes: [{id, description, tags?, status?}]}` | `[{id, created_at, tags, description, status}]` |
+| `search` | `{query, limit?}` | `[{id, tool, args, description, short, summary, when, tags, status}]` |
+| `execute` | `{tool, args}` or `{id, args?}`, optional `{account, description, short, tags}` | `{id, result, summary, saved?, note?}` |
+| `save_recipes` | `{recipes: [{id, description, short?, tags?, status?}]}` | `[{id, created_at, tags, description, short, status}]` |
 
 ```bash
 genter register_tool '{"toolkit":"gmail"}'
 genter search '{"query":"unread emails from today"}'
 genter execute '{"tool":"GMAIL_FETCH_EMAILS","args":{"query":"is:unread newer_than:1d"},
   "description":"### Fetch unread emails\n`GMAIL_FETCH_EMAILS` · args: `{query, max_results?}`\nReturns a list of messages. For other filters override `query`.",
+  "short":"Fetch unread emails from the inbox",
   "tags":["gmail","inbox","почта","письма"]}'
 ```
 
@@ -84,6 +86,33 @@ const out = await agent.start({ task: "my meetings tomorrow", mode: "find" });
 await agent.send({ run_id: out.run_id, message: "only the work calendar" });
 ```
 
+## Sources
+
+A source keeps an app's content as searchable knowledge: the files of a GitHub repo, the pages shared with Genter in Notion.
+The agent sees the closest chunks before its first step, so a question about a repo is answered from it right away.
+
+```bash
+genter add_source '{"template":"github","scope":{"owner":"Genterai","repo":"genter-cli"},"depth":"full"}'
+genter sync_source '{"id":"src_..."}'
+genter knowledge '{"query":"how are recipes deduplicated?"}'
+genter run '{"task":"remember the Notion pages about the roadmap, summaries only"}'
+```
+
+The sync engine knows no connector. A template (`src/sync.js`) maps an app's tools onto roles: `list` (pages of items
+with an id and a version), `read` (an item's text) and optional `setup` (fills scope fields, e.g. the default branch).
+A sync lists everything, reads only the items whose version changed and drops the ones that are gone: the first sync
+is a full one, every next one is incremental, and a sync cut short by its time budget continues next time.
+
+| depth | what is kept | cost |
+| --- | --- | --- |
+| `titles` | names, paths and links; nothing is read | one list call per page |
+| `summary` | a 2-4 sentence summary per item | a read and a model call per changed item |
+| `full` | the whole text in chunks (default) | a read and embeddings per changed item |
+
+Changing the depth re-processes the items on the next sync. Chunks are encrypted like everything else.
+Limits: 3000 items and 100 list pages per source, 80 chunks per item; GitHub skips binaries, lockfiles, `node_modules`
+and files over 300 KB.
+
 ## Data
 
 - Raw tool results are never stored, only a 1-3 sentence summary written by an LLM through OpenRouter
@@ -104,7 +133,8 @@ The agent tools (`GENTER_RUN_TASK`, `GENTER_FIND`, `GENTER_CONTINUE_TASK`) run a
 import { createGenter } from "genter-cli";
 import { tools } from "genter-cli/tools";
 
-const genter = createGenter({ composioApiKey, openrouterApiKey, userId, secret, store }); // store: get(id), put(row), all()
+const genter = createGenter({ composioApiKey, openrouterApiKey, userId, secret, store, knowledge }); // store: get(id), put(row), all()
+// knowledge (optional, for sources): getSource, putSource, deleteSource, sources, items, putItems, deleteItems, allItems
 await genter.search({ query: "send a slack message" });
 ```
 

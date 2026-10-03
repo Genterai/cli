@@ -7,7 +7,7 @@ export const instructions = `Genter runs Composio tools and keeps reusable call 
 3. Every successful call is saved as a recipe automatically, with a short summary of its result
    (topics, names, ids to open it again). Search by topic, e.g. an email subject, finds the call that returned it;
    then execute with the ids from its summary to dig deeper.
-   Make recipes easier to find: pass description + tags to execute, or improve several at once with save_recipes.
+   Make recipes easier to find: pass description + short + tags to execute, or improve several at once with save_recipes.
 4. An app can be connected several times (e.g. work and personal gmail): login lists the connections,
    pass \`account\` to execute to pick one; without it the default connection is used.
 Write the description as a general recipe in Markdown, not this one case:
@@ -15,6 +15,7 @@ Write the description as a general recipe in Markdown, not this one case:
   \`TOOL_SLUG\` · args: \`{a, b?}\`
   Returns <what, format, size limits>. For another target override <args>.
   - pitfall: <format, truncation, alternatives>
+Also pass \`short\`: one line under 100 characters for compact lists (the description is shown when a card is opened).
 Include the user's intent in plain words, tags in English and Russian, and pitfalls.
 If a saved recipe returns something different from its description, save it again with status "outdated" and say why.`;
 
@@ -24,6 +25,10 @@ const recipeDescription = z
     "General recipe in Markdown: a '### <Verb> <object>' heading, a line '`TOOL_SLUG` · args: `{...}`', " +
       "then what it returns, how to reuse it for another target, and '- ' bullets with pitfalls.",
   );
+const recipeShort = z
+  .string()
+  .max(140)
+  .describe("One line, under 100 characters, for compact lists: what the recipe does, e.g. 'Fetch unread emails from the inbox'");
 const recipeTags = z.array(z.string()).describe("Tags in English and Russian, e.g. readme, github, репозиторий");
 
 export const tools = {
@@ -44,7 +49,7 @@ export const tools = {
   search: {
     description:
       "Find a tool for a task, or a past result by its topic (e.g. an email subject). " +
-      "Returns saved recipes first ({id, tool, args, description, summary of the result, when, tags, status}); " +
+      "Returns saved recipes first ({id, tool, args, description, short, summary of the result, when, tags, status}); " +
       "if none is valid, returns Composio tools (id: null, args = JSON schema).",
     input: z.object({
       query: z.string().describe("What you want to do, in plain words"),
@@ -62,6 +67,7 @@ export const tools = {
       args: z.record(z.string(), z.any()).optional(),
       account: z.string().optional().describe("Connection to use (account id or alias from login) when the app is connected several times"),
       description: recipeDescription.optional(),
+      short: recipeShort.optional(),
       tags: recipeTags.optional(),
     }),
     annotations: { readOnlyHint: false, openWorldHint: true },
@@ -76,6 +82,7 @@ export const tools = {
           z.object({
             id: z.string().describe("id returned by execute"),
             description: recipeDescription,
+            short: recipeShort.optional(),
             tags: recipeTags.optional(),
             status: z.enum(["valid", "outdated"]).optional(),
           }),
@@ -83,6 +90,38 @@ export const tools = {
         .min(1),
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  sources: {
+    description: "List synced sources (an app's content kept as searchable knowledge) with their status and size.",
+    input: z.object({}),
+    annotations: { readOnlyHint: true },
+  },
+  add_source: {
+    description:
+      "Remember an app's content as searchable knowledge: github {owner, repo, branch?, path?}, notion {query?}. " +
+      "depth: titles (names and links only), summary (a short summary per item) or full (whole text, default). Run sync_source next.",
+    input: z.object({
+      template: z.enum(["github", "notion"]),
+      scope: z.record(z.string(), z.string()).optional(),
+      depth: z.enum(["titles", "summary", "full"]).optional(),
+      account: z.string().optional().describe("Connection (account id) when the app is connected several times"),
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  },
+  sync_source: {
+    description: "Bring a source up to date: lists everything, reads only new and changed items, drops removed ones.",
+    input: z.object({ id: z.string(), budget_ms: z.number().int().positive().optional() }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  },
+  remove_source: {
+    description: "Delete a source and everything synced from it.",
+    input: z.object({ id: z.string() }),
+    annotations: { readOnlyHint: false, destructiveHint: true },
+  },
+  knowledge: {
+    description: "Search synced sources by meaning: the closest text chunks with titles and links.",
+    input: z.object({ query: z.string(), limit: z.number().int().min(1).max(20).optional(), source: z.string().optional() }),
+    annotations: { readOnlyHint: true },
   },
 };
 
@@ -116,6 +155,7 @@ export function agentTools({ connected = [] } = {}) {
         "It is faster and more reliable than calling app tools yourself: it starts from recipes of past calls that already worked, " +
         "so a known task takes one step.\n" +
         "Use for: send or reply to an email or message, create or update an issue, event, doc, row or deal, post, schedule, " +
+        "remembering an app's content as searchable knowledge (\"remember the acme/api repo\", \"keep our Notion roadmap pages\"), " +
         "and workflows across apps (e.g. \"turn today's support emails into Linear issues and post a summary to #support\").\n" +
         "Pass the full task with every known detail (names, dates, ids, which account) in one call. " +
         "If the result has status needs_input or needs_connection, show the question or the connect link to the user, " +
@@ -131,7 +171,8 @@ export function agentTools({ connected = [] } = {}) {
       description:
         "Find anything in the user's apps and past results: emails, messages, meetings, files, docs, issues, PRs, contacts, deals, invoices. " +
         "Read-only and safe — nothing is sent or changed.\n" +
-        "Searches by meaning across everything fetched before (summaries of past results, with ids to open them), " +
+        "Searches by meaning across everything fetched before (summaries of past results, with ids to open them) " +
+        "and across synced sources (repos, Notion pages kept as knowledge), " +
         "then reads live data from the apps when needed, so repeat questions answer instantly.\n" +
         "Call it before answering any question about the user's own data instead of guessing or saying you can't see it: " +
         "\"what did Anna write about the contract\", \"my meetings tomorrow\", \"PRs waiting for my review\", \"the invoice from March\"." +
