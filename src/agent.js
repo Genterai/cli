@@ -27,11 +27,13 @@ export function createAgent({
   const { seal, open } = cipher(`${secret}:${userId}:runs`);
 
   async function llm(messages, usage) {
+    const started = Date.now();
     const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: { Authorization: `Bearer ${openrouterApiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         model,
+        provider: { sort: process.env.OPENROUTER_SORT || "throughput" }, // the fastest provider for the model
         // The system prompt and tool list never change, so providers can cache this prefix.
         messages: [{ role: "system", content: SYSTEM }, ...messages.map(({ keep, ...m }) => m)],
         tools: TOOLS,
@@ -47,6 +49,7 @@ export function createAgent({
     usage.tokens_in += data.usage?.prompt_tokens ?? 0;
     usage.tokens_out += data.usage?.completion_tokens ?? 0;
     usage.cost_usd += data.usage?.cost ?? 0;
+    usage.llm_ms += Date.now() - started;
     return data.choices[0].message;
   }
 
@@ -68,15 +71,35 @@ export function createAgent({
         if (run.mode === "find" && tool && !isReadOnly(tool)) {
           return { content: `Not allowed: ${tool} changes data and this is a read-only find. Only read, or tell the user to use run_task.` };
         }
-        const out = await genter.execute({ ...input, account: input.account ?? run.account });
+        const started = Date.now();
+        const out = await genter.execute({ ...input, account: input.account ?? run.account }).catch((e) => ({ thrown: e.message }));
+        run.timing.tool_ms += Date.now() - started;
+        // A slug that does not exist: answer with real ones right away instead of spending a step on search_tools.
+        const error = out.thrown ?? (out.result?.successful === false ? out.result?.error : null);
+        if (error && tool && /not found|does not exist|invalid tool|unknown tool|no tool/i.test(String(error))) {
+          const similar = await genter.search({ query: tool.toLowerCase().replace(/_/g, " "), limit: 5 }).catch(() => []);
+          onEvent({ type: "tool", tool, ok: false, summary: "no such tool" });
+          return { content: JSON.stringify({ error: `${tool} does not exist`, use_one_of: similar.map(compactFound) }) };
+        }
+        if (out.thrown) throw new Error(out.thrown);
         const ok = out.result?.successful !== false;
+        const data = ok ? (out.result?.data ?? null) : null;
+        const empty = ok && isEmpty(data);
         run.steps.push({ tool: tool ?? input.id, recipe: input.id ?? null, ok, summary: out.summary ?? null, saved: out.id ?? null });
-        onEvent({ type: "tool", tool: tool ?? input.id, recipe: input.id ?? null, ok, summary: out.summary ?? null });
+        onEvent({ type: "tool", tool: tool ?? input.id, recipe: input.id ?? null, ok, empty, summary: out.summary ?? (empty ? "nothing found" : null) });
         if (out.id) run.recipes[out.id] = tool;
-        const short = { id: out.id, successful: ok, summary: out.summary, error: ok ? undefined : out.result?.error, hint: out.hint };
-        const data = ok ? JSON.stringify(out.result?.data ?? null) : "";
+        // An empty search is not an answer yet: the words may be in another language than the data, or too narrow.
+        const retry =
+          empty && !run.retried
+            ? ((run.retried = true),
+              "Empty result. Do not answer 'not found' yet: retry once with the key terms in both languages joined with OR " +
+                "(the data is often in English when the user writes in another language, and the other way round), " +
+                "plus close synonyms, fewer words and no date filter.")
+            : undefined;
+        const short = { id: out.id, successful: ok, summary: out.summary ?? undefined, error: ok ? undefined : out.result?.error, hint: retry ?? out.hint };
+        const text = ok ? JSON.stringify(data) : "";
         return {
-          content: JSON.stringify({ ...short, data: data.length > 15000 ? `${data.slice(0, 15000)}… (truncated)` : data || undefined }),
+          content: JSON.stringify({ ...short, data: text.length > 10000 ? `${text.slice(0, 10000)}… (truncated)` : text || undefined }),
           keep: JSON.stringify({ ...short, note: "raw data not stored; execute this id again for details" }),
         };
       }
@@ -103,7 +126,8 @@ export function createAgent({
 
   async function loop(run) {
     const started = Date.now();
-    const usage = { llm_calls: 0, tokens_in: 0, tokens_out: 0, cost_usd: 0 };
+    const usage = { llm_calls: 0, tokens_in: 0, tokens_out: 0, cost_usd: 0, llm_ms: 0 };
+    run.timing = { search_ms: run.timing?.search_ms ?? 0, tool_ms: 0 };
     let result = null;
     try {
       for (let step = 0; step < maxSteps && !result; step++) {
@@ -140,13 +164,13 @@ export function createAgent({
     run.status = result.status;
     run.updated_at = new Date().toISOString();
     // Stored without raw tool results: each one is replaced by its summary.
-    const stored = { ...run, messages: run.messages.map(({ keep, ...m }) => (keep ? { ...m, content: keep } : m)) };
+    const stored = { ...run, timing: undefined, messages: run.messages.map(({ keep, ...m }) => (keep ? { ...m, content: keep } : m)) };
     await runs.put({ id: run.id, blob: seal(stored) });
     const out = {
       run_id: run.id,
       ...result,
       steps: run.steps,
-      usage: { ...usage, cost_usd: Number(usage.cost_usd.toFixed(5)), ms: Date.now() - started },
+      usage: { ...usage, ...run.timing, cost_usd: Number(usage.cost_usd.toFixed(5)), ms: Date.now() - started + (run.timing.search_ms || 0) },
     };
     onEvent({ type: "done", result: out });
     return out;
@@ -156,10 +180,13 @@ export function createAgent({
     // Start a task. Recipes, candidate tools and connections are fetched in parallel before the first LLM call.
     async start({ task, mode = "run", account }) {
       onEvent({ type: "step", tool: "search_recipes", input: { query: task } });
-      const [found, connected] = await Promise.all([
+      const searched = Date.now();
+      const [found, connected, english] = await Promise.all([
         genter.search({ query: task, limit: 8 }).catch(() => []),
         genter.login().then((l) => l.connected ?? []).catch(() => []),
+        genter.translate ? genter.translate(task) : null, // shared with search, so no second model call
       ]);
+      const search_ms = Date.now() - searched;
       const recipes = found.filter((r) => r.id);
       onEvent({ type: "recipes", recipes: recipes.map(({ id, tool, description, summary, score, status, tags, when, args }) => ({ id, tool, description, summary, score, status, tags, when, args })) });
       const run = {
@@ -171,7 +198,8 @@ export function createAgent({
         created_at: new Date().toISOString(),
         recipes: Object.fromEntries(recipes.map((r) => [r.id, r.tool])),
         steps: [],
-        messages: [{ role: "user", content: briefing({ task, mode, account, found, connected, canExecute }) }],
+        timing: { search_ms },
+        messages: [{ role: "user", content: briefing({ task, mode, account, found, connected, canExecute, english }) }],
       };
       return loop(run);
     },
@@ -196,6 +224,23 @@ export function isReadOnly(tool, tags = []) {
   return /_(GET|LIST|FETCH|SEARCH|FIND|READ|RETRIEVE|QUERY|DESCRIBE|VIEW|COUNT|CHECK|LOOKUP|EXPORT|DOWNLOAD)(_|$)/.test(slug);
 }
 
+// A result with lists, all of them empty: a search that found nothing. A single object counts as found.
+export function isEmpty(data) {
+  let lists = 0;
+  let items = 0;
+  const walk = (v, depth) => {
+    if (depth > 4 || v == null || typeof v !== "object") return;
+    if (Array.isArray(v)) {
+      lists++;
+      items += v.length;
+      return;
+    }
+    for (const x of Object.values(v)) walk(x, depth + 1);
+  };
+  walk(data, 0);
+  return lists > 0 && items === 0;
+}
+
 // Search results as the model sees them: recipes in full, Composio tools with a compact arg schema.
 function compactFound(r) {
   if (r.id) {
@@ -215,12 +260,14 @@ function compactSchema(schema) {
   );
 }
 
-function briefing({ task, mode, account, found, connected, canExecute }) {
+function briefing({ task, mode, account, found, connected, canExecute, english }) {
   const recipes = found.filter((r) => r.id).map(compactFound);
   const tools = found.filter((r) => !r.id).map(compactFound);
   const apps = connected.map((c) => `${c.toolkit}${c.alias ? ` (${c.alias}${c.default ? ", default" : ""})` : ""}${c.status && c.status !== "ACTIVE" ? ` [${c.status}]` : ""}`);
   return [
     `Task: ${task}`,
+    english?.en && `In English: ${english.en}`,
+    english?.terms?.length && `Search terms for keyword filters (use both languages, joined with OR): ${english.terms.join(" | ")}`,
     mode === "find" ? "Mode: find (read-only: answer the question; only execute tools that read data)." : "Mode: run (do the task).",
     !canExecute && "This user cannot run tools: answer from recipe summaries, or say which tool and args would do it.",
     account && `Use connection: ${account}`,
@@ -239,7 +286,9 @@ The first message already holds everything for a fast start: saved recipes that 
 - If a recipe fits, execute it by id and override only the args that differ. This is the fastest path.
 - Otherwise pick a candidate tool and execute it. Call get_tool_schema only when the args are unclear; call search_tools only when nothing fits.
 - Make independent calls in the same step (parallel). Chain only when a call needs another's output.
-- Never invent tool slugs or argument names. Use ids and names from results, not guesses.
+- Never invent tool slugs or argument names: use only slugs from the first message, search results or error hints.
+- Keyword search in apps (Gmail q, Slack, Drive, Notion, GitHub search) matches literal words, and the data is often in another language than the request (English emails, Russian request). Put the key terms in both languages in one query, joined with OR, e.g. Gmail: ("объединенные знания" OR "unified knowledge" OR "merged knowledge"). The first message lists the terms.
+- An empty result is not an answer: retry once with translated or broader terms before saying nothing was found.
 - When you execute a tool that did not come from a recipe and it is a reusable step, pass description and tags so the next run finds it:
   description is a general Markdown recipe: "### <Verb> <object>", a line "\`TOOL_SLUG\` · args: \`{a, b?}\`", what it returns, how to reuse it, "- pitfall: ..." bullets; tags in English and Russian.
 - If a recipe returned something different from its description, save it again with status "outdated" (save_recipes) and say why.

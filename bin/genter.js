@@ -76,8 +76,10 @@ try {
     console.log(agentResultText(await start(agent, input)));
   } else {
     const input = tools[name].input.parse(args);
-    console.log(JSON.stringify(await genter[name](input), null, 2));
+    const { pending, ...out } = await genter[name](input);
+    console.log(JSON.stringify(out, null, 2));
   }
+  await genter.flush(); // recipes are saved after the result is shown
 } catch (error) {
   console.error(error.message);
   process.exit(1);
