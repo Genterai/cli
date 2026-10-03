@@ -1,4 +1,4 @@
-import { BUILTIN } from "./sync.js";
+import { BUILTIN, fill, inferList, pick } from "./sync.js";
 
 // The live sync builder: a model (BUILDER_MODEL, default openai/gpt-6-luna) that writes a live sync recipe for any app from its tools.
 // It explores the tools (search, schemas, real sample calls), writes the recipe, tests it on real data and fixes it
@@ -40,7 +40,103 @@ export function createBuilder({ genter, openrouterApiKey, model = process.env.BU
     }
   }
 
+  // What an app can keep as knowledge, planned by a model from the app's read tools in one call:
+  // [{ name, description, containers?: { tool, args }, items: { tool, args } }]; items args may use {{container}}.
+  async function plan(toolkit) {
+    const tools = await genter.app_tools({ toolkit });
+    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${openrouterApiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "user",
+            content:
+              `These are the read tools of ${toolkit}, called as the connected person. Plan what they would want to keep as searchable ` +
+              "knowledge: THEIR OWN data (their emails, events, rows, tasks, messages, posts, documents, their repos' issues...), " +
+              "up to 6 kinds, most useful first. Never a global or public search (all of GitHub, all of Twitter): reach their data " +
+              "through tools that list what belongs to them, or a search scoped to them (author:@me, in their workspace). " +
+              "When the content lives in containers (labels, calendars, spreadsheets, task lists, channels, boards, teams, lists, " +
+              "folders), give a containers call that lists them and an items call that lists the content of one, with " +
+              '"{{container}}" where the container id goes: the recipe then runs over all of them. ' +
+              "Prefer calls that return many items with their text and an updated time. " +
+              "Use only these tools and their argument names; ask for the largest page size; recent items first.\n" +
+              "Kinds must not overlap (not both all mail and inbox). Mark recommended: true on the ones most people want kept. " +
+              "Streams (mail, chat, posts) take recent items only (the newest page).\n" +
+              'Reply with JSON only: {"kinds": [{"name": "Emails by label", "description": "...", "recommended": true, "containers": {"tool": "...", "args": {}}, ' +
+              '"items": {"tool": "...", "args": {"label_ids": ["{{container}}"], "max_results": 100}}}]} (containers is optional).\n\n' +
+              JSON.stringify(tools),
+          },
+        ],
+      }),
+      signal: AbortSignal.timeout(120000),
+    });
+    if (!res.ok) throw new Error(`Planner failed: ${res.status} ${await res.text()}`);
+    const data = await res.json();
+    return { kinds: (JSON.parse(data.choices[0].message.content).kinds ?? []).slice(0, 6), cost: data.usage?.cost ?? 0 };
+  }
+
+  // A planned kind as a live sync recipe: its containers call (if any) and its items call, run for real once,
+  // their lists found with inferList.
+  async function shapeKind(toolkit, kind, account) {
+    let each;
+    let first;
+    if (kind.containers?.tool) {
+      const res = await genter.sources.probe({ tool: kind.containers.tool, args: kind.containers.args ?? {}, account, raw: true });
+      if (res?.successful === false) throw new Error(`${kind.containers.tool}: ${JSON.stringify(res.error).slice(0, 200)}`);
+      const shape = inferList(res);
+      if (!shape.items) throw new Error("no containers found");
+      first = [pick(res, shape.items)].flat()[0];
+      each = { tool: kind.containers.tool, args: kind.containers.args ?? {}, items: shape.items, id: shape.id, label: shape.title, max: 20 };
+    }
+    const args = kind.items.args ?? {};
+    const sampleArgs = each ? fill(args, { container: String(pick(first, each.id)) }) : args;
+    const res = await genter.sources.probe({ tool: kind.items.tool, args: sampleArgs, account, raw: true });
+    if (res?.successful === false) throw new Error(`${kind.items.tool}: ${JSON.stringify(res.error).slice(0, 200)}`);
+    const shape = inferList(res);
+    const triggers = await genter.pick_triggers({ toolkit, tool: kind.items.tool, args, description: kind.description });
+    return {
+      name: kind.name,
+      toolkit,
+      description: kind.description ?? kind.name,
+      title: kind.name,
+      recommended: Boolean(kind.recommended),
+      scope: {},
+      list: { tool: kind.items.tool, args, ...shape, ...(shape.version && shape.version === shape.id && { append: true }), ...(each && { each }) },
+      triggers,
+      every: triggers.length ? null : 60,
+    };
+  }
+
   return {
+    // Everything an app can keep as knowledge, as recipes: plans the kinds, lists each kind's containers (up to
+    // `perKind`) and runs its items call once per container. Every run is saved as a recipe with its live sync
+    // plan, so each can be kept up to date with one click. onProgress gets { kind, container?, recipe?, error? }.
+    // Everything an app can keep as knowledge, as live sync recipes: a model plans the kinds of the person's own data,
+    // and each kind becomes one recursive recipe (its containers -> their items), shaped from real responses, with a
+    // trigger or an hourly schedule, tested and saved. onProgress gets { planned } then { kind, recipe | error }.
+    async discover({ toolkit, account, onProgress = () => {} }) {
+      const { kinds, cost } = await plan(toolkit);
+      onProgress({ planned: kinds.map((k) => ({ name: k.name, description: k.description, recommended: Boolean(k.recommended) })) });
+      const made = [];
+      await Promise.all(
+        kinds.map(async (kind) => {
+          try {
+            const recipe = await shapeKind(toolkit, kind, account);
+            const out = await genter.save_live_sync({ recipe, description: kind.description || kind.name, short: kind.name, tags: [toolkit, "sync", "синхронизация"], account });
+            if (!out.saved) throw new Error((out.test?.problems ?? ["test failed"]).join("; "));
+            made.push({ kind: kind.name, recipe: out.id });
+            onProgress({ kind: kind.name, recipe: out.id });
+          } catch (e) {
+            onProgress({ kind: kind.name, error: e.message });
+          }
+        }),
+      );
+      return { kinds, made, cost };
+    },
+
     // goal: what to sync in the user's words; toolkit, account: optional hints.
     // Returns { saved: true, id, scope, recipe, test } or { saved: false, answer }.
     async build({ goal, toolkit, account }) {
