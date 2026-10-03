@@ -12,6 +12,7 @@ can answer a question with no call at all. The hosted MCP server exposes only th
 run          → the agent does a task in your apps, recipes first
 find         → read-only agent: answers from past results, reads live data if needed
 continue     → answer a run's question or give a follow-up
+write        → write where an answer's reference [n] (or a link) points: a file, an issue, a thread...
 
 search       → saved recipes first, Composio tools if none is valid
 execute      → runs a tool (or repeats a recipe by id) and saves it as a recipe; description + tags make it easier to find
@@ -77,6 +78,7 @@ genter continue '{"run_id":"...","message":"use my work account"}'
 ```
 
 A run ends `done`, `needs_input` (a question), `needs_connection` (a connect link) or `failed`; `continue` picks it up.
+A `done` answer cites its sources as `[n]` and comes with `references` (see below).
 `find` runs only tools that read (by Composio's hint or the verb in the slug). New calls are saved as recipes with
 the agent's description, so the next run finds them. The model is `AGENT_MODEL` on OpenRouter, default `openai/gpt-oss-20b`.
 
@@ -88,6 +90,62 @@ const agent = createAgent({ genter, openrouterApiKey, secret, userId, runs }); /
 const out = await agent.start({ task: "my meetings tomorrow", mode: "find" });
 await agent.send({ run_id: out.run_id, message: "only the work calendar" });
 ```
+
+## References and writes
+
+Every answer says what it was built from. Each knowledge chunk, saved result, call result and item of a list the model
+sees gets a number, the answer cites them as `[n]`, and the result lists the cited ones as `references`
+(`src/refs.js`; `agentResultText` prints them under the answer):
+
+```
+Paging stops at the first page shorter than the page size [1].
+
+References:
+[1] github file Genterai/genter-cli/src/sync.js — https://github.com/Genterai/genter-cli/blob/main/src/sync.js
+    where {"owner":"Genterai","repo":"genter-cli","path":"src/sync.js","branch":"main"}
+    write GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS(message, content)
+```
+
+`where` is what points to the place, named the way the app's write tools name it; `write` lists those tools with what
+they still need. Synced items keep their `where` (the args of the list call that point somewhere, and the item's id
+fields), so a knowledge hit knows its path, issue number, thread or task list. Popular apps have known write tools:
+GitHub files, folders, issues, pull requests, repositories and commits, Gmail, Google Calendar, Google Tasks, Notion
+pages. Any other app's are found in its own Composio catalogue (`genter.catalog`, cached for an hour): its tools that
+change something (never delete, archive or bulk), ranked by how much of `where` they take. The item's id goes to its
+kind's param (`issueId`, `idCard`, `issue_id_or_key`, `recordId`, `thread_ts`); the list call's args (a channel, a base
+and a table) only where a tool requires them, so a filter of the list (`assignee: me`) is never written back; a tool
+that needs the id of something else is left out.
+
+`write` (MCP `GENTER_WRITE`, temporary) writes at a reference:
+
+```bash
+genter find '{"question":"when does paging stop in genter-cli?"}'
+genter write '{"run_id":"...","ref":1,"change":"add a comment line on top: // Paging: see README"}'
+genter write '{"run_id":"...","ref":3,"tool":"GMAIL_REPLY_TO_THREAD","args":{"message_body":"Thursday works"}}'
+genter write '{"ref":"https://github.com/Genterai/genter-cli/issues/42","change":"comment: fixed in #43"}'
+```
+
+With `change`, the run goes on (it knows what it found, a find goes on as a run) with the place and its write tools,
+args filled in, in front of the model; a file is read first and written whole. With `tool` + `args`, that exact call
+runs at once with the reference's args under the given ones: no model step. A link works without a run: GitHub files,
+folders, issues, pull requests and repositories, Notion pages, Gmail threads, Calendar events.
+
+### Test scenarios
+
+`npm test` runs them with no keys: the model and the apps are stand-ins; the catalogues of the other apps are real
+Composio schemas (`test/fixtures/catalogues.json`: Linear, Slack, Jira, Trello, Airtable, HubSpot, Notion).
+
+| | scenario | what must hold |
+| --- | --- | --- |
+| S1–S4 | GitHub: a synced file, issue, pull request, repository; a file read live; links | path, link, `where`; the commit, comment or update tool with owner, repo, path or number filled |
+| S5–S9 | Notion, Gmail (a list and synced mail), Calendar, Google Tasks | page id; thread and sender; calendar and event; task list and task |
+| S10–S15 | Linear, Slack, Jira, Trello, Airtable, HubSpot, from their catalogues | the right tool and id param; a channel or base only in the list's args still lands; no delete, archive or bulk; list filters never written back |
+| S16–S17 | an item of another kind, an unknown app | never the id of another kind; no hints and no error |
+| S18 | citations | `[n]`, `[n, m]` in order; no marks: what the answer names, then the round's calls, then the closest knowledge |
+| S19–S20 | sync | knowledge hits of a GitHub project and of Google Tasks lists carry part, item and `where` |
+| A1–A3 | agent, GitHub | find → references with write tools → write via the agent (read, then commit); write at a link with no run |
+| A4–A7 | agent, other apps | an exact Gmail reply with no model call; Linear through its catalogue; a catalogue too slow for the answer; an answer with no marks |
+| A8–A10 | refused | a number without its run, an unknown number, a tool of another app, a viewer; `GENTER_WRITE` only where writing is on |
 
 ## Ready recipes
 
@@ -163,7 +221,7 @@ and files over 300 KB.
 
 ## Hosted MCP
 
-The agent tools (`GENTER_RUN_TASK`, `GENTER_FIND`, `GENTER_CONTINUE_TASK`) run as a remote MCP server with OAuth (Google or email) in
+The agent tools (`GENTER_RUN_TASK`, `GENTER_FIND`, `GENTER_CONTINUE_TASK`, and for now `GENTER_WRITE`) run as a remote MCP server with OAuth (Google or email) in
 [genter-backend](https://github.com/Genterai/genter-backend).
 
 ## Library

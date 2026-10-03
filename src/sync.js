@@ -219,6 +219,9 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
     const exclude = (part.exclude ?? []).map((x) => new RegExp(x, "i"));
     const dropped = (id, size) => exclude.some((re) => re.test(id)) || (part.maxSize && size > part.maxSize);
     const base = { ...ctxOf(source, template), ...extra };
+    // Where items are in the app, for references and writes: the list call's own args that point somewhere
+    // (owner, repo, a channel, a task list), plus each item's id fields.
+    const located = locatorArgs(fill(role.args ?? {}, base));
     for (let n = 0; n < pages; n++) {
       // nextPage: numbered pages (1, 2, ...) until one comes back empty; otherwise the cursor from list.next.
       if (role.nextPage) page = n + 1;
@@ -239,6 +242,7 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
           title: (isTemplate(role.title) && fill(role.title, ctx)) || extra.container_label || part.name || source.title,
           url: isTemplate(role.url) ? fill(role.url, ctx) : role.url ? pick(data, role.url) : undefined,
           text: (role.fields && fieldsText(data, role.fields)) || jsonToMarkdown(data),
+          where: { ...located, ...idKeys(data) },
         });
         break;
       }
@@ -261,6 +265,7 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
           size: role.size ? Number(pick(raw, role.size)) || 0 : undefined,
           text: role.text === "@item" ? (role.fields && fieldsText(raw, role.fields)) || jsonToMarkdown(raw) : role.text ? pick(raw, role.text) : undefined,
           parent: role.parent ? pick(raw, role.parent) : undefined,
+          where: { ...located, ...idKeys(raw) },
           raw, // for read args like {{item.path}}; never stored
         });
         if (out.length > LIMITS.maxItems) {
@@ -486,6 +491,7 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
             depth,
             title: item.title,
             url: item.url,
+            ...(item.where && Object.keys(item.where).length && { where: item.where }),
             chunks: chunks.map((t) => ({ text: t, embedding: toB64(vectors[k++]) })),
           };
           return { source_id: source.id, key: itemKey(source.id, item.id), blob: seal(record) };
@@ -796,23 +802,19 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
     },
 
     // Chunks closest to the query, across sources (or one): { source, title, url, text, score }.
-    // source: one source id or several. Hits carry the recipe the source keeps (recipe_of), if any.
+    // source: one source id or several. Hits carry the recipe the source keeps (recipe_of), if any, and where the
+    // item is in its app: { toolkit, item (its id), part, tool (the list call), where (owner, repo, path, ids...) }.
     async search({ vector, limit = 6, source, minScore = 0.3 }) {
       if (!vector) return [];
       const only = source ? new Set([source].flat()) : null;
-      const info = new Map(
-        (await store.sources()).map((row) => {
-          const s = open(row.blob);
-          return [row.id, { title: s.title, recipe_of: s.recipe_of ?? null }];
-        }),
-      );
+      const info = new Map((await store.sources()).map((row) => [row.id, open(row.blob)]));
       const hits = [];
       for (const { row, item } of await keptItems(only)) {
         for (const c of item.chunks) {
           const score = cosine(vector, c.vector);
           if (score >= minScore) {
             const src = info.get(row.source_id);
-            hits.push({ source: row.source_id, source_title: src?.title, recipe_of: src?.recipe_of ?? null, title: item.title, url: item.url, text: c.text, score });
+            hits.push({ source: row.source_id, source_title: src?.title, recipe_of: src?.recipe_of ?? null, title: item.title, url: item.url, text: c.text, score, id: item.id, where: item.where });
           }
         }
       }
@@ -826,6 +828,15 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
         perItem.set(k, (perItem.get(k) ?? 0) + 1);
         out.push({ ...h, score: Number(h.score.toFixed(2)) });
         if (out.length >= limit) break;
+      }
+      const templates = new Map();
+      for (const h of out) {
+        const src = info.get(h.source);
+        if (!src) continue;
+        if (!templates.has(src.template)) templates.set(src.template, await recipeOf(src.template).catch(() => null));
+        const { id, where } = h;
+        delete h.id;
+        Object.assign(h, { toolkit: src.toolkit ?? null, ...locate(src, templates.get(src.template), { id, where }) });
       }
       return out;
     },
@@ -852,6 +863,41 @@ function ctxOf(source, template) {
   const at = (days) => new Date(Date.now() + days * 86_400_000).toISOString();
   const span = (sign) => Object.fromEntries([1, 7, 30, 90, 180, 365].map((d) => [`${d}d`, at(sign * d)]));
   return { now: at(0), ago: span(-1), ahead: span(1), ...template?.vars, ...source.scope };
+}
+
+// Where a kept item is in its app: its id within its part, the part, the list call, and `where`: the recipe's fixed
+// values and the source's scope, the list call's args that point somewhere, then the item's own id fields (kept since
+// items carry them; older items get the rest).
+function locate(source, template, { id, where }) {
+  const parts = template ? partsOf(template) : [];
+  const part = parts.find((p) => p.key && String(id).startsWith(`${p.key}:`)) ?? (parts.length === 1 ? parts[0] : null);
+  const item = part?.key ? String(id).slice(part.key.length + 1) : String(id);
+  const scope = Object.fromEntries(Object.entries(source.scope ?? {}).filter(([k]) => !template?.scope?.[k]?.display));
+  const listed = part?.list?.args ? locatorArgs(fill(part.list.args, ctxOf(source, template))) : {};
+  return { item, part: part?.key || null, tool: part?.list?.tool ?? null, where: { ...locatorArgs({ ...template?.vars, ...scope }), ...listed, ...where } };
+}
+
+// The args of a call that point somewhere (owner, repo, channel, calendarId, tasklist_id...), not how it pages,
+// sorts or filters. Scalars only; placeholders left unfilled are dropped.
+const NOT_LOCATOR =
+  /^(page|page_?token|page_?cursor|start_?cursor|cursor|next|after|before|offset|per_?page|page_?size|limit|max_?results|max|first|last|count|sort|sort_?by|direction|order|order_?by|since|until|q|query|search|text|state|status|fields|expand|verbose|format|time_?min|time_?max|recursive|archived|all|jql|view|properties|associations|show_?\w+|include_?\w*|exclude_?\w*|filter_?\w*|label_?ids|single_?events)$/i;
+export function locatorArgs(args = {}) {
+  return Object.fromEntries(
+    Object.entries(args ?? {}).filter(([k, v]) => (typeof v === "string" || typeof v === "number") && v !== "" && !NOT_LOCATOR.test(k) && !String(v).includes("{{")),
+  );
+}
+
+// The id fields of an item (id, number, path, sha, ts, threadId, issue_key...), scalars only: what a write call
+// needs to point at it again.
+const ID_KEY = /^(id|key|number|path|sha|ts|slug|uuid|gid|identifier)$|(_id|Id|ID|_key|Key|_ts|_number|_uuid|_sha)$/;
+export function idKeys(obj, max = 8) {
+  const out = {};
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return out;
+  for (const [k, v] of Object.entries(obj)) {
+    if (Object.keys(out).length >= max) break;
+    if (ID_KEY.test(k) && (typeof v === "string" || typeof v === "number") && v !== "" && String(v).length <= 300) out[k] = v;
+  }
+  return out;
 }
 
 const usesSince = (part) => JSON.stringify(part.list?.args ?? {}).includes("{{since");

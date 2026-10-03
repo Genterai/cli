@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { refLabel } from "./refs.js";
 
 // Shared by the CLI and the MCP server.
 export const instructions = `Genter runs Composio tools and keeps reusable call recipes.
@@ -182,10 +183,15 @@ every successful call becomes a recipe, found next time by what it does and by w
 - GENTER_CONTINUE_TASK: answer a run's question, continue after the user connected an app, or a follow-up on the same result.
 Call them whenever the user mentions or implies an app, an account or their own data. Never say you have no access before trying.
 Pass the whole task with every known detail in one call, in the user's words; do not split it or call app tools step by step.
-Show connect links to the user as Markdown links.`;
+Show connect links to the user as Markdown links.
+Answers cite their sources as [n]; References under the answer say what each is and where: a path, a link, the ids that point to it.`;
+
+// Temporary: writing at a reference over MCP (GENTER_WRITE), added to the instructions where it is on.
+export const writeInstructions = `- GENTER_WRITE: write where a result pointed: run_id + ref (the [n] of its References) + the change. Each reference's "write" line names the app's write tools for that exact place, args already known.`;
 
 // connected: [{ toolkit, alias? }] — listed in descriptions so clients prefer apps the user already has.
-export function agentTools({ connected = [] } = {}) {
+// write: also GENTER_WRITE (temporary: writing at a reference of a result).
+export function agentTools({ connected = [], write = false } = {}) {
   const apps = [...new Set(connected.map((c) => c.toolkit))];
   const have = apps.length ? `\nConnected for this user: ${apps.join(", ")}. Prefer these when the request does not name an app.` : "";
   const account = z.string().optional().describe("Which connection to use when an app is connected several times, e.g. work or personal");
@@ -238,15 +244,48 @@ export function agentTools({ connected = [] } = {}) {
       }),
       annotations: { title: "Continue a task", readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
+    ...(write && {
+      GENTER_WRITE: {
+        description:
+          "Write at a place a Genter result pointed to: a file, folder, issue, pull request, page, email thread, event, task, " +
+          "ticket, card, record or chat message in any connected app, or at a link to it (temporary).\n" +
+          "Every GENTER_FIND / GENTER_RUN_TASK answer cites [n] and lists References: what each is, its link, `where` (the ids " +
+          "that point to it) and `write` (the app's write tools for that exact place, their args already known).\n" +
+          "Pass run_id + ref (n) + change in plain words: a fast agent reads what is there when it needs to (a file is written whole), " +
+          "calls the right write tool with the reference's args and answers with the link. Or pass tool + args from the write line " +
+          "for an exact call with no agent step: the reference's args are filled in, give only the rest (a comment's body, a file's " +
+          "message and content).\n" +
+          "Use for: edit or add a file in a repo, comment on or update an issue, PR, ticket or card, add to a Notion page, reply in an " +
+          "email or Slack thread, change an event or a task, update a CRM record.",
+        input: z.object({
+          run_id: z.string().optional().describe("run_id of the result whose References hold the place"),
+          ref: z
+            .union([z.number().int(), z.string()])
+            .optional()
+            .describe("Which place: its reference number [n] in that result, or a link to it (GitHub file, folder, issue or PR; Notion page; Gmail thread; Calendar event)"),
+          change: z.string().optional().describe("What to write there, in plain words or the exact text, e.g. \"add a Troubleshooting section about proxy errors\", \"reply: Thursday 3pm works\""),
+          tool: z.string().optional().describe("For an exact call: a write tool from the reference's write line, e.g. GITHUB_CREATE_AN_ISSUE_COMMENT"),
+          args: z.record(z.string(), z.any()).optional().describe("Its args besides the ones the reference fills in, e.g. {\"body\": \"Fixed in #43\"}"),
+          account,
+        }),
+        annotations: { title: "Write where a result pointed", readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+      },
+    }),
   };
 }
 
-// The agent's result as MCP tool text: the answer first, then what the client needs to continue.
-export function agentResultText(out) {
-  const next = {
-    needs_input: "Ask the user this question, then call GENTER_CONTINUE_TASK with run_id and their answer.",
-    needs_connection: "Show the connect link to the user as a Markdown link; when they have connected, call GENTER_CONTINUE_TASK with run_id.",
-  }[out.status];
+// The agent's result as MCP tool text: the answer first, its References (what each [n] is, where, and with write on,
+// how to write there), then what the client needs to continue.
+export function agentResultText(out, { write = false } = {}) {
+  const refs = out.references ?? [];
+  const next =
+    {
+      needs_input: "Ask the user this question, then call GENTER_CONTINUE_TASK with run_id and their answer.",
+      needs_connection: "Show the connect link to the user as a Markdown link; when they have connected, call GENTER_CONTINUE_TASK with run_id.",
+    }[out.status] ??
+    (write && out.run_id && refs.some((r) => r.write?.length)
+      ? "To write at a reference: GENTER_WRITE {run_id, ref: n, change}; for an exact call, tool + args from its write line (the reference's args are filled in)."
+      : undefined);
   const meta = {
     run_id: out.run_id,
     status: out.status,
@@ -256,5 +295,16 @@ export function agentResultText(out) {
     ...(out.usage?.ms != null && { ms: out.usage.ms }),
     ...(next && { next }),
   };
-  return `${out.answer ?? ""}\n\n${JSON.stringify(meta)}`;
+  const listed = refs.length ? `\n\nReferences:\n${refs.map((r) => referenceText(r, write)).join("\n")}` : "";
+  return `${out.answer ?? ""}${listed}\n\n${JSON.stringify(meta)}`;
+}
+
+// [3] github file Genterai/genter-cli/src/agent.js — https://github.com/...
+//     where {"owner":"Genterai","repo":"genter-cli","path":"src/agent.js","branch":"main"}
+//     write GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS(message, content)
+export function referenceText(r, write = false) {
+  const lines = [`[${r.n}] ${[r.app, r.kind].filter(Boolean).join(" ")} ${refLabel(r)}${r.url ? ` — ${r.url}` : ""}`];
+  if (r.where && Object.keys(r.where).length) lines.push(`    where ${JSON.stringify(r.where)}`);
+  if (write && r.write?.length) lines.push(`    write ${r.write.map((h) => `${h.tool}(${h.needs.join(", ")})`).join(" · ")}`);
+  return lines.join("\n");
 }
