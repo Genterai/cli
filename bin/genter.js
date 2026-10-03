@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // Usage: genter <tool> '<json args>'     e.g. genter search '{"query":"latest emails"}'
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -13,11 +14,17 @@ const write = (file, data) => {
   writeFileSync(join(dir, file), JSON.stringify(data, null, 2));
 };
 
-// Local store: every call in ~/.genter/calls.json
+// Local store: encrypted calls in ~/.genter/calls.json. Calls without memory live one hour.
+const HOUR = 60 * 60 * 1000;
 const store = {
   get: async (id) => read("calls.json")[id],
-  put: async (record) => write("calls.json", { ...read("calls.json"), [record.id]: record }),
-  all: async () => Object.values(read("calls.json")),
+  put: async (row) => {
+    const rows = read("calls.json");
+    rows[row.id] = { ...row, at: rows[row.id]?.at ?? Date.now() };
+    for (const r of Object.values(rows)) if (!r.remembered && Date.now() - r.at > HOUR) delete rows[r.id];
+    write("calls.json", rows);
+  },
+  all: async () => Object.values(read("calls.json")).filter((r) => r.remembered),
 };
 
 const [name, json = "{}"] = process.argv.slice(2);
@@ -37,11 +44,13 @@ try {
     write("config.json", { ...read("config.json"), ...JSON.parse(JSON.stringify({ composio_api_key, openrouter_api_key, user_id })) });
     args = rest;
   }
-  const config = read("config.json");
+  let config = read("config.json");
+  if (!config.secret) write("config.json", (config = { ...config, secret: randomBytes(32).toString("base64") }));
   const genter = createGenter({
     composioApiKey: process.env.COMPOSIO_API_KEY || config.composio_api_key,
     openrouterApiKey: process.env.OPENROUTER_API_KEY || config.openrouter_api_key,
     userId: process.env.GENTER_USER_ID || config.user_id || "default",
+    secret: config.secret,
     store,
   });
   const input = tools[name].input.parse(args);

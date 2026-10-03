@@ -40,7 +40,12 @@ genter execute '{"tool":"GMAIL_FETCH_EMAILS","args":{"query":"is:unread newer_th
 genter add_memory '{"id":"<id>","description":"Unread emails from today","tags":["gmail","inbox"]}'
 ```
 
-Calls and memories are stored in `~/.genter/calls.json`.
+## Data
+
+- Tool results are never stored. The memory the agent writes is the result.
+- Calls without a memory are deleted after one hour.
+- Every record (tool, args, description, embedding) is encrypted with AES-256-GCM before it is stored.
+  The store only sees `{id, remembered, blob}`. The CLI keeps its key in `~/.genter/config.json` and data in `~/.genter/calls.json`.
 
 ## Hosted MCP
 
@@ -53,7 +58,7 @@ The same tools run as a remote MCP server with OAuth (Google or email) in
 import { createGenter } from "genter-cli";
 import { tools } from "genter-cli/tools";
 
-const genter = createGenter({ composioApiKey, openrouterApiKey, userId, store }); // store: get(id), put(record), all()
+const genter = createGenter({ composioApiKey, openrouterApiKey, userId, secret, store }); // store: get(id), put(row), all()
 await genter.search({ query: "send a slack message" });
 ```
 
