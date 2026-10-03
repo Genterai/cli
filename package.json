@@ -5,7 +5,7 @@
   "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "bin": { "genter": "bin/genter.js" },
-  "exports": { ".": "./src/genter.js", "./tools": "./src/tools.js", "./agent": "./src/agent.js", "./sync": "./src/sync.js" },
+  "exports": { ".": "./src/genter.js", "./tools": "./src/tools.js", "./agent": "./src/agent.js", "./sync": "./src/sync.js", "./builder": "./src/builder.js", "./markdown": "./src/markdown.js" },
   "files": ["bin", "src"],
   "engines": { "node": ">=20" },
   "dependencies": {
