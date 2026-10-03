@@ -350,7 +350,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     }));
     const text = await chat(
       {
-        model: process.env.BUILDER_MODEL || "openai/gpt-6-luna",
+        model: process.env.BUILDER_MODEL || "google/gemma-4-31b-it",
         response_format: { type: "json_object" },
         messages: [
           {

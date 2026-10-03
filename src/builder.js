@@ -2,10 +2,10 @@ import { BUILTIN, fill, inferList, inferText, matches, pick } from "./sync.js";
 
 const FILE_EXCLUDE = BUILTIN.github.exclude;
 
-// The live sync builder: a model (BUILDER_MODEL, default openai/gpt-6-luna) that writes a live sync recipe for any app from its tools.
+// The live sync builder: a model (BUILDER_MODEL, default google/gemma-4-31b-it) that writes a live sync recipe for any app from its tools.
 // It explores the tools (search, schemas, real sample calls), writes the recipe, tests it on real data and fixes it
 // until the test passes, then saves it like any recipe. Building is rare and the result is reused.
-export function createBuilder({ genter, openrouterApiKey, model = process.env.BUILDER_MODEL || "openai/gpt-6-luna", maxSteps = 20, onEvent = () => {} }) {
+export function createBuilder({ genter, openrouterApiKey, model = process.env.BUILDER_MODEL || "google/gemma-4-31b-it", maxSteps = 20, onEvent = () => {} }) {
   async function llm(messages) {
     const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
