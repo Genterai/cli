@@ -55,6 +55,7 @@ Without it, `search` uses Composio only.
 | `search` | `{query, limit?}` | `[{id, tool, args, description, short, summary, when, tags, status}]` |
 | `execute` | `{tool, args}` or `{id, args?}`, optional `{account, description, short, tags}` | `{id, result, summary, saved?, note?}` |
 | `save_recipes` | `{recipes: [{id, description, short?, tags?, status?}]}` | `[{id, created_at, tags, description, short, status}]` |
+| `disable_recipe` | `{id, disabled?}` | `{id, disabled}` — a disabled recipe stays saved but search and the agent skip it; `disabled: false` turns it back on |
 
 ```bash
 genter register_tool '{"toolkit":"gmail"}'
