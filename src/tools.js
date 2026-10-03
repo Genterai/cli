@@ -19,7 +19,10 @@ const recipeTags = z.array(z.string()).describe("Tags in English and Russian, e.
 export const tools = {
   register_tool: {
     description: "Connect an app (toolkit) like gmail or github. Returns a URL the user must open to authorize it.",
-    input: z.object({ toolkit: z.string().describe("Composio toolkit slug, e.g. gmail, github, slack") }),
+    input: z.object({
+      toolkit: z.string().describe("Composio toolkit slug, e.g. gmail, github, slack"),
+      callback_url: z.string().url().optional().describe("Where to send the user after connecting (gets ?status=success|failed)"),
+    }),
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   },
   login: {
