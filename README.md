@@ -211,7 +211,7 @@ The sync engine knows no connector. A **live sync recipe** (plain JSON, `src/syn
 `list` (pages of items with an id and a version), `read` (an item's text), and optional `choices` (what the user can pick:
 their repos, top-level pages), `setup` (fills scope fields, e.g. the default branch) and `triggers` (Composio events that
 mean "changed"; an event syncs the source). GitHub files and Notion pages are built in. For anything else the agent's
-`build_live_sync` runs a builder (`src/builder.js`, `BUILDER_MODEL`, default `openai/gpt-6-luna`) that explores the app's
+`build_live_sync` runs a builder (`src/builder.js`, `BUILDER_MODEL`, default `google/gemma-4-31b-it`) that explores the app's
 tools with real sample calls, writes the recipe, tests it on real data (`test_live_sync`) and saves it like any recipe
 (`save_live_sync`), so it is found by search and reused:
 

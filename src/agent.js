@@ -29,7 +29,7 @@ export function createAgent({
   model = process.env.AGENT_MODEL || "openai/gpt-oss-20b",
   // A task no saved recipe covers yet, or a run the fast model gets stuck on, goes to a stronger model.
   // What it finds becomes recipes, so the next time the same task runs on the fast one.
-  strongModel = process.env.AGENT_STRONG_MODEL || process.env.BUILDER_MODEL || "openai/gpt-6-luna",
+  strongModel = process.env.AGENT_STRONG_MODEL || process.env.BUILDER_MODEL || "google/gemma-4-31b-it",
   maxSteps = 12,
   canExecute = true,
   canConnect = true,
