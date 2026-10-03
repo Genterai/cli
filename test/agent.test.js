@@ -383,3 +383,84 @@ describe("A write that writes nothing", () => {
     assert.match(out.answer, /Nothing was written/);
   });
 });
+
+describe("Reading files: a built-in read, never 'there is no tool'", () => {
+  const commits = { id: "rec_commits", tool: "GITHUB_LIST_COMMITS", args: { owner: "Genterai", repo: "genter-cli" }, description: "### Recent commits of Genterai/genter-cli", summary: "20 commits", status: "valid", score: 0.8 };
+  const text = "export const a = 1;\nexport const b = 2;\n";
+  const results = {
+    GITHUB_GET_REPOSITORY_CONTENT: ({ path }) =>
+      path === "src" ? { content: [{ path: "src/agent.js", type: "file" }, { path: "src/lib", type: "dir" }] } : { content: { path, sha: "s1", content: Buffer.from(text).toString("base64"), encoding: "base64" } },
+  };
+
+  it("R1 read_file reads a file by owner, repo and path in a find: its text, a file reference, nothing saved as a recipe", async () => {
+    const genter = fakeGenter({ connected: ["github"], recipes: [commits], results });
+    model = fakeModel([
+      call("read_file", { owner: "Genterai", repo: "genter-cli", path: "/src/agent.js", branch: "main" }),
+      (body) => {
+        const out = JSON.parse(lastOf(body, "tool"));
+        assert.equal(out.ref, 2); // [1] is the commits recipe
+        assert.equal(out.text, text);
+        assert.equal(out.lines, 3);
+        return answer("src/agent.js exports a and b [2].");
+      },
+    ]);
+    const out = await agentWith(genter).start({ task: "последние коммиты в genter-cli и прочитай src/agent.js", mode: "find" });
+    assert.equal(out.status, "done");
+    assert.deepEqual(genter.executed, [{ id: undefined, tool: "GITHUB_GET_REPOSITORY_CONTENT", args: { owner: "Genterai", repo: "genter-cli", path: "src/agent.js", ref: "main" }, account: undefined, remember: false }]);
+    assert.deepEqual(out.references.map((r) => [r.n, r.kind, r.where.path]), [[2, "file", "src/agent.js"]]);
+    assert.match(model.requests[0].messages[0].content, /call read_file/);
+    assert.ok(model.requests[0].tools.some((t) => t.function.name === "read_file"));
+  });
+
+  it("R2 a folder gives its entries; a missing file is an error the model can act on", async () => {
+    const genter = fakeGenter({ connected: ["github"], recipes: [commits], results });
+    model = fakeModel([
+      call("read_file", { owner: "Genterai", repo: "genter-cli", path: "src" }),
+      (body) => {
+        assert.deepEqual(JSON.parse(lastOf(body, "tool")).folder, ["src/agent.js", "src/lib/"]);
+        return call("read_file", { owner: "Genterai", repo: "nope", path: "x.js" });
+      },
+      (body) => {
+        assert.match(lastOf(body, "tool"), /Could not read/);
+        return answer("Done [2].");
+      },
+    ]);
+    genter.execute = ((execute) => async (input) => (input.args.repo === "nope" ? { result: { successful: false, error: "Not Found" } } : execute(input)))(genter.execute);
+    const out = await agentWith(genter).start({ task: "что в папке src genter-cli", mode: "find" });
+    assert.equal(out.status, "done");
+  });
+
+  it("R3 an answer that gives up for want of a tool is sent back once, on the strong model, and the file is read", async () => {
+    const genter = fakeGenter({ connected: ["github"], recipes: [commits], results });
+    model = fakeModel([
+      answer("Коммиты: ... К сожалению, в текущем наборе инструментов нет команды, позволяющей прочитать содержимое файла."),
+      (body) => {
+        assert.match(lastOf(body, "user"), /Do not give up on a part of the task/);
+        assert.equal(body.model, "strong");
+        return call("read_file", { owner: "Genterai", repo: "genter-cli", path: "src/agent.js" });
+      },
+      answer("Коммиты [1]; src/agent.js экспортирует a и b [2]."),
+    ]);
+    const out = await agentWith(genter, { model: "fast", strongModel: "strong" }).start({ task: "свежие коммиты genter-cli и прочитай изменённые файлы", mode: "find" });
+    assert.equal(model.requests[0].model, "fast");
+    assert.equal(out.status, "done");
+    assert.match(out.answer, /экспортирует/);
+    assert.equal(genter.executed.at(-1).tool, "GITHUB_GET_REPOSITORY_CONTENT");
+  });
+
+  it("R4 giving up again after the push back is the answer: no loop", async () => {
+    const genter = fakeGenter({ connected: ["github"], recipes: [commits], results });
+    model = fakeModel([answer("No tool can read files."), answer("Could not read the files: the repository is archived.")]);
+    const out = await agentWith(genter).start({ task: "read the files of genter-cli", mode: "find" });
+    assert.equal(out.status, "done");
+    assert.equal(model.requests.length, 2);
+  });
+
+  it("R5 a viewer cannot read files", async () => {
+    const genter = fakeGenter({ connected: ["github"], recipes: [commits], results });
+    model = fakeModel([call("read_file", { owner: "Genterai", repo: "genter-cli", path: "a.js" }), answer("Only recipes [1].")]);
+    await agentWith(genter, { canExecute: false }).start({ task: "read a.js", mode: "find" });
+    assert.match(lastOf(model.requests[1], "tool"), /Not allowed/);
+    assert.equal(genter.executed.length, 0);
+  });
+});
