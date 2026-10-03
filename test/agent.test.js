@@ -464,3 +464,61 @@ describe("Reading files: a built-in read, never 'there is no tool'", () => {
     assert.equal(genter.executed.length, 0);
   });
 });
+
+describe("A task of several parts on a recipe of one: the tools of the other parts are found", () => {
+  const commits = { id: "rec_commits", tool: "GITHUB_LIST_COMMITS", args: { owner: "Genterai", repo: "genter-cli" }, description: "### Recent commits of Genterai/genter-cli", summary: "20 commits", status: "valid", score: 0.8 };
+  const file = { content: { path: "src/agent.js", sha: "s1", content: Buffer.from("const a = 1;\n").toString("base64"), encoding: "base64" } };
+
+  it("P1 search_tools asks for Composio tools even when a recipe fits well", async () => {
+    const genter = fakeGenter({ connected: ["github"], recipes: [commits] });
+    const asked = [];
+    genter.search = async (input) => (asked.push(input), [commits]);
+    model = fakeModel([call("search_tools", { query: "GITHUB_GET_COMMIT" }), answer("Commits [1].")]);
+    await agentWith(genter).start({ task: "recent commits and their files", mode: "find" });
+    assert.equal(asked.at(-1).tools, true);
+    assert.equal(asked[0].tools, undefined); // the briefing's search stays recipe-first
+  });
+
+  it("P2 read_file with a commit's ref and a path reads that path in the commit's repository; '' and the app's name are no account", async () => {
+    const genter = fakeGenter({ connected: ["github"], recipes: [commits], results: { GITHUB_LIST_COMMITS: [{ sha: "c1" }], GITHUB_GET_REPOSITORY_CONTENT: file } });
+    model = fakeModel([
+      call("execute", { id: "rec_commits" }),
+      call("read_file", { ref: 1, path: "src/agent.js", branch: "", account: "github" }),
+      (body) => {
+        assert.equal(JSON.parse(lastOf(body, "tool")).text, "const a = 1;\n");
+        return answer("Read [2].");
+      },
+    ]);
+    const out = await agentWith(genter).start({ task: "recent commits and their files", mode: "find" });
+    assert.deepEqual(genter.executed.at(-1), { id: undefined, tool: "GITHUB_GET_REPOSITORY_CONTENT", args: { owner: "Genterai", repo: "genter-cli", path: "src/agent.js" }, account: undefined, remember: false });
+    assert.equal(out.references[0].where.path, "src/agent.js");
+  });
+
+  it("P3 an execute with no tool and no id is an error that moves the run to the strong model", async () => {
+    const genter = fakeGenter({ connected: ["github"], recipes: [commits] });
+    model = fakeModel([
+      call("execute", { args: { owner: "Genterai" } }),
+      (body) => {
+        assert.match(lastOf(body, "tool"), /Pass tool/);
+        assert.equal(body.model, "strong");
+        return answer("Commits [1].");
+      },
+    ]);
+    await agentWith(genter, { model: "fast", strongModel: "strong" }).start({ task: "recent commits", mode: "find" });
+    assert.equal(genter.executed.length, 0);
+  });
+
+  it("P4 an empty ending after a read is asked for the answer once, never a bare Done", async () => {
+    const genter = fakeGenter({ connected: ["github"], recipes: [commits], results: { GITHUB_LIST_COMMITS: [{ sha: "c1" }] } });
+    model = fakeModel([
+      call("execute", { id: "rec_commits" }),
+      answer(""),
+      (body) => {
+        assert.match(lastOf(body, "user"), /You ended without an answer/);
+        return answer("The latest commit is c1 [1].");
+      },
+    ]);
+    const out = await agentWith(genter).start({ task: "recent commits", mode: "find" });
+    assert.equal(out.answer, "The latest commit is c1 [1].");
+  });
+});

@@ -145,6 +145,8 @@ at 20 000 characters, or a folder's entries, with a reference to cite and to edi
 does not surface it ("read file" finds READMEs and gists, not `GITHUB_GET_REPOSITORY_CONTENT`), so a task like "find the
 recent commits, read their files, write a note" no longer stops at "there is no tool to read files". An answer that
 gives up on a part for want of a tool is sent back once, on the strong model, to find the tool and do it.
+`search_tools` always brings Composio tools (`search({ tools: true })`): a recipe that fits one part of a task (the
+commits) no longer hides the tools of the others (`GITHUB_GET_A_COMMIT` for the files a commit changed).
 
 ### Test scenarios
 
@@ -163,6 +165,8 @@ Composio schemas (`test/fixtures/catalogues.json`: Linear, Slack, Jira, Trello, 
 | A1–A3 | agent, GitHub | find → references → the agent sends only edits (`edit_file`), the file is read and committed once at its sha; `write` with edits and no model step; edits refused in a find; write at a link with no run |
 | A4–A7 | agent, other apps | an exact Gmail reply with no model call; Linear through its catalogue; a catalogue too slow for the answer; an answer with no marks |
 | R1–R5 | agent, reading files | `read_file` by owner, repo and path in a find: the text, a file reference, no recipe; a folder's entries; a missing file is an error; "no tool to read files" is sent back once on the strong model, never twice; a viewer cannot read |
+| P1–P4 | agent, a task of several parts on a recipe of one | `search_tools` gets Composio tools even when a recipe fits; `read_file` with a commit's ref + path reads that path; `""` or the app's name is no account; an execute with no tool moves to the strong model; an empty ending is asked for the answer once |
+| T1 | tool ranking | "the" and other empty words do not pull `..._FOR_THE_AUTHENTICATED_USER` tools up |
 | A8–A10 | refused | a number without its run, an unknown number, a tool of another app, a viewer; `GENTER_WRITE` only where writing is on |
 
 ## Ready recipes
