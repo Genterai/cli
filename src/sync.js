@@ -268,7 +268,9 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
         }
       }
       if (role.nextPage) {
-        if (!found.length) break;
+        // A page shorter than the page size asked for is the last one: no call for an empty page after it.
+        const size = Number(pick(role.args ?? {}, ["per_page", "page_size", "pageSize", "limit", "maxResults", "max_results"])) || 0;
+        if (!found.length || (size && found.length < size)) break;
         continue;
       }
       const next = role.next && pick(res, role.next);
