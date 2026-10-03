@@ -80,7 +80,7 @@ genter continue '{"run_id":"...","message":"use my work account"}'
 A run ends `done`, `needs_input` (a question), `needs_connection` (a connect link) or `failed`; `continue` picks it up.
 A `done` answer cites its sources as `[n]` and comes with `references` (see below).
 `find` runs only tools that read (by Composio's hint or the verb in the slug). New calls are saved as recipes with
-the agent's description, so the next run finds them. The model is `AGENT_MODEL` on OpenRouter, default `openai/gpt-oss-20b`.
+the agent's description, so the next run finds them. The model is `AGENT_MODEL` on OpenRouter, default `openai/gpt-oss-120b` (see Models).
 
 ```js
 import { createAgent } from "genter-cli/agent";
@@ -94,6 +94,31 @@ await agent.send({ run_id: out.run_id, message: "only the work calendar" });
 `instructions` (optional) is what a workspace admin wrote for this person: tone, language, defaults, what to stay away
 from. It goes to the model as a second system message in every call, after the fixed prompt (which stays cacheable).
 It shapes the work; it never changes which tools may run (`canExecute`, the connectors the `genter` client allows).
+
+## Models
+
+Every model call (the agent, result summaries, query translation) uses `openai/gpt-oss-120b` on OpenRouter, the
+provider that answers first (`OPENROUTER_SORT=latency`). Set `AGENT_MODEL`, `AGENT_STRONG_MODEL`, `SUMMARY_MODEL`,
+`QUERY_MODEL` to change one. Chosen on Genter's own tasks (October 2026), 7 checks per run:
+
+- translate "когда мне убираться" to `{en, terms}` within 6 s;
+- summarize 40 calendar events so the one named «Уборка» is found by that request;
+- not keep a GitHub notification ("clean up") as a recipe for it;
+- the agent, twice: answer it from a recipe whose result held the event; list Google Tasks across two lists.
+
+| model | checks passed | agent answer | summary | the 7 checks cost |
+|---|---|---|---|---|
+| `openai/gpt-oss-120b`, latency | 34/35 (5 runs; 21/21 since a close line keeps a result) | 1.0–1.7 s | 2.7–8.3 s | $0.0024 |
+| `openai/gpt-oss-120b`, throughput | 20/21 (3 runs) | 0.6–1.0 s | 2.0–2.8 s | $0.0152 |
+| `google/gemini-3.5-flash-lite` | 20/21 | 1.2–3.0 s | 3.3–3.7 s | $0.0173 |
+| `openai/gpt-5.4-nano` | 20/21 | 2.4–6.3 s | 5.4–7.9 s | $0.0057 |
+| `openai/gpt-6-luna` | 20/21 | 2.7–6.0 s | 8.0–13.1 s | $0.0025 |
+| `openai/gpt-oss-20b` | 18/21: keeps the notification every time | 0.4–8.4 s | 2.9–4.1 s | $0.0029 |
+| `google/gemma-4-31b-it` | 5/7: translation and summary time out | 7.2–8.7 s | 62 s | $0.0235 |
+
+Cheaper ones (`inclusionai/ling-3.0-flash`, `qwen/qwen3.7-flash`, `deepseek/deepseek-v4-flash`, `inception/mercury-2.5`)
+miss the 6 s translation or the summary, and `gpt-oss-120b` sorted by price breaks its JSON. The live sync builder
+keeps `BUILDER_MODEL` (default `google/gemma-4-31b-it`).
 
 ## References and writes
 
@@ -241,7 +266,7 @@ and files over 300 KB.
 ## Data
 
 - Raw tool results are never stored, only a 1-3 sentence summary written by an LLM through OpenRouter
-  (`SUMMARY_MODEL`, default `openai/gpt-oss-20b`). The same call with the same result is not saved twice.
+  (`SUMMARY_MODEL`, default `openai/gpt-oss-120b`). The same call with the same result is not saved twice.
 - Every record (tool, args, description, summary, embedding) is encrypted with AES-256-GCM before it is stored.
   The store only sees `{id, remembered, blob}`. The CLI keeps its key in `~/.genter/config.json` and data in `~/.genter/calls.json`.
 - Agent runs are encrypted the same way (`~/.genter/runs.json`). Tool results in them are replaced by their summaries

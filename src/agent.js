@@ -26,10 +26,11 @@ export function createAgent({
   secret,
   userId,
   runs, // get(id) -> { blob } | undefined, put({ id, blob })
-  model = process.env.AGENT_MODEL || "openai/gpt-oss-20b",
-  // A task no saved recipe covers yet, or a run the fast model gets stuck on, goes to a stronger model.
+  model = process.env.AGENT_MODEL || "openai/gpt-oss-120b",
+  // A task no saved recipe covers yet, or a run the fast model gets stuck on, goes to a stronger model
+  // (AGENT_STRONG_MODEL; the same one by default: none of the models tried did these tasks better, README → Models).
   // What it finds becomes recipes, so the next time the same task runs on the fast one.
-  strongModel = process.env.AGENT_STRONG_MODEL || process.env.BUILDER_MODEL || "google/gemma-4-31b-it",
+  strongModel = process.env.AGENT_STRONG_MODEL || "openai/gpt-oss-120b",
   maxSteps = 12,
   canExecute = true,
   canConnect = true,
@@ -70,7 +71,7 @@ export function createAgent({
       headers: { Authorization: `Bearer ${openrouterApiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         model: useModel,
-        provider: { sort: process.env.OPENROUTER_SORT || "throughput" }, // the fastest provider for the model
+        provider: { sort: process.env.OPENROUTER_SORT || "latency" }, // the quickest provider to answer (see README → Models)
         // The system prompt and tool list never change, so providers can cache this prefix; a person's instructions follow it.
         messages: [...preamble, ...messages.map(({ keep, ...m }) => m)],
         tools,
@@ -867,7 +868,7 @@ const SYSTEM = `You are Genter's task agent. You act in the user's connected app
 
 The first message already holds everything for a fast start: saved recipes that match the task (proven past calls with their args and a summary of what they returned), candidate Composio tools with their args, and the connected apps.
 - If a recipe's result_summary or the knowledge from synced sources already answers the question, answer right away without calling anything. Not for what changes over time (latest, recent, new, today, current state): execute the recipe by id for fresh data.
-- result_matched lists what a recipe's last result held that fits the task (an event, a task, an email): that recipe is where the answer is. Execute it by id for the details first, before searching anywhere else.
+- result_matched lists what a recipe's last result held that is close to the task (an event, a task, an email). When those lines are what the task asks about, that recipe is where the answer is: execute it by id for the details first (or answer from it), before searching anywhere else. Lines about something else are not a match.
 - A task with several parts (find the recent commits, read their files, write a note) is done part by part; a recipe that answers one part does not end the run.
 - Synced sources are an app's content kept searchable (a GitHub repo, Notion pages). Use search_knowledge for more of it. When the user asks to remember, index or keep an app's content up to date, call add_source; to refresh one, sync_source. Filters in the user's words ("only docs/", "no tests", "only the last 200") go to add_source filter.
 - Built-in live sync recipes cover only: github = the FILES of a repository; notion = pages. A saved one (live_sync in the first message) fits too: add_source with its id. Anything else (issues, pull requests, commits, emails, tickets, messages, rows, any other app) needs a new live sync recipe: call build_live_sync with the whole goal in the user's words; it builds, tests, saves and adds the source. Never use a built-in one for something it does not cover, and never answer a remember/sync request with a one-off execute.

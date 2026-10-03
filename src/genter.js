@@ -1,7 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
 import { Composio } from "@composio/core";
 import { readyFor } from "./ready.js";
-import { createSources, fill, inferList } from "./sync.js";
+import { createSources, fill, inferList, pick } from "./sync.js";
 
 // Genter = Composio + recipes of past calls.
 // A call record is { id, tool, args, created_at, summary, digest, memory }: memory is the recipe description,
@@ -45,12 +45,13 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     p.finally(() => pending.delete(p));
   };
 
-  // OpenRouter chat call. The fastest provider for the model by default (OPENROUTER_SORT=throughput|latency|price).
+  // OpenRouter chat call. The provider that answers first by default (OPENROUTER_SORT=latency|throughput|price): by price,
+  // gpt-oss-120b went to providers that broke its JSON; by throughput, to ones 7x dearer and no quicker (README → Models).
   async function chat(body, timeout = 30000) {
     const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: { Authorization: `Bearer ${openrouterApiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ provider: { sort: process.env.OPENROUTER_SORT || "throughput" }, ...body }),
+      body: JSON.stringify({ provider: { sort: process.env.OPENROUTER_SORT || "latency" }, ...body }),
       signal: AbortSignal.timeout(timeout),
     });
     if (!res.ok) throw new Error(`OpenRouter ${res.status} ${await res.text()}`);
@@ -106,7 +107,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
         query,
         chat(
           {
-            model: process.env.QUERY_MODEL || process.env.SUMMARY_MODEL || "openai/gpt-oss-20b",
+            model: process.env.QUERY_MODEL || process.env.SUMMARY_MODEL || "openai/gpt-oss-120b",
             reasoning: { effort: "low" },
             response_format: { type: "json_object" },
             messages: [
@@ -189,7 +190,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       },
       summarize: (title, text) =>
         chat({
-          model: process.env.SUMMARY_MODEL || "openai/gpt-oss-20b",
+          model: process.env.SUMMARY_MODEL || "openai/gpt-oss-120b",
           reasoning: { effort: "low" },
           messages: [
             {
@@ -229,7 +230,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
   async function describe(tool, args, data, task) {
     if (!openrouterApiKey) return null;
     const text = await chat({
-      model: process.env.SUMMARY_MODEL || "openai/gpt-oss-20b",
+      model: process.env.SUMMARY_MODEL || "openai/gpt-oss-120b",
       reasoning: { effort: "low" },
       response_format: { type: "json_object" },
       messages: [
@@ -249,7 +250,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
                 "false when it is empty or its items only share a word with the request and are about something else.\n"
               : "") +
             "Only say what is in the data, do not guess. No passwords, tokens or keys." +
-            `\n\n${JSON.stringify(data, decodeBase64).slice(0, 20000)}`,
+            `\n\n${forSummary(data).slice(0, 20000)}`,
         },
       ],
     }).catch(() => null); // a recipe without a summary is still useful
@@ -270,17 +271,22 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     }
   }
 
-  // How well a recipe fits a request: best of how it is described, what its result was about and each thing it held.
-  // A key term of the request written in its result (summary or an item: "Уборка") puts it among the recipes to use,
-  // since one word in a long list barely moves a vector. matched: the result's lines that made it fit.
+  // How well a recipe fits a request: how it is described, what its result was about, and each thing it held.
+  // A line of its last result with a key term of the request in it ("Уборка" for "когда уборка") or very close by
+  // meaning makes it a strong match: the answer is there. A line somewhat close (0.33+) or a key term in the summary
+  // only puts it among the recipes offered: short lines come that close to unrelated requests too ("📣 X · bio" to
+  // "что нового в почте", 0.35), and the agent sees the lines and judges. matched: those lines.
   function resultMatch(r, vector, terms) {
     const lines = r.items ?? [];
-    const byItem = (r.itemEmbeddings ?? []).map((e, i) => [lines[i], cosine(vector, e)]);
-    let score = Math.max(...[r.memory.embedding, r.summaryEmbedding].filter(Boolean).map((e) => cosine(vector, e)), ...byItem.map(([, s]) => s));
+    const byItem = (r.itemEmbeddings ?? []).map((e, i) => [lines[i], cosine(vector.slice(0, e.length), e)]);
+    // A line counts only when it clearly fits: among a hundred lines one is always a little close to anything.
+    let score = Math.max(...[r.memory.embedding, r.summaryEmbedding].filter(Boolean).map((e) => cosine(vector, e)));
     const said = (text) => terms.some((t) => String(text ?? "").toLowerCase().includes(t));
+    const close = byItem.filter(([l, s]) => l && s >= ITEM_FIT).sort((a, b) => b[1] - a[1]);
     const written = lines.filter(said);
-    if (written.length || said(r.summary)) score = Math.max(score, (minScore + strongScore) / 2);
-    const matched = [...new Set([...written, ...byItem.filter(([l, s]) => l && s >= minScore).sort((a, b) => b[1] - a[1]).map(([l]) => l)])].slice(0, 3);
+    const matched = [...new Set([...written, ...close.map(([l]) => l)])].slice(0, 3);
+    if (written.length || close[0]?.[1] >= ITEM_STRONG) score = Math.max(score, strongScore);
+    else if (matched.length || said(r.summary)) score = Math.max(score, (minScore + strongScore) / 2);
     return { score, matched };
   }
 
@@ -296,16 +302,26 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     let itemEmbeddings = known?.itemEmbeddings;
     let named = null;
     if (!summary) {
-      named = await describe(record.tool, record.args, data, task);
+      named = (await describe(record.tool, record.args, data, task)) ?? (await describe(record.tool, record.args, data, task));
       summary = named?.summary ?? null;
-      items = named?.items?.length ? named.items : undefined;
-      [summaryEmbedding, ...itemEmbeddings] = summary ? await embedMany([summary, ...(items ?? [])]).catch(() => []) : [];
-      if (!itemEmbeddings?.length) itemEmbeddings = undefined;
+      // The model sees the first part of a long result; every listed item gets its own line too (a 100-event week had
+      // «Уборка» as event 71, and nothing found it).
+      const lines = [...new Set([...(named?.items ?? []), ...listLines(data)])].slice(0, MAX_ITEMS);
+      items = lines.length ? lines : undefined;
+      const vectors = summary ? await embedMany([summary, ...lines, ...(task ? [task] : [])]).catch(() => []) : [];
+      const asked = task && vectors.length ? vectors.pop() : null;
+      [summaryEmbedding, ...itemEmbeddings] = vectors;
+      itemEmbeddings = itemEmbeddings?.length ? itemEmbeddings.map((e) => e.slice(0, ITEM_DIMS)) : undefined;
+      // The model misses one line among many and calls a result unrelated (40 events with «Уборка» for "когда мне
+      // убираться"): a line close to the request keeps it. Dropping a good recipe costs more than keeping a weak one.
+      if (named?.relevant === false && asked && itemEmbeddings?.some((e) => cosine(asked.slice(0, e.length), e) >= ITEM_FIT)) named.relevant = true;
     }
-    // Found nothing the request was about: a new call is not kept as a recipe (it stays openable by its id, unlisted).
-    // A recipe that already exists (a ready read, the same call saved before) keeps its place.
-    if (named?.relevant === false && !record.memory && !sameCall.length) {
-      await save({ ...record, summary, unrelated: true }, false);
+    // A recipe is a call whose result is known: no summary (the model failed twice) or nothing the request was about,
+    // and a new call is not kept as one (it stays runnable by its id, unlisted). A recipe that already exists (a ready
+    // read, the same call saved before) keeps its place.
+    if ((!summary || named?.relevant === false) && !record.memory && !sameCall.length) {
+      const { memory, ...stored } = (await load(record.id).catch(() => null)) ?? record; // save_recipes may have run meanwhile
+      await save({ ...stored, summary, ...(summary ? { unrelated: true } : { unsummarized: true }) }, false);
       return summary;
     }
     const found = { ...(items && { items }), ...(itemEmbeddings && { itemEmbeddings }) };
@@ -321,7 +337,9 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       await save(target);
       if (record.id !== similar.id) await save({ id: record.id, alias: similar.id }, false);
     } else {
-      target = { ...record, summary, summaryEmbedding, ...found };
+      // What is stored now: the agent's save_recipes or a repeat may have written it since execute.
+      const stored = (await load(record.id).catch(() => null)) ?? record;
+      target = { ...stored, summary, summaryEmbedding, ...found };
       await save(target, Boolean(target.memory));
     }
     if (description) {
@@ -562,7 +580,8 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       const repeat = previous && JSON.stringify(previous.args) === JSON.stringify(args);
       const record = { id: repeat ? previous.id : randomUUID(), tool, args, created_at, digest };
       if (repeat && previous.digest === digest) {
-        later(save({ ...previous, created_at }));
+        // Re-read when saving: the summary of its first run may still be being written, an old copy would erase it.
+        if (previous.summary || previous.memory) later(load(previous.id).then((now) => save({ ...now, created_at })));
         return { id: record.id, result, summary: previous.summary, ...outdated };
       }
       // A recipe made before it ever ran (a ready read): this first result is its own, kept in place.
@@ -757,6 +776,9 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       return Promise.all(
         recipes.map(async ({ id, description, short, tags = [], status = "valid", auto }) => {
           const record = await load(id); // an alias resolves to the recipe it was merged into
+          // A recipe is a call whose result is known: one with no summary (not written yet, or the result had nothing
+          // for its request) stays unlisted.
+          if (!record.memory && record.kind !== "sync" && (!record.summary || record.unrelated)) return { id: record.id, status: "not saved: no result summary" };
           const created_at = new Date().toISOString();
           const embedding = await embed(
             `${description}\nresult: ${record.summary ?? ""}\ntags: ${tags.join(", ")}\ntool: ${record.tool}\nargs: ${JSON.stringify(record.args)}`,
@@ -780,6 +802,16 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
   return api;
 }
 
+// A result's items get a line each, up to MAX_ITEMS, embedded and kept as their first ITEM_DIMS dimensions (int8):
+// text-embedding-3 vectors keep their meaning when cut (Matryoshka), «Уборка» vs "когда мне убираться" is 0.40 at 1536
+// and 0.41 at 256, unrelated events stay under 0.22, and 100 lines cost ~34 KB instead of 600.
+const MAX_ITEMS = 100;
+const ITEM_DIMS = 256;
+// How close a line of a result is to a request (256 dims): «Уборка» to "когда мне убираться" 0.40, to "when should I
+// clean" 0.36, to "когда уборка" 0.56; "Стоматолог" to "когда к стоматологу" 0.60; unrelated lines mostly under 0.30,
+// a few short ones up to 0.35.
+const ITEM_FIT = 0.33;
+const ITEM_STRONG = 0.45;
 const decrypted = new Map(); // "<user>:<blob prefix>" -> record, shared by every genter in the process
 const translations = new Map(); // query -> Promise<{ en, terms } | null>
 
@@ -897,6 +929,37 @@ function decodeBase64(key, value) {
     return { ...value, content: Buffer.from(value.content, "base64").toString("utf8") };
   }
   return value;
+}
+
+// One line per item of a list result: its title and when, e.g. "Уборка (2026-10-08 13:00)".
+const TITLE_KEYS = ["summary", "title", "subject", "name", "full_name", "display_name", "notes", "snippet", "text"];
+const WHEN_KEYS = ["start.dateTime", "start.date", "due", "date", "messageTimestamp", "internalDate", "created_at", "createdAt", "created", "updated"];
+export function listLines(data) {
+  const shape = data && typeof data === "object" ? inferList(data) : { single: true };
+  if (shape.single) return [];
+  return [pick(data, shape.items)]
+    .flat()
+    .filter((x) => x && typeof x === "object")
+    .map((raw) => {
+      const title = TITLE_KEYS.map((k) => raw[k]).find((v) => typeof v === "string" && v.trim()) ?? pick(raw, shape.title);
+      if (title == null || String(title).trim() === "") return null;
+      const when = WHEN_KEYS.map((k) => pick(raw, k)).find((v) => v != null && v !== "");
+      const at = when == null ? "" : /^\d{12,13}$/.test(String(when)) ? new Date(Number(when)).toISOString() : String(when);
+      return `${String(title).replace(/\s+/g, " ").trim().slice(0, 160)}${at ? ` (${at.replace("T", " ").slice(0, 16)})` : ""}`;
+    })
+    .filter(Boolean);
+}
+
+// A result as the summary model reads it: bookkeeping fields out and long texts cut, so 20,000 characters hold the
+// whole list, not its first 15 events.
+const NOISE = /^(etag|kind|iCalUID|sequence|reminders|eventType|node_id|gravatar_id|avatar_url|(?!html_)\w+_url|_links|headers|payload)$/;
+function forSummary(data) {
+  const list = data && typeof data === "object" && !inferList(data).single; // one file or page is read whole
+  return JSON.stringify(data, (key, value) => {
+    if (NOISE.test(key)) return undefined;
+    if (list && typeof value === "string" && value.length > 400) return `${value.slice(0, 400)}…`;
+    return decodeBase64(key, value);
+  });
 }
 
 function cosine(a, b) {
