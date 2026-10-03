@@ -1,4 +1,6 @@
-import { BUILTIN, fill, inferList, pick } from "./sync.js";
+import { BUILTIN, fill, inferList, inferText, matches, pick } from "./sync.js";
+
+const FILE_EXCLUDE = BUILTIN.github.exclude;
 
 // The live sync builder: a model (BUILDER_MODEL, default openai/gpt-6-luna) that writes a live sync recipe for any app from its tools.
 // It explores the tools (search, schemas, real sample calls), writes the recipe, tests it on real data and fixes it
@@ -40,95 +42,238 @@ export function createBuilder({ genter, openrouterApiKey, model = process.env.BU
     }
   }
 
-  // What an app can keep as knowledge, planned by a model from the app's read tools in one call:
-  // [{ name, description, containers?: { tool, args }, items: { tool, args } }]; items args may use {{container}}.
-  async function plan(toolkit) {
-    const tools = await genter.app_tools({ toolkit });
+  // JSON from the model, in one call.
+  async function ask(content) {
     const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: { Authorization: `Bearer ${openrouterApiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model,
-        response_format: { type: "json_object" },
-        messages: [
-          {
-            role: "user",
-            content:
-              `These are the read tools of ${toolkit}, called as the connected person. Plan what they would want to keep as searchable ` +
-              "knowledge: THEIR OWN data (their emails, events, rows, tasks, messages, posts, documents, their repos' issues...), " +
-              "up to 6 kinds, most useful first. Never a global or public search (all of GitHub, all of Twitter): reach their data " +
-              "through tools that list what belongs to them, or a search scoped to them (author:@me, in their workspace). " +
-              "When the content lives in containers (labels, calendars, spreadsheets, task lists, channels, boards, teams, lists, " +
-              "folders), give a containers call that lists them and an items call that lists the content of one, with " +
-              '"{{container}}" where the container id goes: the recipe then runs over all of them. ' +
-              "Prefer calls that return many items with their text and an updated time. " +
-              "Use only these tools and their argument names; ask for the largest page size; recent items first.\n" +
-              "Kinds must not overlap (not both all mail and inbox). Mark recommended: true on the ones most people want kept. " +
-              "Streams (mail, chat, posts) take recent items only (the newest page).\n" +
-              'Reply with JSON only: {"kinds": [{"name": "Emails by label", "description": "...", "recommended": true, "containers": {"tool": "...", "args": {}}, ' +
-              '"items": {"tool": "...", "args": {"label_ids": ["{{container}}"], "max_results": 100}}}]} (containers is optional).\n\n' +
-              JSON.stringify(tools),
-          },
-        ],
-      }),
+      body: JSON.stringify({ model, response_format: { type: "json_object" }, messages: [{ role: "user", content }], usage: { include: true } }),
       signal: AbortSignal.timeout(120000),
     });
     if (!res.ok) throw new Error(`Planner failed: ${res.status} ${await res.text()}`);
     const data = await res.json();
-    return { kinds: (JSON.parse(data.choices[0].message.content).kinds ?? []).slice(0, 6), cost: data.usage?.cost ?? 0 };
+    return { json: JSON.parse(data.choices[0].message.content), cost: data.usage?.cost ?? 0 };
   }
 
-  // A planned kind as a live sync recipe: its containers call (if any) and its items call, run for real once,
-  // their lists found with inferList.
-  async function shapeKind(toolkit, kind, account) {
-    let each;
-    let first;
-    if (kind.containers?.tool) {
-      const res = await genter.sources.probe({ tool: kind.containers.tool, args: kind.containers.args ?? {}, account, raw: true });
-      if (res?.successful === false) throw new Error(`${kind.containers.tool}: ${JSON.stringify(res.error).slice(0, 200)}`);
-      const shape = inferList(res);
-      if (!shape.items) throw new Error("no containers found");
-      first = [pick(res, shape.items)].flat()[0];
-      each = { tool: kind.containers.tool, args: kind.containers.args ?? {}, items: shape.items, id: shape.id, label: shape.title, max: 20 };
-    }
-    const args = kind.items.args ?? {};
-    const sampleArgs = each ? fill(args, { container: String(pick(first, each.id)) }) : args;
-    const res = await genter.sources.probe({ tool: kind.items.tool, args: sampleArgs, account, raw: true });
-    if (res?.successful === false) throw new Error(`${kind.items.tool}: ${JSON.stringify(res.error).slice(0, 200)}`);
-    const shape = inferList(res);
-    const triggers = await genter.pick_triggers({ toolkit, tool: kind.items.tool, args, description: kind.description });
+  // What an app can keep as knowledge, planned by a model from the app's read tools in one call:
+  // [{ name, description, recommended, containers?: { tool, args, max? }, items: { tool, args, where?, skip?, next?, url? }, read?: { tool, args } }].
+  async function plan(toolkit) {
+    const tools = await genter.app_tools({ toolkit });
+    const { json, cost } = await ask(
+      `These are the read tools of ${toolkit}, called as the connected person. Plan what they would want to keep as searchable ` +
+        "knowledge: THEIR OWN data (their repos' files, issues and pull requests, their emails, events, rows, tasks, messages, " +
+        "documents...), up to 8 kinds, most useful first. Never a global or public search (all of GitHub, all of Twitter): reach " +
+        "their data through tools that list what belongs to them, or a search scoped to them.\n" +
+        "When the content lives in containers (repositories, projects, labels, calendars, spreadsheets, task lists, channels, " +
+        "boards, teams, folders), give a containers call that lists the person's containers (most recently active first) and " +
+        "an items call that lists ALL the content of one container: every page, every state (open and closed), the whole tree " +
+        '(recursive). In its args "{{container.<path>}}" is a field of one container as the containers call returns it, e.g. ' +
+        '{"owner": "{{container.owner.login}}", "repo": "{{container.name}}", "tree_sha": "{{container.default_branch}}"}. ' +
+        "Each container becomes a recipe of its own that keeps all of it up to date.\n" +
+        'When the items call returns no text (a file tree, ids only), add a read call for one item, with "{{item.<path>}}" for ' +
+        "the item's fields, plus container fields as above. items.where keeps only items whose paths equal values " +
+        '(e.g. {"type": "blob"} for files in a tree); items.skip drops items where any path equals its value, \"*\" = the path is there ' +
+        '(GitHub lists pull requests among issues: skip {"pull_request": "*"}). Pagination: put "{{page}}" in the page or cursor ' +
+        'arg; numbered pages need nothing more, a cursor needs items.next = the path to the next cursor in the response. items.url (optional) is a link template, e.g. ' +
+        '"https://github.com/{{container.full_name}}/blob/{{container.default_branch}}/{{item.path}}".\n' +
+        "Use only these tools and their argument names; ask for the largest page size. Kinds must not overlap. Mark " +
+        "recommended: true on the ones most people want kept. Streams (mail, chat, posts) take recent items only.\n" +
+        'Reply with JSON only: {"kinds": [{"name": "Files", "description": "...", "recommended": true, ' +
+        '"containers": {"tool": "...", "args": {}}, "items": {"tool": "...", "args": {...}, "where": {...}}, "read": {"tool": "...", "args": {...}}}]} ' +
+        "(containers and read are optional).\n\n" +
+        JSON.stringify(tools),
+    );
+    return { kinds: (json.kinds ?? []).filter((k) => k?.items?.tool).slice(0, 8), cost };
+  }
+
+  // Args fixed by the model once, from a real container and the error the first try gave.
+  async function repair(kind, container, error) {
+    const schemas = await Promise.all(
+      [kind.items.tool, kind.read?.tool].filter(Boolean).map((t) => genter.schema(t).catch(() => ({ tool: t }))),
+    );
+    const { json, cost } = await ask(
+      `A sync of "${kind.name}" calls ${kind.items.tool} once per container; a container is one item of ${kind.containers.tool}. ` +
+        `With these args it failed: ${String(error).slice(0, 400)}\n` +
+        `Args: ${JSON.stringify({ items: kind.items.args, read: kind.read?.args })}\n` +
+        `A real container: ${clip(container)}\nSchemas: ${clip(schemas, 6000)}\n` +
+        'Fix the args. "{{container.<path>}}" is a field of the container (paths as in the real one), "{{item.<path>}}" a field ' +
+        'of an item. Reply with JSON only: {"items": {...args}, "read": {...args} | null}.',
+    );
     return {
-      name: kind.name,
-      toolkit,
-      description: kind.description ?? kind.name,
-      title: kind.name,
-      recommended: Boolean(kind.recommended),
-      scope: {},
-      list: { tool: kind.items.tool, args, ...shape, ...(shape.version && shape.version === shape.id && { append: true }), ...(each && { each }) },
-      triggers,
-      every: triggers.length ? null : 60,
+      kind: { ...kind, items: { ...kind.items, args: json.items ?? kind.items.args }, ...(kind.read && { read: { ...kind.read, args: json.read ?? kind.read.args } }) },
+      cost,
     };
   }
 
+  // A planned kind for one container (or none): its items call run for real once, shaped with inferList (and
+  // inferText for its read call), with an estimate of how much a sync of it does.
+  async function shape(toolkit, kind, container, account, triggers) {
+    const ctx = container ? { container: container.raw } : {};
+    const args = fillContainer(kind.items.args ?? {}, ctx);
+    // Pages: a cursor at items.next, or numbered pages when {{page}} is in the args without one.
+    const paged = JSON.stringify(args).includes("{{page}}");
+    const next = paged && kind.items.next ? { next: kind.items.next } : paged ? { nextPage: true } : {};
+    const res = await genter.sources.probe({ tool: kind.items.tool, args: fill(args, { page: next.nextPage ? 1 : undefined }), account, raw: true });
+    if (res?.successful === false) throw new Error(`${kind.items.tool}: ${JSON.stringify(res.error).slice(0, 300)}`);
+    const shape = inferList(res);
+    const filters = Object.fromEntries(["where", "skip"].filter((k) => kind.items[k] && Object.keys(kind.items[k]).length).map((k) => [k, kind.items[k]]));
+    const list = { tool: kind.items.tool, args, ...shape, ...next, ...filters };
+    if (kind.items.url) list.url = fillContainer(kind.items.url, ctx);
+    let read;
+    if (kind.read?.tool && !shape.single) {
+      const first = [pick(res, shape.items)].flat().find((x) => x && matches(x, filters));
+      if (!first) throw new Error("no items to read");
+      const readArgs = fillContainer(kind.read.args ?? {}, ctx);
+      const sample = await genter.sources.probe({ tool: kind.read.tool, args: fill(readArgs, { item: { ...first, id: pick(first, shape.id) } }), account, raw: true });
+      if (sample?.successful === false) throw new Error(`${kind.read.tool}: ${JSON.stringify(sample.error).slice(0, 300)}`);
+      const text = inferText(sample);
+      if (!text) throw new Error(`${kind.read.tool} returned no text`);
+      read = { tool: kind.read.tool, args: readArgs, ...text };
+      delete list.text;
+    }
+    if (shape.version && shape.version === shape.id) list.append = true;
+    const label = container?.label;
+    const name = label ? `${label} · ${kind.name}` : kind.name;
+    const recipe = {
+      name,
+      toolkit,
+      description: label ? `${kind.description ?? kind.name} — ${label}` : (kind.description ?? kind.name),
+      title: name,
+      recommended: Boolean(kind.recommended),
+      scope: {},
+      list,
+      ...(read && { read, exclude: FILE_EXCLUDE, maxSize: 300_000 }),
+      triggers,
+      every: triggers.length ? null : 60,
+    };
+    recipe.estimate = estimate(recipe, res, shape);
+    return recipe;
+  }
+
+  // How much a sync of a recipe does, from its first real page — no prices: items, calls to the app, model work.
+  // level: light (a few calls), medium, heavy (hundreds of calls or more on the first sync).
+  function estimate(recipe, res, shape) {
+    const list = recipe.list;
+    const found = shape.single ? [res] : [pick(res, shape.items)].flat().filter(Boolean);
+    const keep = shape.single ? found : found.filter((x) => matches(x, list));
+    const exclude = (recipe.exclude ?? []).map((x) => new RegExp(x, "i"));
+    const items = keep.filter((x) => !exclude.some((re) => re.test(String(pick(x, shape.id) ?? "")))).filter((x) => !(recipe.maxSize && x.size > recipe.maxSize)).length;
+    // More pages: a cursor came back, or a numbered first page came back full (a page of 100 or more).
+    const more = Boolean(list.next ? pick(res, list.next) : list.nextPage && found.length >= 100);
+    const reads = recipe.read ? items : 0;
+    const first = (list.nextPage ? 2 : 1) + reads;
+    return {
+      items,
+      more, // more pages than the first: at least this many
+      calls_first: first, // calls to the app on the first sync (at least, when there are more pages)
+      calls_next: list.nextPage ? 2 : 1, // a later sync lists again (numbered pages end on an empty one) and reads only what changed
+      reads_per_item: Boolean(recipe.read),
+      level: first > 200 || (more && recipe.read) ? "heavy" : first > 20 || more ? "medium" : "light",
+    };
+  }
+
+  // Triggers picked once per kind (on its first container) and moved onto the others: config values that came from
+  // the first container's args are taken from the same args of each other one.
+  function retarget(triggers, firstArgs, args) {
+    const map = new Map(Object.entries(firstArgs).filter(([, v]) => typeof v === "string").map(([k, v]) => [v, k]));
+    return triggers.map((t) => ({
+      ...t,
+      config: Object.fromEntries(Object.entries(t.config ?? {}).map(([k, v]) => [k, map.has(v) ? args[map.get(v)] : v])),
+    }));
+  }
+
+  // The containers of a kind: [{ id, label, raw }], as many as the plan says (default 20).
+  async function containersOf(kind, account) {
+    const res = await genter.sources.probe({ tool: kind.containers.tool, args: kind.containers.args ?? {}, account, raw: true });
+    if (res?.successful === false) throw new Error(`${kind.containers.tool}: ${JSON.stringify(res.error).slice(0, 200)}`);
+    const shape = inferList(res);
+    if (!shape.items) throw new Error("no containers found");
+    const skip = (x) => x.archived === true || x.disabled === true || x.in_trash === true;
+    return [pick(res, shape.items)]
+      .flat()
+      .filter((x) => x && !skip(x))
+      .slice(0, Math.min(Number(kind.containers.max) || 20, 50))
+      .map((raw) => ({ id: String(pick(raw, shape.id)), label: String(pick(raw, ["full_name", ...[shape.title].flat()]) ?? pick(raw, shape.id)), raw }));
+  }
+
+  // One kind: a recipe per container (or one without containers), each tested and saved.
+  async function discoverKind(toolkit, kind, account, onProgress, known) {
+    let cost = 0;
+    const made = [];
+    const save = async (recipe, container) => {
+      const { estimate: e } = recipe;
+      // Nothing there yet (a repo without issues): no recipe; Set up sync again picks it up once there is.
+      if (!e.items && !e.more) return onProgress({ kind: kind.name, container: container?.label ?? null, empty: true });
+      // Set up sync again replaces the recipe of the same name instead of adding another.
+      const id = known.get(recipe.name);
+      const out = await genter.save_live_sync({
+        ...(id && { id }),
+        recipe,
+        description: recipe.description,
+        short: recipe.description,
+        tags: [toolkit, kind.name, ...(container ? [container.label] : [])],
+        account,
+      });
+      if (!out.saved) throw new Error((out.test?.problems ?? ["test failed"]).join("; "));
+      made.push(out.id);
+      onProgress({ kind: kind.name, container: container?.label ?? null, recipe: out.id, estimate: e });
+    };
+    if (!kind.containers?.tool) {
+      const triggers = await genter.pick_triggers({ toolkit, tool: kind.items.tool, args: kind.items.args ?? {}, description: kind.description });
+      await save(await shape(toolkit, kind, null, account, triggers));
+      return { made, cost };
+    }
+    const containers = await containersOf(kind, account);
+    if (!containers.length) throw new Error("nothing to keep: no containers");
+    onProgress({ kind: kind.name, containers: containers.map((c) => c.label) });
+    // The first container settles the args (repaired once if they fail) and the triggers; the others reuse them.
+    const [first, ...rest] = containers;
+    let firstRecipe;
+    try {
+      firstRecipe = await shape(toolkit, kind, first, account, []);
+    } catch (e) {
+      const fixed = await repair(kind, first.raw, e.message);
+      cost += fixed.cost;
+      kind = fixed.kind;
+      firstRecipe = await shape(toolkit, kind, first, account, []);
+    }
+    const triggers = await genter.pick_triggers({ toolkit, tool: kind.items.tool, args: firstRecipe.list.args, description: kind.description });
+    firstRecipe.triggers = triggers;
+    firstRecipe.every = triggers.length ? null : 60;
+    await save(firstRecipe, first).catch((e) => onProgress({ kind: kind.name, container: first.label, error: e.message }));
+    await pool(rest, 4, async (c) => {
+      try {
+        const recipe = await shape(toolkit, kind, c, account, []);
+        recipe.triggers = retarget(triggers, firstRecipe.list.args, recipe.list.args);
+        recipe.every = triggers.length ? null : 60;
+        await save(recipe, c);
+      } catch (e) {
+        onProgress({ kind: kind.name, container: c.label, error: e.message });
+      }
+    });
+    return { made, cost };
+  }
+
   return {
-    // Everything an app can keep as knowledge, as recipes: plans the kinds, lists each kind's containers (up to
-    // `perKind`) and runs its items call once per container. Every run is saved as a recipe with its live sync
-    // plan, so each can be kept up to date with one click. onProgress gets { kind, container?, recipe?, error? }.
-    // Everything an app can keep as knowledge, as live sync recipes: a model plans the kinds of the person's own data,
-    // and each kind becomes one recursive recipe (its containers -> their items), shaped from real responses, with a
-    // trigger or an hourly schedule, tested and saved. onProgress gets { planned } then { kind, recipe | error }.
-    async discover({ toolkit, account, onProgress = () => {} }) {
-      const { kinds, cost } = await plan(toolkit);
-      onProgress({ planned: kinds.map((k) => ({ name: k.name, description: k.description, recommended: Boolean(k.recommended) })) });
+    // Everything an app can keep as knowledge, as live sync recipes: a model plans the kinds of the person's own data
+    // (files, issues, pull requests...); a kind that lives in containers (repositories, projects, channels) becomes a
+    // recipe per container, each listing ALL of that container (every page, the whole tree) so a sync keeps all of it
+    // up to date and reads only what changed. Every recipe is shaped from real responses, tested, saved, and carries
+    // an estimate of how much its sync does. onProgress gets { planned }, { kind, containers },
+    // then { kind, container, recipe, estimate }, { kind, container, empty } or { kind, container?, error }.
+    // kinds (optional): a plan to use instead of planning one.
+    async discover({ toolkit, account, kinds: given, onProgress = () => {} }) {
+      const { kinds, cost: planCost } = given ? { kinds: given, cost: 0 } : await plan(toolkit);
+      const known = new Map(((await genter.sources.templates().catch(() => [])) ?? []).filter((t) => !t.builtin && t.toolkit === toolkit).map((t) => [t.name, t.template]));
+      let cost = planCost;
+      onProgress({ planned: kinds.map((k) => ({ name: k.name, description: k.description, recommended: Boolean(k.recommended), per_container: Boolean(k.containers?.tool) })) });
       const made = [];
       await Promise.all(
         kinds.map(async (kind) => {
           try {
-            const recipe = await shapeKind(toolkit, kind, account);
-            const out = await genter.save_live_sync({ recipe, description: kind.description || kind.name, short: kind.description || kind.name, tags: [toolkit], account });
-            if (!out.saved) throw new Error((out.test?.problems ?? ["test failed"]).join("; "));
-            made.push({ kind: kind.name, recipe: out.id });
-            onProgress({ kind: kind.name, recipe: out.id });
+            const out = await discoverKind(toolkit, kind, account, onProgress, known);
+            made.push(...out.made);
+            cost += out.cost;
           } catch (e) {
             onProgress({ kind: kind.name, error: e.message });
           }
@@ -184,7 +329,7 @@ Recipe format:
 Paths are dotted from the tool's result: "data.issues", "data.items.0.title", "properties.*.title.0.plain_text" (* = first key that matches).
 args may use {{field}} (scope), {{item.id}} / {{item.<path>}} (read), {{page}} (the cursor from list.next, or the page number with nextPage).
 A placeholder that is the whole value keeps its type; an empty one drops the argument (so the first page has no cursor).
-where/skip: { "<path>": value } — keep only items where every path equals its value / drop items where any does.
+where/skip: { "<path>": value } — keep only items where every path equals its value / drop items where any does; "*" = the path is there.
 
 How to work:
 1. Find the tool that lists the items (search_tools, get_tool_schema). Prefer one that returns an updated time, sha or etag per item: that is the version.
@@ -235,3 +380,28 @@ const TOOLS = [
     },
   },
 ].map(({ name, description, parameters }) => ({ type: "function", function: { name, description, parameters } }));
+
+// Only the {{container...}} placeholders of a template, so {{item...}} and {{page}} stay for the sync engine.
+function fillContainer(value, ctx) {
+  if (typeof value === "string") {
+    const whole = value.match(/^\{\{(container(?:\.[\w.*]+)?)\}\}$/);
+    if (whole) return pick(ctx, whole[1]) ?? value;
+    return value.replace(/\{\{(container(?:\.[\w.*]+)?)\}\}/g, (m, p) => {
+      const v = pick(ctx, p);
+      return v == null ? m : String(v);
+    });
+  }
+  if (Array.isArray(value)) return value.map((v) => fillContainer(v, ctx));
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, fillContainer(v, ctx)]));
+  return value;
+}
+
+const clip = (v, max = 3000) => JSON.stringify(v, (k, x) => (typeof x === "string" && x.length > 200 ? `${x.slice(0, 200)}…` : Array.isArray(x) && x.length > 3 ? x.slice(0, 3) : x)).slice(0, max);
+
+// Runs fn over items, n at a time.
+async function pool(items, n, fn) {
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
+    while (next < items.length) await fn(items[next++]);
+  }));
+}

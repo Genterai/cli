@@ -442,7 +442,8 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
 
     // The tools of an app that read, compact, for planning what can be synced: [{ tool, description, args }].
     async app_tools({ toolkit }) {
-      const tools = await composio.tools.getRawComposioTools({ toolkits: [toolkit], limit: 400 });
+      // GitHub alone has ~900 tools: a lower cap drops its repos, issues and pull requests.
+      const tools = await composio.tools.getRawComposioTools({ toolkits: [toolkit], limit: 2000 });
       return tools
         .filter((t) => readsOnly(t.slug, t.tags))
         .map((t) => ({
