@@ -425,7 +425,9 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     // `apps`: the connected toolkits. Those the query names (in its words or in English: "гугл таски" ->
     // Google Tasks) give their tools first, because a search over all of Composio returns other apps' tools.
     // `toolkits`: apps to search in anyway (the agent passes those its task named).
-    async search({ query, limit = 5, apps = [], toolkits: also = [] }) {
+    // `tools`: Composio tools come too even when a recipe fits well (the agent's search_tools looks for a tool, and a
+    // recipe for one part of its task would otherwise hide the tools of every other part).
+    async search({ query, limit = 5, apps = [], toolkits: also = [], tools: withTools = false }) {
       const english = await translate(query);
       const toolkits = [...new Set([...also, ...namedApps(`${query} ${english?.en ?? ""}`, apps)])];
       const vector = await embed(english?.en ? `${query}\n${english.en}` : query).catch(() => null);
@@ -461,7 +463,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
           if (s) m.source = { id: s.id, status: s.status, items: s.stats?.items ?? 0, synced_at: s.synced_at, watching: s.watching, every: s.every };
         }
       }
-      if (memories.some((m) => m.status === "valid" && m.score >= strongScore)) return memories;
+      if (!withTools && memories.some((m) => m.status === "valid" && m.score >= strongScore)) return memories;
 
       const search = english?.en ?? query;
       const [own, all] = await Promise.all([
@@ -761,6 +763,8 @@ const SYNONYMS = {
   edit: ["update", "patch"], change: ["update", "patch"], rename: ["update", "patch"], remove: ["delete"],
   latest: ["list"], recent: ["list"], send: ["send", "create"], write: ["create", "send"],
 };
+// Words that say nothing about a tool: "the" matched every ..._FOR_THE_AUTHENTICATED_USER slug.
+const STOPWORDS = new Set(["the", "and", "for", "with", "from", "that", "this", "they", "them", "their", "are", "was", "its", "into", "please"]);
 const appTools = new Map(); // toolkit -> { at, list: Promise<tools> }
 const appVectors = new Map(); // toolkit -> { at, list: Promise<[slug, embedding][]> }
 
@@ -776,7 +780,7 @@ export function namedApps(text, apps = []) {
 // `semantic`: the query's similarity to each tool, when there are vectors; the words then only break ties.
 export function rankTools(tools, query, limit, semantic = null) {
   const stem = (w) => w.replace(/(ies|es|s)$/, "");
-  const said = String(query).toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2);
+  const said = String(query).toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2 && !STOPWORDS.has(w));
   const words = [...new Set([...said, ...said.flatMap((w) => SYNONYMS[w] ?? [])].map(stem))];
   const scored = tools.map((t, i) => {
     const slug = t.slug.toLowerCase().split("_").map(stem);
