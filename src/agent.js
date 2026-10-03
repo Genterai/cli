@@ -19,6 +19,9 @@ export function createAgent({
   userId,
   runs, // get(id) -> { blob } | undefined, put({ id, blob })
   model = process.env.AGENT_MODEL || "openai/gpt-oss-20b",
+  // A task no saved recipe covers yet, or a run the fast model gets stuck on, goes to a stronger model.
+  // What it finds becomes recipes, so the next time the same task runs on the fast one.
+  strongModel = process.env.AGENT_STRONG_MODEL || process.env.BUILDER_MODEL || "openai/gpt-6-luna",
   maxSteps = 12,
   canExecute = true,
   canConnect = true,
@@ -49,13 +52,13 @@ export function createAgent({
     return { ...synced, watching, note };
   }
 
-  async function llm(messages, usage, tools = TOOLS, toolChoice) {
+  async function llm(messages, usage, tools = TOOLS, toolChoice, useModel = model) {
     const started = Date.now();
     const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: { Authorization: `Bearer ${openrouterApiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        model,
+        model: useModel,
         provider: { sort: process.env.OPENROUTER_SORT || "throughput" }, // the fastest provider for the model
         // The system prompt and tool list never change, so providers can cache this prefix.
         messages: [{ role: "system", content: SYSTEM }, ...messages.map(({ keep, ...m }) => m)],
@@ -82,8 +85,15 @@ export function createAgent({
   async function call(run, name, input) {
     switch (name) {
       case "search_tools": {
+        // A model that keeps searching instead of running something: after a few searches it must execute.
+        run.searches = (run.searches ?? 0) + 1;
+        if (run.searches > MAX_SEARCHES) {
+          return { content: JSON.stringify({ error: "No more searching.", hint: `Execute now the closest tool you already have: ${[...(run.seen ?? [])].slice(0, 8).join(", ")}. Then answer.` }) };
+        }
         const found = await genter.search({ query: input.query, limit: 6, apps: run.apps, toolkits: run.named });
-        return { content: JSON.stringify(found.map(compactFound)) };
+        run.seen = new Set([...(run.seen ?? []), ...found.filter((f) => f.tool).slice(0, 4).map((f) => f.tool)]);
+        const hint = run.searches >= 2 ? "Pick the closest tool above and execute it now; do not search again." : undefined;
+        return { content: JSON.stringify(hint ? { tools: found.map(compactFound), hint } : found.map(compactFound)) };
       }
       case "get_tool_schema": {
         const schemas = await Promise.all((input.tools ?? []).slice(0, 5).map((slug) => genter.schema(slug).catch((e) => ({ tool: slug, error: e.message }))));
@@ -222,6 +232,8 @@ export function createAgent({
     currentRun = run;
     run.sourced = false;
     run.nudged = false;
+    run.searches = 0;
+    run.seen = new Set();
     run.failed = {}; // "<tool> <args>" -> error of a call that failed in this round
     run.failures = {}; // tool -> failed calls in this round
     let result = null;
@@ -230,7 +242,9 @@ export function createAgent({
         // A remember/keep-up-to-date task gets only the source tools: no one-off execute instead of a source.
         // Once the source is added there is nothing left to call: only the answer.
         // A question or a one-off task never adds sources: without these the model reads the data instead.
-        const message = await llm(run.messages, usage, run.sync && builder ? SYNC_TOOLS : run.sync ? TOOLS : TASK_TOOLS, run.sourced ? "none" : undefined);
+        // Stuck on the fast model (failed calls, searching again and again): the rest of the run goes to the strong one.
+        if (!run.strong && (Object.keys(run.failures).length || run.searches >= 2 || run.nudged || run.retried)) run.strong = true;
+        const message = await llm(run.messages, usage, run.sync && builder ? SYNC_TOOLS : run.sync ? TOOLS : TASK_TOOLS, run.sourced ? "none" : undefined, run.strong ? strongModel : model);
         run.messages.push({ role: "assistant", content: message.content ?? null, ...(message.tool_calls?.length && { tool_calls: message.tool_calls }) });
         if (!message.tool_calls?.length) {
           // An answer that is a question for the user: once, it is sent back to do the task instead.
@@ -266,7 +280,7 @@ export function createAgent({
       // Out of steps: one more call with no tools, so the user gets an answer from what was found.
       if (!result) {
         run.messages.push({ role: "user", content: "No more tool calls. Answer now from what you found; say briefly what is missing." });
-        const message = await llm(run.messages, usage, TOOLS, "none").catch(() => null);
+        const message = await llm(run.messages, usage, TOOLS, "none", run.strong ? strongModel : model).catch(() => null);
         run.messages.push({ role: "assistant", content: message?.content ?? null });
         result = message?.content?.trim()
           ? { status: "done", answer: message.content.trim() }
@@ -282,13 +296,13 @@ export function createAgent({
     run.status = result.status;
     run.updated_at = new Date().toISOString();
     // Stored without raw tool results: each one is replaced by its summary.
-    const stored = { ...run, timing: undefined, messages: run.messages.map(({ keep, ...m }) => (keep ? { ...m, content: keep } : m)) };
+    const stored = { ...run, timing: undefined, seen: undefined, messages: run.messages.map(({ keep, ...m }) => (keep ? { ...m, content: keep } : m)) };
     await runs.put({ id: run.id, blob: seal(stored) });
     const out = {
       run_id: run.id,
       ...result,
       steps: run.steps,
-      usage: { ...usage, ...run.timing, cost_usd: Number(usage.cost_usd.toFixed(5)), ms: Date.now() - started + (run.timing.search_ms || 0) },
+      usage: { ...usage, ...run.timing, model: run.strong ? strongModel : model, cost_usd: Number(usage.cost_usd.toFixed(5)), ms: Date.now() - started + (run.timing.search_ms || 0) },
     };
     onEvent({ type: "done", result: out });
     return out;
@@ -319,6 +333,8 @@ export function createAgent({
         status: "running",
         created_at: new Date().toISOString(),
         apps: [...new Set(connected.map((c) => c.toolkit))],
+        // No valid recipe that clearly fits: this task is new, the strong model works it out (and leaves recipes).
+        strong: !recipes.some((r) => r.status !== "outdated" && r.score >= STRONG_RECIPE),
         named: namedApps(`${task} ${english?.en ?? ""}`, connected.map((c) => c.toolkit)), // apps the task is about
         recipes: Object.fromEntries(recipes.map((r) => [r.id, r.tool])),
         steps: [],
@@ -405,6 +421,8 @@ const NO_QUESTIONS =
 
 // A tool that keeps failing is stopped after this many failures in one round, so a run never spins on it.
 const MAX_TOOL_FAILURES = 3;
+const MAX_SEARCHES = 3;
+const STRONG_RECIPE = 0.45; // a recipe this close to the task is known ground: the fast model is enough
 
 const SYNC_INTENT = /запомн|помни|держи .*актуал|актуальн|синхрон|проиндекс|индексир|remember|keep .*(up to date|in sync|current)|\bsync\b|index /i;
 
@@ -450,6 +468,7 @@ The first message already holds everything for a fast start: saved recipes that 
 - Keyword search in apps (Gmail q, Slack, Drive, Notion, GitHub search) matches literal words, and the data is often in another language than the request (English emails, Russian request). Put the key terms in both languages in one query, joined with OR, e.g. Gmail: ("объединенные знания" OR "unified knowledge" OR "merged knowledge"). The first message lists the terms.
 - A failed call is not retried with the same args. "Not Found" from an app means the repo, file or id is wrong, not the tool: find the real one (list the user's repos, search) instead of guessing. After two failures of a tool, answer with what you have.
 - A connected app always has tools: never answer that there is no tool for it. If no candidate fits, search_tools with the app name and what to do (e.g. "Google Tasks list tasks"), then execute.
+- A name you do not know (an org, a project, a repo, a person): look it up in the connected apps first (e.g. the user's GitHub repositories and orgs) and answer about what you found. "Projects" in GitHub usually means repositories: list them (and Projects only if asked).
 - An empty result is not an answer: retry once with translated or broader terms before saying nothing was found.
 - When you execute a tool that did not come from a recipe and it is a reusable step, pass description, short and tags so the next run finds it:
   description is a general Markdown recipe: "### <Verb> <object>", a line "\`TOOL_SLUG\` · args: \`{a, b?}\`", what it returns, how to reuse it, "- pitfall: ..." bullets; short is one line under 100 characters for lists; tags in English and Russian.
