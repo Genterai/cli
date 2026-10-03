@@ -1,11 +1,11 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
 import { Composio } from "@composio/core";
 
-// Genter = Composio + memory of past calls.
-// A call record is { id, tool, args, created_at, memory? }. Results are never stored:
-// the memory the agent writes is the result. Records are encrypted before they reach the store,
-// so the store only sees rows { id, remembered, blob } and needs: get(id), put(row),
-// all() (remembered rows) and pending() (rows not remembered). It deletes pending rows after an hour.
+// Genter = Composio + recipes of past calls.
+// A call record is { id, tool, args, created_at, memory? }; memory is the recipe description. Results are never stored.
+// Every successful call is saved as a recipe right away; the agent can improve its description later.
+// Records are encrypted before they reach the store, so the store only sees rows { id, remembered, blob }
+// and needs: get(id), put(row), all() (remembered rows).
 export function createGenter({ composioApiKey, openrouterApiKey, userId, secret, store, minScore = 0.45 }) {
   if (!secret) throw new Error("secret is required to encrypt stored calls");
   const composio = new Composio({ apiKey: composioApiKey });
@@ -82,7 +82,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     },
 
     // Run a tool. Pass `id` to repeat a saved recipe (args are merged on top).
-    // Pass `description` (and `tags`) to save the recipe in the same call.
+    // Every successful call becomes a recipe: with the agent's description if given, otherwise Composio's.
     async execute({ id, tool, args = {}, description, tags }) {
       const previous = id && (await load(id));
       if (previous) {
@@ -94,32 +94,35 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       const outdated = previous?.memory && {
         hint: `If this result does not match the saved description, save recipe ${id} with status "outdated" and say what changed.`,
       };
-      if (!result.successful) return { result, ...outdated }; // failed calls are not recipes, nothing to save
+      if (!result.successful) return { result, ...outdated }; // failed calls are not recipes
 
-      const record = { id: randomUUID(), tool, args, created_at: new Date().toISOString() };
-      await save(record);
+      // Same tool and args already saved: reuse that recipe instead of a duplicate.
+      const same = (await store.all())
+        .map((row) => open(row.blob))
+        .find((r) => r.tool === tool && JSON.stringify(r.args) === JSON.stringify(args));
+      const record = same ?? { id: randomUUID(), tool, args, created_at: new Date().toISOString() };
+      if (!same) await save(record);
+
       if (description) {
         const [saved] = await api.save_recipes({ recipes: [{ id: record.id, description, tags }] });
         return { id: record.id, result, saved, ...outdated };
       }
-      const unsaved = (await store.pending()).map((row) => open(row.blob)).map(({ id, tool, args }) => ({ id, tool, args }));
+      if (!same) {
+        const info = await composio.tools.getRawComposioToolBySlug(tool);
+        const keys = Object.keys(args).join(", ");
+        await api.save_recipes({
+          recipes: [{ id: record.id, description: `${info.description} — ${tool}, args: {${keys}}.`, tags: [info.toolkit?.slug].filter(Boolean), auto: true }],
+        });
+      }
       return {
         id: record.id,
         result,
         ...outdated,
-        next: {
-          required:
-            "Save every successful step as a recipe, intermediate ones too (e.g. finding a repo before reading it). " +
-            "Until saved, search will not find these calls; they are deleted after an hour. Save them all in one save_recipes call.",
-          tool: "save_recipes",
-          args: {
-            recipes: unsaved.map((call) => ({
-              id: call.id,
-              description: `<Verb> <object> — ${call.tool}, args: {${Object.keys(call.args).join(", ")}}. Returns <what and in what form>. For another target override <args>.`,
-              tags: [call.tool.split("_")[0].toLowerCase(), "<tags in English and Russian>"],
-            })),
-          },
-        },
+        ...((!same || same.memory?.auto) && {
+          note:
+            "Saved as a recipe with Composio's generic description. Optional: improve it with save_recipes " +
+            "(the user's intent in plain words, what it returns, pitfalls, tags in English and Russian).",
+        }),
       };
     },
 
@@ -127,11 +130,11 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     // Use status "outdated" when a saved recipe no longer does what its description says.
     async save_recipes({ recipes }) {
       return Promise.all(
-        recipes.map(async ({ id, description, tags = [], status = "valid" }) => {
+        recipes.map(async ({ id, description, tags = [], status = "valid", auto }) => {
           const record = await load(id);
           const created_at = new Date().toISOString();
           const embedding = await embed(`${description}\ntags: ${tags.join(", ")}\ntool: ${record.tool}\nargs: ${JSON.stringify(record.args)}`);
-          await save({ ...record, memory: { created_at, tags, description, status, embedding } });
+          await save({ ...record, memory: { created_at, tags, description, status, embedding, ...(auto && { auto }) } });
           return { id, created_at, tags, description, status };
         }),
       );

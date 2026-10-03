@@ -1,16 +1,16 @@
 # genter
 
-Composio tools with saved call recipes. An AI agent finds a tool, runs it, and saves a recipe: what the call does and with which args.
+Composio tools with saved call recipes. An AI agent finds a tool and runs it; every successful call is saved as a recipe: what it does and with which args.
 Next time `search` finds that ready-made call (tool + args), not just a raw tool.
 
 ```
 search       → saved recipes first, Composio tools if none is valid
-execute      → runs a tool (or repeats a recipe by id); with description + tags it saves the recipe right away
-save_recipes → saves several calls as recipes at once; each description is embedded for search
+execute      → runs a tool (or repeats a recipe by id) and saves it as a recipe; description + tags make it easier to find
+save_recipes → improves descriptions of several recipes at once; each description is embedded for search
 ```
 
-If `execute` gets no description, its `next` field holds a ready `save_recipes` call with every unsaved step of the last hour,
-intermediate ones too, so the agent saves the whole chain at once. Failed calls are not recorded.
+Without a description, `execute` saves the recipe with Composio's generic tool description, so every step,
+intermediate ones too, is found next time. The same tool + args is not saved twice. Failed calls are not recorded.
 If a recipe stops matching its description, the agent saves it with `status: "outdated"` and says why.
 Search then falls back to Composio again.
 
@@ -36,7 +36,7 @@ Without it, `search` uses Composio only.
 | `register_tool` | `{toolkit}` | `{toolkit, connect_url, connection_id}` — open the URL to connect the app |
 | `login` | `{}` | `{user_id, connected: [{toolkit, status}]}` |
 | `search` | `{query, limit?}` | `[{id, tool, args, tags, description, status}]` |
-| `execute` | `{tool, args}` or `{id, args?}`, optional `{description, tags}` | `{id, result, saved}` or `{id, result, next}` |
+| `execute` | `{tool, args}` or `{id, args?}`, optional `{description, tags}` | `{id, result, saved?, note?}` |
 | `save_recipes` | `{recipes: [{id, description, tags?, status?}]}` | `[{id, created_at, tags, description, status}]` |
 
 ```bash
@@ -50,7 +50,6 @@ genter execute '{"tool":"GMAIL_FETCH_EMAILS","args":{"query":"is:unread newer_th
 ## Data
 
 - Tool results are never stored. The recipe the agent writes is the result.
-- Calls without a recipe are deleted after one hour.
 - Every record (tool, args, description, embedding) is encrypted with AES-256-GCM before it is stored.
   The store only sees `{id, remembered, blob}`. The CLI keeps its key in `~/.genter/config.json` and data in `~/.genter/calls.json`.
 

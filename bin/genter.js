@@ -14,18 +14,11 @@ const write = (file, data) => {
   writeFileSync(join(dir, file), JSON.stringify(data, null, 2));
 };
 
-// Local store: encrypted calls in ~/.genter/calls.json. Calls without memory live one hour.
-const HOUR = 60 * 60 * 1000;
+// Local store: encrypted recipes in ~/.genter/calls.json.
 const store = {
   get: async (id) => read("calls.json")[id],
-  put: async (row) => {
-    const rows = read("calls.json");
-    rows[row.id] = { ...row, at: rows[row.id]?.at ?? Date.now() };
-    for (const r of Object.values(rows)) if (!r.remembered && Date.now() - r.at > HOUR) delete rows[r.id];
-    write("calls.json", rows);
-  },
+  put: async (row) => write("calls.json", { ...read("calls.json"), [row.id]: row }),
   all: async () => Object.values(read("calls.json")).filter((r) => r.remembered),
-  pending: async () => Object.values(read("calls.json")).filter((r) => !r.remembered && Date.now() - r.at < HOUR),
 };
 
 const [name, json = "{}"] = process.argv.slice(2);
