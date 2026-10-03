@@ -31,8 +31,13 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
 
   return {
     // Returns a Composio link the user opens to connect an app (gmail, github, ...).
-    async register_tool({ toolkit }) {
-      const request = await composio.toolkits.authorize(userId, toolkit);
+    // callback_url: where Composio sends the user afterwards (with ?status=success|failed).
+    async register_tool({ toolkit, callback_url }) {
+      const configs = await composio.authConfigs.list({ toolkit });
+      const authConfigId =
+        configs.items[0]?.id ??
+        (await composio.authConfigs.create(toolkit, { type: "use_composio_managed_auth", name: `${toolkit} auth config` })).id;
+      const request = await composio.connectedAccounts.link(userId, authConfigId, callback_url ? { callbackUrl: callback_url } : {});
       return { toolkit, connect_url: request.redirectUrl, connection_id: request.id };
     },
 
