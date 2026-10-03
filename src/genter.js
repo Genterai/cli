@@ -455,7 +455,8 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
 
     // Live sync of any recipe in one call: its plan (made when it was saved, or now), a source, a first sync, then
     // its triggers, or an hourly schedule when there are none (or they can not be turned on here).
-    async live_sync({ id, budgetMs = 60000, account }) {
+    // once: just sync it now, without triggers or a schedule.
+    async live_sync({ id, budgetMs = 60000, account, once = false }) {
       if (!sources) throw new Error("Sources are not available here");
       let record = await load(id);
       if (record.kind !== "sync" && !record.live) {
@@ -467,6 +468,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       const plan = record.kind === "sync" ? record.sync : record.live;
       const source = await sources.create({ template: record.id, scope: {}, account, recipe_of: record.id });
       const synced = await sources.sync({ id: source.id, budgetMs });
+      if (once) return synced;
       if (plan.triggers?.length) {
         const watched = await sources.watch({ id: source.id }).catch((e) => ({ watching: [], watch_error: e.message }));
         if (watched.watching?.length) return watched;
