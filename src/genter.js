@@ -341,7 +341,9 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
 
     // Memory first (ready-made calls with args), plain Composio search as fallback.
     // A non-English query is matched in its language and in English: recipes and summaries are mostly English.
-    async search({ query, limit = 5 }) {
+    // `toolkits`: apps the query names (e.g. connected Google Tasks); their tools come first, because a
+    // search over all of Composio often returns other apps' tools for a generic "list my tasks".
+    async search({ query, limit = 5, toolkits = [] }) {
       const english = await translate(query);
       const vector = await embed(english?.en ? `${query}\n${english.en}` : query).catch(() => null);
       const memories = vector
@@ -370,7 +372,12 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
         : [];
       if (memories.some((m) => m.status === "valid" && m.score >= strongScore)) return memories;
 
-      const tools = await composio.tools.getRawComposioTools({ search: english?.en ?? query, limit });
+      const search = english?.en ?? query;
+      const [own, all] = await Promise.all([
+        toolkits.length ? composio.tools.getRawComposioTools({ toolkits, search, limit }).catch(() => []) : [],
+        composio.tools.getRawComposioTools({ search, limit }),
+      ]);
+      const tools = [...own, ...all.filter((t) => !own.some((o) => o.slug === t.slug))].slice(0, limit + own.length);
       const found = tools.map((t) => ({
         id: null,
         tool: t.slug,
