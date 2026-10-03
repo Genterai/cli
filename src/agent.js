@@ -560,6 +560,8 @@ export function createAgent({
     // "" or the app's own name ("github") is no connection: models send them for account.
     if (!account || account === app || run.apps?.includes(account)) account = undefined;
     const chosen = account ?? run.account ?? run.accounts?.[app];
+    // The request goes along: a result with nothing for it is not kept as a recipe.
+    input = run.task && input.remember !== false ? { ...input, task: run.task } : input;
     const first = await genter.execute({ ...input, account: chosen });
     if (chosen || !notHere(first)) return chosen ? { ...first, accountId: chosen } : first;
     run.connections ??= await genter
@@ -773,7 +775,7 @@ function compactFound(r, ref) {
     };
   }
   if (r.id) {
-    return { ref, id: r.id, tool: r.tool, args: r.args, description: r.description, result_summary: r.summary, when: r.when, status: r.status, score: r.score };
+    return { ref, id: r.id, tool: r.tool, args: r.args, description: r.description, result_summary: r.summary, ...(r.matched && { result_matched: r.matched }), when: r.when, status: r.status, score: r.score };
   }
   return { tool: r.tool, description: (r.description ?? "").slice(0, 300), args: compactSchema(r.args) };
 }
@@ -865,6 +867,7 @@ const SYSTEM = `You are Genter's task agent. You act in the user's connected app
 
 The first message already holds everything for a fast start: saved recipes that match the task (proven past calls with their args and a summary of what they returned), candidate Composio tools with their args, and the connected apps.
 - If a recipe's result_summary or the knowledge from synced sources already answers the question, answer right away without calling anything. Not for what changes over time (latest, recent, new, today, current state): execute the recipe by id for fresh data.
+- result_matched lists what a recipe's last result held that fits the task (an event, a task, an email): that recipe is where the answer is. Execute it by id for the details first, before searching anywhere else.
 - A task with several parts (find the recent commits, read their files, write a note) is done part by part; a recipe that answers one part does not end the run.
 - Synced sources are an app's content kept searchable (a GitHub repo, Notion pages). Use search_knowledge for more of it. When the user asks to remember, index or keep an app's content up to date, call add_source; to refresh one, sync_source. Filters in the user's words ("only docs/", "no tests", "only the last 200") go to add_source filter.
 - Built-in live sync recipes cover only: github = the FILES of a repository; notion = pages. A saved one (live_sync in the first message) fits too: add_source with its id. Anything else (issues, pull requests, commits, emails, tickets, messages, rows, any other app) needs a new live sync recipe: call build_live_sync with the whole goal in the user's words; it builds, tests, saves and adds the source. Never use a built-in one for something it does not cover, and never answer a remember/sync request with a one-off execute.
@@ -883,7 +886,7 @@ The first message already holds everything for a fast start: saved recipes that 
 - The files a GitHub commit changed: GITHUB_GET_A_COMMIT {owner, repo, ref: <sha>} (its files[].filename), then read_file for each.
 - Never show a file's text, a commit's files or any other content that no call of this run returned: read it first.
 - To change an existing file of a repository, call edit_file with exact pieces of its current text and what goes instead: it reads and commits the file for you. Never write a whole existing file out; GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS is for new files.
-- An empty result is not an answer: retry once with translated or broader terms before saying nothing was found.
+- An empty result is not an answer: retry once with translated or broader terms before saying nothing was found. Neither is a result whose items only share a word with the request (a GitHub notification that says "clean up" for "when do I clean"): say it holds nothing about the task and look where it would be (calendar, tasks).
 - Every successful call is saved as a recipe: the exact call, named by its result, with no parameters. When you execute a tool that did not come from a recipe, pass description, short and tags so the next run finds its result:
   description is Markdown named by what this exact call returns: "### <the result>" (e.g. "### Open pull requests of Genterai/genter-cli"), then what the result holds and how it is filtered, "- pitfall: ..." bullets if any; short is that name in one line under 100 characters; tags in English and Russian. Leave them out for a step whose result is only a means (an id lookup): it is named automatically.
 - A sync recipe (kind sync) keeps an app's content as embeddings: a whole GitHub project (files, issues, pull requests), mail, events. Its knowledge is in the first message when it matches; search_knowledge with its source reads more of it.
