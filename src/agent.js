@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { cipher } from "./genter.js";
+import { cipher, namedApps } from "./genter.js";
 import { createBuilder } from "./builder.js";
 
 // The task agent: an LLM loop over genter (search -> execute -> save), tuned for speed.
@@ -82,7 +82,7 @@ export function createAgent({
   async function call(run, name, input) {
     switch (name) {
       case "search_tools": {
-        const found = await genter.search({ query: input.query, limit: 6, toolkits: namedApps(`${input.query} ${run.task}`, run.apps) });
+        const found = await genter.search({ query: input.query, limit: 6, apps: run.apps, toolkits: run.named });
         return { content: JSON.stringify(found.map(compactFound)) };
       }
       case "get_tool_schema": {
@@ -168,7 +168,7 @@ export function createAgent({
               content: JSON.stringify({
                 error: found.length ? `Several match "${input.pick}"` : `Nothing matches "${input.pick}"`,
                 choices: (found.length ? found : all).slice(0, 15).map((c) => c.label),
-                hint: "Ask the user which one (ask_user), or call add_source again with the exact name.",
+                hint: "Do not ask: call add_source again with the exact name of the closest choice; if none fits, say so in the answer with the choices.",
               }),
             };
           }
@@ -209,8 +209,6 @@ export function createAgent({
           pause: { status: "needs_connection", toolkit: input.toolkit, connect_url, answer: `Connect ${input.toolkit}: ${connect_url} — then continue this run.` },
         };
       }
-      case "ask_user":
-        return { content: "Asked the user; their reply comes as the next message.", pause: { status: "needs_input", question: input.question, answer: input.question } };
       default:
         return { content: `Unknown tool ${name}` };
     }
@@ -223,6 +221,7 @@ export function createAgent({
     lastNote = null;
     currentRun = run;
     run.sourced = false;
+    run.nudged = false;
     run.failed = {}; // "<tool> <args>" -> error of a call that failed in this round
     run.failures = {}; // tool -> failed calls in this round
     let result = null;
@@ -234,6 +233,12 @@ export function createAgent({
         const message = await llm(run.messages, usage, run.sync && builder ? SYNC_TOOLS : run.sync ? TOOLS : TASK_TOOLS, run.sourced ? "none" : undefined);
         run.messages.push({ role: "assistant", content: message.content ?? null, ...(message.tool_calls?.length && { tool_calls: message.tool_calls }) });
         if (!message.tool_calls?.length) {
+          // An answer that is a question for the user: once, it is sent back to do the task instead.
+          if (ASKS.test(message.content ?? "") && !run.nudged && step < maxSteps - 2 && !run.sourced) {
+            run.nudged = true;
+            run.messages.push({ role: "user", content: NO_QUESTIONS });
+            continue;
+          }
           // A model that ends without text: the last tool note is the answer.
           result = { status: "done", answer: message.content?.trim() || lastNote || "Done." };
           break;
@@ -258,7 +263,15 @@ export function createAgent({
         const pause = outs.find((o) => o.out.pause)?.out.pause;
         if (pause) result = pause;
       }
-      result ??= { status: "failed", answer: `Stopped after ${maxSteps} steps without an answer.` };
+      // Out of steps: one more call with no tools, so the user gets an answer from what was found.
+      if (!result) {
+        run.messages.push({ role: "user", content: "No more tool calls. Answer now from what you found; say briefly what is missing." });
+        const message = await llm(run.messages, usage, TOOLS, "none").catch(() => null);
+        run.messages.push({ role: "assistant", content: message?.content ?? null });
+        result = message?.content?.trim()
+          ? { status: "done", answer: message.content.trim() }
+          : { status: "failed", answer: `Stopped after ${maxSteps} steps without an answer.` };
+      }
     } catch (error) {
       result = { status: "failed", answer: error.message };
     }
@@ -288,7 +301,7 @@ export function createAgent({
       const searched = Date.now();
       const connecting = genter.login().then((l) => l.connected ?? []).catch(() => []);
       const [found, connected, english, sources, knowledge] = await Promise.all([
-        connecting.then((c) => genter.search({ query: task, limit: 8, toolkits: namedApps(task, c.map((x) => x.toolkit)) })).catch(() => []),
+        connecting.then((c) => genter.search({ query: task, limit: 8, apps: c.map((x) => x.toolkit) })).catch(() => []),
         connecting,
         genter.translate ? genter.translate(task) : null, // shared with search, so no second model call
         genter.sources ? genter.sources.list().catch(() => []) : [],
@@ -306,6 +319,7 @@ export function createAgent({
         status: "running",
         created_at: new Date().toISOString(),
         apps: [...new Set(connected.map((c) => c.toolkit))],
+        named: namedApps(`${task} ${english?.en ?? ""}`, connected.map((c) => c.toolkit)), // apps the task is about
         recipes: Object.fromEntries(recipes.map((r) => [r.id, r.tool])),
         steps: [],
         timing: { search_ms },
@@ -383,11 +397,11 @@ const syncText = (s) =>
       (s.last_run ? ` (+${s.last_run.added} new, ${s.last_run.updated} updated, ${s.last_run.removed} removed${s.last_run.failed ? `, ${s.last_run.failed} failed` : ""})` : "") +
       (s.status === "partial" ? `; ${s.last_run?.left ?? "some"} items left — it continues on the next sync (dashboard → Sources, or sync_source).` : "");
 
-// Connected apps the text names: "Google Tasks" -> googletasks, "гугл таски" stays unmatched (the model searches).
-export function namedApps(text, apps = []) {
-  const flat = String(text).toLowerCase().replace(/[^a-z0-9]/g, "");
-  return [...new Set(apps)].filter((slug) => slug && flat.includes(slug.toLowerCase().replace(/[^a-z0-9]/g, "")));
-}
+// An answer that hands the work back to the user instead of doing it.
+const ASKS = /\?\s*$|let me know|which (one|tool|account)|would you like|do you want|please (specify|clarify|confirm|provide)|уточни|какой из|какую из|хотите ли|подскажите|выберите/i;
+const NO_QUESTIONS =
+  "Do not ask the user. Do the task now with the most likely reading: find the tool (search_tools with the app name and the action), " +
+  "run it, and answer from the result; say in one line what you assumed.";
 
 // A tool that keeps failing is stopped after this many failures in one round, so a run never spins on it.
 const MAX_TOOL_FAILURES = 3;
@@ -441,8 +455,9 @@ The first message already holds everything for a fast start: saved recipes that 
   description is a general Markdown recipe: "### <Verb> <object>", a line "\`TOOL_SLUG\` · args: \`{a, b?}\`", what it returns, how to reuse it, "- pitfall: ..." bullets; short is one line under 100 characters for lists; tags in English and Russian.
 - If a recipe returned something different from its description, save it again with status "outdated" (save_recipes) and say why.
 - An app the task needs is not connected: call connect_app and stop.
-- The task is ambiguous in a way that matters (which person, which account, an irreversible action on an unclear target): call ask_user with one short question. Otherwise do not ask; pick the sensible default.
+- Never ask the user anything and never end with a question or a choice for them. Ambiguous: take the most likely reading (the default account, the latest, all of them, the closest name), do it, and say in one line what you assumed. Only an irreversible action (delete, send, pay) on a target you cannot pin down is not done: say what was not done and why.
 - An app is connected several times: pass account (alias or id) when the user names one; otherwise the default is used.
+Always end with an answer built from what you found, even partial; never "I can't" while a tool could still be tried.
 Final answer: short and concrete, in the user's language. Include the names, ids and links needed to open or continue the result. Say what was done, not how.`;
 
 const recipeFields = {
@@ -550,12 +565,7 @@ const TOOLS = [
     description: "Create a link for the user to connect an app (toolkit slug like gmail, github, slack). Stops the run until they connect it.",
     parameters: { type: "object", properties: { toolkit: { type: "string" }, alias: { type: "string" } }, required: ["toolkit"] },
   },
-  {
-    name: "ask_user",
-    description: "Ask the user one short question and stop until they reply.",
-    parameters: { type: "object", properties: { question: { type: "string" } }, required: ["question"] },
-  },
 ].map(({ name, description, parameters }) => ({ type: "function", function: { name, description, parameters } }));
 
 const TASK_TOOLS = TOOLS.filter((t) => !["add_source", "build_live_sync"].includes(t.function.name));
-const SYNC_TOOLS = TOOLS.filter((t) => ["add_source", "build_live_sync", "sync_source", "search_knowledge", "connect_app", "ask_user"].includes(t.function.name));
+const SYNC_TOOLS = TOOLS.filter((t) => ["add_source", "build_live_sync", "sync_source", "search_knowledge", "connect_app"].includes(t.function.name));

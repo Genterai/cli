@@ -56,6 +56,20 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     return (await res.json()).choices[0].message.content?.trim() ?? "";
   }
 
+  // Every tool of these apps, cached per app for an hour (Google Tasks has 18, GitHub ~900).
+  function toolsOf(toolkits) {
+    return Promise.all(
+      toolkits.map((toolkit) => {
+        const hit = appTools.get(toolkit);
+        if (hit && Date.now() - hit.at < 3600_000) return hit.list;
+        const list = composio.tools.getRawComposioTools({ toolkits: [toolkit], limit: 2000 });
+        appTools.set(toolkit, { at: Date.now(), list });
+        list.catch(() => appTools.delete(toolkit));
+        return list;
+      }),
+    ).then((lists) => lists.flat());
+  }
+
   // A search in another language than English: the English version and the key terms in both languages.
   // Tool search (Composio) works in English, and keyword search in apps matches literal words, so data in English
   // is not found by Russian words and the other way round. Cached, and shared by concurrent callers.
@@ -341,10 +355,12 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
 
     // Memory first (ready-made calls with args), plain Composio search as fallback.
     // A non-English query is matched in its language and in English: recipes and summaries are mostly English.
-    // `toolkits`: apps the query names (e.g. connected Google Tasks); their tools come first, because a
-    // search over all of Composio often returns other apps' tools for a generic "list my tasks".
-    async search({ query, limit = 5, toolkits = [] }) {
+    // `apps`: the connected toolkits. Those the query names (in its words or in English: "гугл таски" ->
+    // Google Tasks) give their tools first, because a search over all of Composio returns other apps' tools.
+    // `toolkits`: apps to search in anyway (the agent passes those its task named).
+    async search({ query, limit = 5, apps = [], toolkits: also = [] }) {
       const english = await translate(query);
+      const toolkits = [...new Set([...also, ...namedApps(`${query} ${english?.en ?? ""}`, apps)])];
       const vector = await embed(english?.en ? `${query}\n${english.en}` : query).catch(() => null);
       const memories = vector
         ? (await store.all())
@@ -374,7 +390,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
 
       const search = english?.en ?? query;
       const [own, all] = await Promise.all([
-        toolkits.length ? composio.tools.getRawComposioTools({ toolkits, search, limit }).catch(() => []) : [],
+        toolkits.length ? toolsOf(toolkits).then((tools) => rankTools(tools, search, limit)).catch(() => []) : [],
         composio.tools.getRawComposioTools({ search, limit }),
       ]);
       const tools = [...own, ...all.filter((t) => !own.some((o) => o.slug === t.slug))].slice(0, limit + own.length);
@@ -598,6 +614,41 @@ const fromB64 = (s) => {
   const b = Buffer.from(s, "base64"); // may sit unaligned in Node's pool: copy before viewing as floats
   return new Float32Array(Uint8Array.from(b).buffer);
 };
+
+// How people say it -> how tool slugs say it.
+const SYNONYMS = {
+  create: ["insert", "add"], add: ["insert", "create"], new: ["create", "insert"], make: ["create", "insert"],
+  show: ["list", "get"], what: ["list"], which: ["list"], my: ["list"], all: ["list"], find: ["search", "list"],
+  edit: ["update", "patch"], change: ["update", "patch"], rename: ["update", "patch"], remove: ["delete"],
+  latest: ["list"], recent: ["list"], send: ["send", "create"], write: ["create", "send"],
+};
+const appTools = new Map(); // toolkit -> { at, list: Promise<tools> }
+
+// Connected apps the text names: "Google Tasks" -> googletasks.
+export function namedApps(text, apps = []) {
+  const flat = String(text).toLowerCase().replace(/[^a-z0-9]/g, "");
+  return [...new Set(apps)].filter((slug) => slug && flat.includes(slug.toLowerCase().replace(/[^a-z0-9]/g, "")));
+}
+
+// An app's tools ranked for a query. Composio's search inside a toolkit is alphabetical, so "list my tasks"
+// in Google Tasks gave BATCH_EXECUTE, BULK_INSERT, CLEAR... and never LIST_TASKS. Words of the query in the
+// slug count most, then in the description; reading tools win ties, so a question gets a tool that reads.
+export function rankTools(tools, query, limit) {
+  const stem = (w) => w.replace(/(ies|es|s)$/, "");
+  const said = String(query).toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2);
+  const words = [...new Set([...said, ...said.flatMap((w) => SYNONYMS[w] ?? [])].map(stem))];
+  const scored = tools.map((t) => {
+    const slug = t.slug.toLowerCase().split("_").map(stem);
+    const text = String(t.description ?? "").toLowerCase();
+    const score =
+      words.filter((w) => slug.includes(w)).length * 3 +
+      words.filter((w) => text.includes(w)).length +
+      (readsOnly(t.slug, t.tags) ? 2 : 0) +
+      (/_(LIST|SEARCH|FIND|FETCH)(_|$)/.test(t.slug) ? 1 : 0);
+    return { t, score };
+  });
+  return scored.sort((a, b) => b.score - a.score).slice(0, limit).map(({ t }) => t);
+}
 
 // A tool that only reads, by Composio's hint or the verb in its slug.
 function readsOnly(slug, tags = []) {
