@@ -25,6 +25,7 @@ const store = {
     write("calls.json", rows);
   },
   all: async () => Object.values(read("calls.json")).filter((r) => r.remembered),
+  pending: async () => Object.values(read("calls.json")).filter((r) => !r.remembered && Date.now() - r.at < HOUR),
 };
 
 const [name, json = "{}"] = process.argv.slice(2);

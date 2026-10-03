@@ -6,10 +6,11 @@ Next time `search` finds that ready-made call (tool + args), not just a raw tool
 ```
 search       → saved recipes first, Composio tools if none is valid
 execute      → runs a tool (or repeats a recipe by id); with description + tags it saves the recipe right away
-save_recipe  → describes call `id`; the description is embedded for search
+save_recipes → saves several calls as recipes at once; each description is embedded for search
 ```
 
-If `execute` gets no description, its `next` field holds a draft `save_recipe` call to fill in.
+If `execute` gets no description, its `next` field holds a ready `save_recipes` call with every unsaved step of the last hour,
+intermediate ones too, so the agent saves the whole chain at once. Failed calls are not recorded.
 If a recipe stops matching its description, the agent saves it with `status: "outdated"` and says why.
 Search then falls back to Composio again.
 
@@ -36,7 +37,7 @@ Without it, `search` uses Composio only.
 | `login` | `{}` | `{user_id, connected: [{toolkit, status}]}` |
 | `search` | `{query, limit?}` | `[{id, tool, args, tags, description, status}]` |
 | `execute` | `{tool, args}` or `{id, args?}`, optional `{description, tags}` | `{id, result, saved}` or `{id, result, next}` |
-| `save_recipe` | `{id, description, tags?, status?}` | `{id, created_at, tags, description, status}` |
+| `save_recipes` | `{recipes: [{id, description, tags?, status?}]}` | `[{id, created_at, tags, description, status}]` |
 
 ```bash
 genter register_tool '{"toolkit":"gmail"}'

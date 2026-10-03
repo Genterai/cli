@@ -4,8 +4,8 @@ import { Composio } from "@composio/core";
 // Genter = Composio + memory of past calls.
 // A call record is { id, tool, args, created_at, memory? }. Results are never stored:
 // the memory the agent writes is the result. Records are encrypted before they reach the store,
-// so the store only sees rows { id, remembered, blob } and needs: get(id), put(row), all().
-// The store should delete rows that are not remembered after an hour.
+// so the store only sees rows { id, remembered, blob } and needs: get(id), put(row),
+// all() (remembered rows) and pending() (rows not remembered). It deletes pending rows after an hour.
 export function createGenter({ composioApiKey, openrouterApiKey, userId, secret, store, minScore = 0.45 }) {
   if (!secret) throw new Error("secret is required to encrypt stored calls");
   const composio = new Composio({ apiKey: composioApiKey });
@@ -91,38 +91,50 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       }
       if (!tool) throw new Error("Pass `tool` or `id`");
       const result = await composio.tools.execute(tool, { userId, arguments: args, dangerouslySkipVersionCheck: true });
+      const outdated = previous?.memory && {
+        hint: `If this result does not match the saved description, save recipe ${id} with status "outdated" and say what changed.`,
+      };
+      if (!result.successful) return { result, ...outdated }; // failed calls are not recipes, nothing to save
+
       const record = { id: randomUUID(), tool, args, created_at: new Date().toISOString() };
       await save(record);
-
-      if (description && result.successful) {
-        return { id: record.id, result, saved: await api.save_recipe({ id: record.id, description, tags }) };
+      if (description) {
+        const [saved] = await api.save_recipes({ recipes: [{ id: record.id, description, tags }] });
+        return { id: record.id, result, saved, ...outdated };
       }
-      if (previous?.memory) {
-        return { id: record.id, result, next: `If this result does not match the saved description, call save_recipe with id ${id} and status "outdated" saying what changed.` };
-      }
+      const unsaved = (await store.pending()).map((row) => open(row.blob)).map(({ id, tool, args }) => ({ id, tool, args }));
       return {
         id: record.id,
         result,
+        ...outdated,
         next: {
-          required: "Until saved, search will not find this call (unsaved calls are deleted after an hour).",
-          tool: "save_recipe",
+          required:
+            "Save every successful step as a recipe, intermediate ones too (e.g. finding a repo before reading it). " +
+            "Until saved, search will not find these calls; they are deleted after an hour. Save them all in one save_recipes call.",
+          tool: "save_recipes",
           args: {
-            id: record.id,
-            description: `<Verb> <object> — ${tool}, args: {${Object.keys(args).join(", ")}}. Returns <what and in what form>. For another target override <args>.`,
-            tags: [tool.split("_")[0].toLowerCase(), "<tags in English and Russian>"],
+            recipes: unsaved.map((call) => ({
+              id: call.id,
+              description: `<Verb> <object> — ${call.tool}, args: {${Object.keys(call.args).join(", ")}}. Returns <what and in what form>. For another target override <args>.`,
+              tags: [call.tool.split("_")[0].toLowerCase(), "<tags in English and Russian>"],
+            })),
           },
         },
       };
     },
 
-    // Save a reusable recipe for a call: the description is embedded for search.
+    // Save reusable recipes for calls: each description is embedded for search.
     // Use status "outdated" when a saved recipe no longer does what its description says.
-    async save_recipe({ id, description, tags = [], status = "valid" }) {
-      const record = await load(id);
-      const created_at = new Date().toISOString();
-      const embedding = await embed(`${description}\ntags: ${tags.join(", ")}\ntool: ${record.tool}\nargs: ${JSON.stringify(record.args)}`);
-      await save({ ...record, memory: { created_at, tags, description, status, embedding } });
-      return { id, created_at, tags, description, status };
+    async save_recipes({ recipes }) {
+      return Promise.all(
+        recipes.map(async ({ id, description, tags = [], status = "valid" }) => {
+          const record = await load(id);
+          const created_at = new Date().toISOString();
+          const embedding = await embed(`${description}\ntags: ${tags.join(", ")}\ntool: ${record.tool}\nargs: ${JSON.stringify(record.args)}`);
+          await save({ ...record, memory: { created_at, tags, description, status, embedding } });
+          return { id, created_at, tags, description, status };
+        }),
+      );
     },
   };
   return api;

@@ -4,12 +4,13 @@ import { z } from "zod";
 export const instructions = `Genter runs Composio tools and keeps reusable call recipes.
 1. search first: a saved recipe (id + args) is faster than finding a tool again.
 2. execute with tool + args, or with id to repeat a recipe (override args as needed).
-3. After a successful call, save the recipe: pass description + tags to execute, or call save_recipe.
+3. Save every successful step as a recipe, intermediate ones too (e.g. finding a repo before reading its README):
+   pass description + tags to execute, or save all steps at once with save_recipes.
    Unsaved calls are deleted after an hour and the next search will not find them.
 Write the description as a general recipe, not this one case:
   "<Verb> <object> — TOOL_SLUG, args: {a, b?}. Returns <what, format, size limits>. For another target override <args>."
 Include the user's intent in plain words, tags in English and Russian, and pitfalls (format, truncation, alternatives).
-If a saved recipe returns something different from its description, save_recipe with its id and status "outdated" and say why.`;
+If a saved recipe returns something different from its description, save it again with status "outdated" and say why.`;
 
 const recipeDescription = z
   .string()
@@ -42,9 +43,9 @@ export const tools = {
   },
   execute: {
     description:
-      "Run a tool and save it as a recipe. Pass `tool` + `args`, or `id` from search to repeat a recipe (args override). " +
-      "Pass `description` + `tags` to save the recipe in the same call; otherwise the response's `next` holds a draft for save_recipe. " +
-      "Unsaved calls are deleted after an hour and search will not find them.",
+      "Run a tool. Pass `tool` + `args`, or `id` from search to repeat a recipe (args override). " +
+      "Pass `description` + `tags` to save it as a recipe in the same call. Otherwise `next` holds a ready save_recipes call " +
+      "with every unsaved step of the last hour: fill in descriptions and save them all at once.",
     input: z.object({
       id: z.string().optional().describe("id of a saved recipe to repeat"),
       tool: z.string().optional().describe("Tool slug, e.g. GMAIL_FETCH_EMAILS"),
@@ -54,15 +55,21 @@ export const tools = {
     }),
     annotations: { readOnlyHint: false, openWorldHint: true },
   },
-  save_recipe: {
+  save_recipes: {
     description:
-      "Required after a successful execute (unless it got a description): save the call as a reusable recipe so search finds it. " +
-      "If a saved recipe returned something different from its description, save it with status 'outdated' and say why.",
+      "Save successful calls as reusable recipes so search finds them, several at once. Save every step, intermediate ones too. " +
+      "If a saved recipe returned something different from its description, save it again with status 'outdated' and say why.",
     input: z.object({
-      id: z.string(),
-      description: recipeDescription,
-      tags: recipeTags.optional(),
-      status: z.enum(["valid", "outdated"]).optional(),
+      recipes: z
+        .array(
+          z.object({
+            id: z.string().describe("id returned by execute"),
+            description: recipeDescription,
+            tags: recipeTags.optional(),
+            status: z.enum(["valid", "outdated"]).optional(),
+          }),
+        )
+        .min(1),
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
