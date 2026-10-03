@@ -141,7 +141,7 @@ const LIMITS = { maxItems: 3000, maxPages: 100, maxChunks: 80, chunkSize: 1600, 
 // namespace: the user or workspace, so ids and running syncs never mix between them.
 export const DEPTHS = ["titles", "summary", "full"];
 
-// triggers (optional): create(slug, config, account) -> trigger id, remove(id).
+// triggers (optional): create(slug, config, account) -> trigger id (re-enables the same one if it exists), disable(id), remove(id).
 // recipes (optional): saved live sync recipes, get(id) -> recipe | null, list() -> [{ id, recipe }].
 export function createSources({ run, embedMany, summarize, triggers, recipes, seal, open, store, namespace = "" }) {
   const loadSource = async (id) => {
@@ -524,7 +524,9 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
             .filter((src) => src.id !== id)
             .flatMap((src) => (src.watch ?? []).map((w) => w.id)),
         );
-        for (const w of source.watch ?? []) if (!others.has(w.id)) await triggers.remove(w.id).catch(() => {});
+        // Disabled, not deleted: turning it on again reuses it instead of adding another webhook to the app.
+        for (const w of source.watch ?? []) if (!others.has(w.id)) await (triggers.disable ?? triggers.remove)(w.id).catch(() => {});
+        source.retired = [...new Set([...(source.retired ?? []), ...(source.watch ?? []).map((w) => w.id)])];
         source.watch = [];
         source.watch_error = undefined;
       }
@@ -540,7 +542,18 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
     },
 
     async remove({ id }) {
-      if (triggers && (await loadSource(id)).watch?.length) await api.watch({ id, on: false });
+      if (triggers) {
+        if ((await loadSource(id)).watch?.length) await api.watch({ id, on: false });
+        // Its triggers go too, unless another source uses them.
+        const source = await loadSource(id);
+        const others = new Set(
+          (await store.sources())
+            .map((row) => open(row.blob))
+            .filter((src) => src.id !== id)
+            .flatMap((src) => [...(src.watch ?? []).map((w) => w.id), ...(src.retired ?? [])]),
+        );
+        for (const t of source.retired ?? []) if (!others.has(t)) await triggers.remove(t).catch(() => {});
+      }
       const rows = await store.items(id);
       if (rows.length) await store.deleteItems(id, rows.map((r) => r.key));
       await store.deleteSource(id);

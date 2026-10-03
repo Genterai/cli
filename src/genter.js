@@ -138,6 +138,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
           const id = await accountId(account, { strict: false });
           return (await composio.triggers.create(userId, slug, { ...(id && { connectedAccountId: id }), triggerConfig: config })).triggerId;
         },
+        disable: (id) => composio.triggers.disable(id),
         remove: (id) => composio.triggers.delete(id),
       },
       summarize: (title, text) =>
