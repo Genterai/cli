@@ -125,7 +125,7 @@ export function createBuilder({ genter, openrouterApiKey, model = process.env.BU
         kinds.map(async (kind) => {
           try {
             const recipe = await shapeKind(toolkit, kind, account);
-            const out = await genter.save_live_sync({ recipe, description: kind.description || kind.name, short: kind.name, tags: [toolkit, "sync", "синхронизация"], account });
+            const out = await genter.save_live_sync({ recipe, description: kind.description || kind.name, short: kind.description || kind.name, tags: [toolkit], account });
             if (!out.saved) throw new Error((out.test?.problems ?? ["test failed"]).join("; "));
             made.push({ kind: kind.name, recipe: out.id });
             onProgress({ kind: kind.name, recipe: out.id });
