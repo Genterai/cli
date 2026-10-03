@@ -266,7 +266,7 @@ export function createAgent({
             } catch {
               return { tc, out: { content: "Invalid JSON arguments" } };
             }
-            onEvent({ type: "step", tool: tc.function.name, input: tc.function.name === "execute" ? { tool: input.tool, id: input.id } : input });
+            onEvent({ type: "step", tool: tc.function.name, input: tc.function.name === "execute" ? { tool: input.tool ?? run.recipes[input.id], id: input.id } : input });
             const out = await call(run, tc.function.name, input).catch((e) => ({ content: `Error: ${e.message}` }));
             return { tc, out };
           }),
@@ -314,7 +314,7 @@ export function createAgent({
       onEvent({ type: "step", tool: "search_recipes", input: { query: task } });
       const searched = Date.now();
       const connecting = genter.login().then((l) => l.connected ?? []).catch(() => []);
-      const [found, connected, english, sources, knowledge] = await Promise.all([
+      let [found, connected, english, sources, knowledge] = await Promise.all([
         connecting.then((c) => genter.search({ query: task, limit: 8, apps: c.map((x) => x.toolkit) })).catch(() => []),
         connecting,
         genter.translate ? genter.translate(task) : null, // shared with search, so no second model call
@@ -322,6 +322,10 @@ export function createAgent({
         genter.knowledge ? genter.knowledge({ query: task, limit: 6 }).catch(() => []) : [],
       ]);
       const search_ms = Date.now() - searched;
+      // The apps the task names: recipes of other apps are left out ("what's new in Google Tasks" is not a Gmail search).
+      const named = namedApps(`${task} ${english?.en ?? ""}`, connected.map((c) => c.toolkit));
+      const ofNamed = (r) => !named.length || !r.tool || named.some((t) => r.tool.startsWith(`${t.toUpperCase()}_`));
+      found = found.filter(ofNamed);
       const recipes = found.filter((r) => r.id);
       onEvent({ type: "recipes", recipes: recipes.map(({ id, tool, description, short, summary, score, status, tags, when, args }) => ({ id, tool, description, short, summary, score, status, tags, when, args })) });
       const run = {
@@ -335,11 +339,11 @@ export function createAgent({
         apps: [...new Set(connected.map((c) => c.toolkit))],
         // No valid recipe that clearly fits: this task is new, the strong model works it out (and leaves recipes).
         strong: !recipes.some((r) => r.status !== "outdated" && r.score >= STRONG_RECIPE),
-        named: namedApps(`${task} ${english?.en ?? ""}`, connected.map((c) => c.toolkit)), // apps the task is about
+        named, // apps the task is about
         recipes: Object.fromEntries(recipes.map((r) => [r.id, r.tool])),
         steps: [],
         timing: { search_ms },
-        messages: [{ role: "user", content: briefing({ task, mode, account, found, connected, canExecute, english, sources, knowledge }) }],
+        messages: [{ role: "user", content: briefing({ task, mode, account, found, connected, canExecute, english, sources, knowledge, named }) }],
       };
       return loop(run);
     },
@@ -432,7 +436,7 @@ const TEMPLATE_HELP =
   "Pass pick (the repo or page name as the user said it) or scope. It is kept up to date on every change unless watch is false. " +
   'depth: "titles" (names and links only, fast), "summary" (a short summary per item), "full" (whole text, default).';
 
-function briefing({ task, mode, account, found, connected, canExecute, english, sources = [], knowledge = [] }) {
+function briefing({ task, mode, account, found, connected, canExecute, english, sources = [], knowledge = [], named = [] }) {
   const recipes = found.filter((r) => r.id).map(compactFound);
   const tools = found.filter((r) => !r.id).map(compactFound);
   const apps = connected.map((c) => `${c.toolkit}${c.alias ? ` (${c.alias}${c.default ? ", default" : ""})` : ""}${c.status && c.status !== "ACTIVE" ? ` [${c.status}]` : ""}`);
@@ -446,6 +450,7 @@ function briefing({ task, mode, account, found, connected, canExecute, english, 
     !canExecute && "This user cannot run tools: answer from recipe summaries, or say which tool and args would do it.",
     account && `Use connection: ${account}`,
     `Connected apps: ${apps.join(", ") || "none"}`,
+    named.length && `The task is about ${named.join(", ")}: read the user's data there with its tools (search_tools "${named[0]} ..." if none below fits), not other apps.`,
     `Saved recipes matching the task (best first):\n${recipes.length ? JSON.stringify(recipes) : "none"}`,
     tools.length && `Candidate Composio tools:\n${JSON.stringify(tools)}`,
     sources.length && `Synced sources: ${JSON.stringify(sources.map((s) => ({ id: s.id, title: s.title, toolkit: s.toolkit, depth: s.depth, status: s.status, items: s.stats.items, synced_at: s.synced_at })))}`,
@@ -469,6 +474,8 @@ The first message already holds everything for a fast start: saved recipes that 
 - A failed call is not retried with the same args. "Not Found" from an app means the repo, file or id is wrong, not the tool: find the real one (list the user's repos, search) instead of guessing. After two failures of a tool, answer with what you have.
 - A connected app always has tools: never answer that there is no tool for it. If no candidate fits, search_tools with the app name and what to do (e.g. "Google Tasks list tasks"), then execute.
 - A name you do not know (an org, a project, a repo, a person): look it up in the connected apps first (e.g. the user's GitHub repositories and orgs) and answer about what you found. "Projects" in GitHub usually means repositories: list them (and Projects only if asked).
+- "What's new in <app>" / "что нового в <app>" for a connected app means the user's own latest items there (recently created or updated tasks, issues, emails, files), read with that app's tools, not news about the product.
+- Every fact in the answer comes from a tool result, a recipe summary or synced knowledge of this run. Never answer from general knowledge about a product or company; if nothing was found, say what was checked.
 - An empty result is not an answer: retry once with translated or broader terms before saying nothing was found.
 - When you execute a tool that did not come from a recipe and it is a reusable step, pass description, short and tags so the next run finds it:
   description is a general Markdown recipe: "### <Verb> <object>", a line "\`TOOL_SLUG\` · args: \`{a, b?}\`", what it returns, how to reuse it, "- pitfall: ..." bullets; short is one line under 100 characters for lists; tags in English and Russian.
