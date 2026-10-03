@@ -138,7 +138,7 @@ export const BUILTIN = {
   },
 };
 
-const LIMITS = { maxItems: 3000, maxPages: 100, maxChunks: 80, chunkSize: 1600, overlap: 200, readers: 6, embedBatch: 64 };
+const LIMITS = { maxItems: 10000, maxPages: 100, maxChunks: 80, chunkSize: 1600, overlap: 200, readers: 6, embedBatch: 64 };
 
 // run(tool, args, account) -> Composio result; embedMany(texts) -> vectors; seal/open: encryption; store: see below.
 // store: getSource(id), putSource({id, blob}), deleteSource(id), sources() -> [{id, blob}],
@@ -190,8 +190,11 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
   }
 
   // One run of the list role (all its pages) with extra placeholders, items appended to out.
-  async function listFrom(source, role, extra, { pages, raw }, out) {
+  async function listFrom(source, role, extra, { pages, raw, template }, out) {
     let page;
+    // Excluded and too big items never count toward the item limit (a repo's node_modules, binaries).
+    const exclude = (template?.exclude ?? []).map((x) => new RegExp(x, "i"));
+    const dropped = (id, size) => exclude.some((re) => re.test(id)) || (template?.maxSize && size > template.maxSize);
     for (let n = 0; n < pages; n++) {
       // nextPage: numbered pages (1, 2, ...) until one comes back empty; otherwise the cursor from list.next.
       if (role.nextPage) page = n + 1;
@@ -212,6 +215,7 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
         if (!matches(raw, role)) continue;
         const id = pick(raw, role.id);
         if (id == null) continue;
+        if (dropped(String(id), role.size ? Number(pick(raw, role.size)) || 0 : 0)) continue;
         const ctx = { ...source.scope, ...extra, item: raw };
         out.push({
           id: String(id),
@@ -221,6 +225,7 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
           size: role.size ? Number(pick(raw, role.size)) || 0 : undefined,
           text: role.text === "@item" ? jsonToMarkdown(raw) : role.text ? pick(raw, role.text) : undefined,
           parent: role.parent ? pick(raw, role.parent) : undefined,
+          raw, // for read args like {{item.path}}; never stored
         });
         if (out.length > LIMITS.maxItems) {
           throw new Error(`More than ${LIMITS.maxItems} items in ${source.title}. Narrow the source down (a folder, a query).`);
@@ -245,14 +250,14 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
       const found = await containers(role.each, source, 0, containersMax);
       for (const c of found) {
         const before = out.length;
-        await listFrom(source, role, { container: c.id, container_label: c.label }, { pages, raw }, out);
+        await listFrom(source, role, { container: c.id, container_label: c.label }, { pages, raw, template }, out);
         for (const item of out.slice(before)) {
           item.id = `${c.id}/${item.id}`;
           item.title = `${c.label} · ${item.title}`;
         }
       }
     } else {
-      await listFrom(source, role, {}, { pages, raw }, out);
+      await listFrom(source, role, {}, { pages, raw, template }, out);
     }
     const prefix = template.prefix ? String(fill(template.prefix, source.scope) ?? "").replace(/^\/+/, "") : "";
     // A root: only it and the items under it, by the parent links in the list itself.
@@ -282,7 +287,8 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
   async function read(source, template, item) {
     if (item.text != null) return String(item.text);
     const role = template.read;
-    const res = await run(role.tool, fill(role.args, { ...source.scope, item: { ...item, id: item.id } }), source.account);
+    const { raw, ...listed } = item;
+    const res = await run(role.tool, fill(role.args, { ...source.scope, item: { ...raw, ...listed } }), source.account);
     if (res?.successful === false) throw new Error(errorText(res.error));
     let text = pick(res, role.text);
     if (text == null) return "";
@@ -660,10 +666,11 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
 const running = new Map(); // "<namespace>:<source id>" -> Promise of its sync, so a source never syncs twice at once
 const rerun = new Set(); // keys to sync once more when their running sync ends
 
-// where: every path must equal its value; skip: none may.
-const matches = (raw, role) =>
-  (!role.where || Object.entries(role.where).every(([p, v]) => pick(raw, p) === v)) &&
-  !(role.skip && Object.entries(role.skip).some(([p, v]) => pick(raw, p) === v));
+// where: every path must equal its value; skip: none may. The value "*" means the path is there at all
+// (GitHub's issue list also has pull requests: skip { "pull_request": "*" }).
+const is = (raw, p, v) => (v === "*" ? pick(raw, p) != null : pick(raw, p) === v);
+export const matches = (raw, role) =>
+  (!role.where || Object.entries(role.where).every(([p, v]) => is(raw, p, v))) && !(role.skip && Object.entries(role.skip).some(([p, v]) => is(raw, p, v)));
 
 // Scope fields of a template from what was given: defaults applied, required ones checked (strict).
 function cleanScope(t, scope, { strict = true } = {}) {
@@ -835,7 +842,8 @@ function cosine(a, b) {
 
 // How to sync a call's result, found in a real response: the biggest list of objects, and in its items an id,
 // a version and a title. No list: the whole response is one item (re-read every sync).
-const ID = ["id", "uuid", "messageId", "message_id", "ts", "number", "key", "sha", "gid", "path", "name"];
+// path before sha: in a file tree the path is the file, the sha its version.
+const ID = ["id", "uuid", "messageId", "message_id", "ts", "number", "key", "path", "sha", "gid", "name"];
 const VERSION = ["updated_at", "updatedAt", "modifiedTime", "modified_time", "last_edited_time", "lastModified", "updated", "etag", "historyId", "edited.ts", "internalDate", "sha", "ts"];
 const TITLE = ["subject", "title", "name", "summary", "full_name", "displayName", "display_name", "text", "snippet", "label", "email", "filename", "path"];
 const LINK = ["html_url", "web_url", "webViewLink", "htmlLink", "permalink", "url", "link"];
@@ -859,6 +867,30 @@ export function inferList(response) {
   // No version field: items that do not change (messages), so the id is the version and each is read once.
   const version = VERSION.find((k) => k !== id && has(k)) ?? id;
   const title = TITLE.find((k) => best.sample.every((x) => typeof pick(x, k) === "string")) ?? id;
-  const url = LINK.find((k) => best.sample.every((x) => /^https?:\/\//.test(String(pick(x, k) ?? ""))));
-  return { items: best.path, id, ...(version && { version }), title, ...(url && { url }), text: "@item" };
+  // A link people open, not an API endpoint (a tree's "url" is api.github.com).
+  const url = LINK.find((k) => best.sample.every((x) => /^https?:\/\/(?!api\.)/.test(String(pick(x, k) ?? ""))));
+  const size = best.sample.every((x) => typeof x.size === "number") ? "size" : undefined;
+  return { items: best.path, id, ...(version && { version }), title, ...(url && { url }), ...(size && { size }), text: "@item" };
+}
+
+// Where the text is in a read response: the content of an object marked base64 (GitHub file contents), or else the
+// longest string that is not a link. { text, encoding? } or null when there is no text.
+export function inferText(response) {
+  let best = null;
+  let encoded = null;
+  const walk = (v, path, depth) => {
+    if (depth > 6 || v == null || typeof v !== "object" || encoded) return;
+    const at = (k) => (path ? `${path}.${k}` : k);
+    if (v.encoding === "base64" && typeof v.content === "string") {
+      encoded = { text: at("content"), encoding: at("encoding") };
+      return;
+    }
+    for (const [k, x] of Object.entries(v)) {
+      if (typeof x === "string") {
+        if (!/^https?:\/\/\S*$/.test(x) && (!best || x.length > best.length)) best = { path: at(k), length: x.length };
+      } else if (!Array.isArray(x)) walk(x, at(k), depth + 1);
+    }
+  };
+  walk(response, "", 0);
+  return encoded ?? (best ? { text: best.path } : null);
 }
