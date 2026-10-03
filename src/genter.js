@@ -500,7 +500,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       }
       const record = { id: id ?? randomUUID(), kind: "sync", tool: recipe.list.tool, args: {}, sync: recipe, created_at: new Date().toISOString() };
       await save(record, false);
-      await api.save_recipes({ recipes: [{ id: record.id, description, short, tags: [recipe.toolkit, "sync", "синхронизация", ...tags] }] });
+      await api.save_recipes({ recipes: [{ id: record.id, description, short, tags: [...new Set([recipe.toolkit, "sync", "синхронизация", ...tags])] }] });
       return { saved: true, id: record.id, test };
     },
 
