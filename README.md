@@ -167,6 +167,7 @@ Composio schemas (`test/fixtures/catalogues.json`: Linear, Slack, Jira, Trello, 
 | R1–R5 | agent, reading files | `read_file` by owner, repo and path in a find: the text, a file reference, no recipe; a folder's entries; a missing file is an error; "no tool to read files" is sent back once on the strong model, never twice; a viewer cannot read |
 | P1–P4 | agent, a task of several parts on a recipe of one | `search_tools` gets Composio tools even when a recipe fits; `read_file` with a commit's ref + path reads that path; `""` or the app's name is no account; an execute with no tool moves to the strong model; an empty ending is asked for the answer once |
 | T1 | tool ranking | "the" and other empty words do not pull `..._FOR_THE_AUTHENTICATED_USER` tools up |
+| N1 | no answer | an empty ending is asked once on the strong model; empty again is a failure naming what ran, never "Done." with references |
 | G1–G2 | `genter.execute` itself (Composio answered over fetch) | a saved call returns its result and recipe id; `remember: false` saves nothing |
 | A8–A10 | refused | a number without its run, an unknown number, a tool of another app, a viewer; `GENTER_WRITE` only where writing is on |
 
