@@ -87,6 +87,9 @@ try {
     add_source: (input) => genter.sources.create(input),
     sync_source: ({ id, budget_ms }) => genter.sources.sync({ id, budgetMs: budget_ms }),
     remove_source: (input) => genter.sources.remove(input),
+    choices: (input) => genter.sources.choices(input),
+    watch_source: (input) => genter.sources.watch(input),
+    test_live_sync: (input) => genter.sources.test(input),
   };
   if (agentCommands[name]) {
     const { tool, start } = agentCommands[name];

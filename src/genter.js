@@ -11,7 +11,8 @@ import { createSources } from "./sync.js";
 // Records are encrypted before they reach the store, so the store only sees rows { id, remembered, blob }
 // and needs: get(id), put(row), all() (remembered rows).
 // knowledge (optional) stores sources, see sync.js; without it there are no sources.
-export function createGenter({ composioApiKey, openrouterApiKey, userId, secret, store, knowledge, defer, minScore = 0.25, strongScore = 0.45 }) {
+// triggers: true only where Composio's webhook reaches this code (the hosted backend); the CLI can not receive events.
+export function createGenter({ composioApiKey, openrouterApiKey, userId, secret, store, knowledge, triggers = false, defer, minScore = 0.25, strongScore = 0.45 }) {
   if (!secret) throw new Error("secret is required to encrypt stored calls");
   const composio = new Composio({ apiKey: composioApiKey });
   const { seal, open: decrypt } = cipher(`${secret}:${userId}`);
@@ -132,7 +133,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
         return composio.tools.execute(tool, { userId, arguments: args, ...(id && { connectedAccountId: id }), dangerouslySkipVersionCheck: true });
       },
       embedMany,
-      triggers: {
+      triggers: triggers && {
         create: async (slug, config, account) => {
           const id = await accountId(account, { strict: false });
           return (await composio.triggers.create(userId, slug, { ...(id && { connectedAccountId: id }), triggerConfig: config })).triggerId;
@@ -152,6 +153,19 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
             },
           ],
         }).catch(() => null),
+      // Live sync recipes saved by the agent are records of kind "sync" in the recipe store.
+      recipes: {
+        get: async (id) => {
+          const row = await store.get(id);
+          const record = row && open(row.blob);
+          return record?.kind === "sync" ? record.sync : null;
+        },
+        list: async () =>
+          (await store.all())
+            .map((row) => open(row.blob))
+            .filter((r) => r.kind === "sync" && !r.alias)
+            .map((r) => ({ id: r.id, recipe: r.sync })),
+      },
       seal: (value) => seal(value),
       open: (blob) => decrypt(blob),
       store: knowledge,
@@ -263,6 +277,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
               tags: r.memory.tags,
               description: r.memory.description,
               short: r.memory.short,
+              ...(r.kind === "sync" && { kind: "sync", toolkit: r.sync.toolkit, scope: r.sync.scope }),
               summary: r.summary,
               when: r.created_at,
               status: r.memory.status,
@@ -288,6 +303,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     // Every successful call becomes a recipe: with the agent's description if given, otherwise Composio's.
     async execute({ id, tool, args = {}, account, description, short, tags }) {
       const previous = id && (await load(id));
+      if (previous?.kind === "sync") throw new Error(`${id} is a live sync recipe: add it as a source (add_source) instead of executing it`);
       if (previous) {
         tool ??= previous.tool;
         args = { ...previous.args, ...args };
@@ -336,6 +352,47 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     // Sources: templates(), choices({template, account?}), list(), get(id), create({template, scope, depth?, account?}),
     // sync({id, budgetMs?}), watch({id, on?}), onTrigger({triggerId}), remove({id}).
     sources,
+
+    // Saves a live sync recipe (see sync.js) after a test on real data passes; with id, replaces that recipe.
+    // It is found by search like any recipe and used with sources.create({ template: id }).
+    async save_live_sync({ id, recipe, description, short, tags = [], scope = {}, account }) {
+      if (!sources) throw new Error("Sources are not available here");
+      if (!description) throw new Error("description is required: what it syncs, in plain words");
+      const test = await sources.test({ recipe, scope, account });
+      // Triggers must exist and get their required config, or watching the source fails later.
+      for (const t of recipe.triggers ?? []) {
+        for (let cur = t; cur; cur = cur.fallback) {
+          const type = await composio.triggers.getType(cur.slug).catch(() => null);
+          if (!type) test.problems.push(`trigger ${cur.slug} does not exist (list_triggers)`);
+          else {
+            const missing = (type.config?.required ?? []).filter((k) => cur.config?.[k] == null);
+            if (missing.length) test.problems.push(`trigger ${cur.slug} needs config ${missing.join(", ")}`);
+          }
+        }
+      }
+      if (test.problems?.length) test.ok = false;
+      if (!test.ok) return { saved: false, test };
+      if (id) {
+        const old = await load(id);
+        if (old.kind !== "sync") throw new Error(`${id} is not a live sync recipe`);
+      }
+      const record = { id: id ?? randomUUID(), kind: "sync", tool: recipe.list.tool, args: {}, sync: recipe, created_at: new Date().toISOString() };
+      await save(record, false);
+      await api.save_recipes({ recipes: [{ id: record.id, description, short, tags: [recipe.toolkit, "sync", "синхронизация", ...tags] }] });
+      return { saved: true, id: record.id, test };
+    },
+
+    // Composio triggers of an app, for a live sync recipe's triggers: [{ slug, description, config, required, payload }].
+    async trigger_types({ toolkit }) {
+      const list = await composio.triggers.listTypes({ toolkits: [toolkit], limit: 100 });
+      return (list.items ?? list).map((t) => ({
+        slug: t.slug,
+        description: String(t.description ?? "").split("\n")[0].slice(0, 160),
+        config: Object.fromEntries(Object.entries(t.config?.properties ?? {}).map(([k, v]) => [k, `${v.type ?? "any"} ${String(v.description ?? "").slice(0, 80)}`])),
+        required: t.config?.required ?? [],
+        payload: Object.keys(t.payload?.properties ?? {}),
+      }));
+    },
 
     // Chunks of synced sources closest to a question: [{ source, source_title, title, url, text, score }].
     async knowledge({ query, limit = 6, source }) {

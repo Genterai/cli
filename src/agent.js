@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { cipher } from "./genter.js";
+import { createBuilder } from "./builder.js";
 
 // The task agent: an LLM loop over genter (search -> execute -> save), tuned for speed.
 // Before the first LLM call it already has, in parallel: the saved recipes matching the task (found by
@@ -25,8 +26,30 @@ export function createAgent({
 }) {
   if (!openrouterApiKey) throw new Error("The agent needs an OpenRouter key (OPENROUTER_API_KEY)");
   const { seal, open } = cipher(`${secret}:${userId}:runs`);
+  const builder = genter.sources && genter.save_live_sync ? createBuilder({ genter, openrouterApiKey, onEvent }) : null;
+  let lastNote = null;
+  let currentRun = {};
 
-  async function llm(messages, usage) {
+  // A source made, synced (one round) and kept up to date; the note says it all for the model.
+  async function addSource({ template, scope, depth, filter, account, watch }) {
+    const source = await genter.sources.create({ template, scope, depth, filter, account });
+    onEvent({ type: "step", tool: "sync_source", input: { source: source.title } });
+    const synced = await genter.sources.sync({ id: source.id, budgetMs: 60000 });
+    let watching = synced.watching;
+    let watchError;
+    if (watch !== false && genter.sources.watch) {
+      const watched = await genter.sources.watch({ id: source.id }).catch((e) => ({ watch_error: e.message }));
+      watching = watched.watching ?? [];
+      watchError = watched.watch_error;
+    }
+    onEvent({ type: "tool", tool: "sync_source", ok: synced.status !== "failed", summary: syncText(synced) });
+    const note = `${syncText(synced)}${watching?.length ? ` Kept up to date ${watching.join(", ")}.` : ""}${watchError ? ` Auto-update could not be turned on: ${watchError}` : ""}`;
+    lastNote = note;
+    if (synced.status !== "failed") currentRun.sourced = true;
+    return { ...synced, watching, note };
+  }
+
+  async function llm(messages, usage, tools = TOOLS, toolChoice) {
     const started = Date.now();
     const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
@@ -36,8 +59,9 @@ export function createAgent({
         provider: { sort: process.env.OPENROUTER_SORT || "throughput" }, // the fastest provider for the model
         // The system prompt and tool list never change, so providers can cache this prefix.
         messages: [{ role: "system", content: SYSTEM }, ...messages.map(({ keep, ...m }) => m)],
-        tools: TOOLS,
+        tools,
         parallel_tool_calls: true,
+        ...(toolChoice && { tool_choice: toolChoice }),
         temperature: 0,
         reasoning: { effort: "low" }, // the fast agent: short thinking, quick tool calls
         usage: { include: true },
@@ -129,19 +153,19 @@ export function createAgent({
           }
           scope = found[0].scope;
         }
-        const source = await genter.sources.create({ template: input.template, scope, depth: input.depth, account });
-        onEvent({ type: "step", tool: "sync_source", input: { source: source.title } });
-        const synced = await genter.sources.sync({ id: source.id, budgetMs: 60000 });
-        let watching = synced.watching;
-        let watchError;
-        if (input.watch !== false && genter.sources.watch) {
-          const watched = await genter.sources.watch({ id: source.id }).catch((e) => ({ watch_error: e.message }));
-          watching = watched.watching ?? [];
-          watchError = watched.watch_error;
-        }
-        onEvent({ type: "tool", tool: "sync_source", ok: synced.status !== "failed", summary: syncText(synced) });
-        const note = `${syncText(synced)}${watching?.length ? ` Kept up to date ${watching.join(", ")}.` : ""}${watchError ? ` Auto-update could not be turned on: ${watchError}` : ""}`;
-        return { content: JSON.stringify({ ...synced, watching, note }) };
+        return { content: JSON.stringify(await addSource({ template: input.template, scope, depth: input.depth, filter: input.filter, account, watch: input.watch })) };
+      }
+      case "build_live_sync": {
+        if (!builder) return { content: "Building live sync recipes is not available here." };
+        if (!canExecute) return { content: "Not allowed: this user can search but not add sources." };
+        const account = input.account ?? run.account;
+        const built = await builder.build({ goal: input.goal, toolkit: input.toolkit, account });
+        run.usage_extra = (run.usage_extra ?? 0) + (built.cost ?? 0);
+        run.calls_extra = (run.calls_extra ?? 0) + (built.steps ?? 0);
+        onEvent({ type: "tool", tool: "build_live_sync", ok: built.saved, summary: built.saved ? `recipe ${built.id}` : built.answer });
+        if (!built.saved) return { content: JSON.stringify({ error: built.answer }) };
+        const source = await addSource({ template: built.id, scope: built.scope, depth: input.depth, filter: input.filter, account, watch: input.watch });
+        return { content: JSON.stringify({ recipe: built.id, ...source, note: `New live sync recipe saved (${built.id}). ${source.note}` }) };
       }
       case "sync_source": {
         if (!genter.sources) return { content: "Sources are not available here." };
@@ -175,13 +199,19 @@ export function createAgent({
     const started = Date.now();
     const usage = { llm_calls: 0, tokens_in: 0, tokens_out: 0, cost_usd: 0, llm_ms: 0 };
     run.timing = { search_ms: run.timing?.search_ms ?? 0, tool_ms: 0 };
+    lastNote = null;
+    currentRun = run;
+    run.sourced = false;
     let result = null;
     try {
       for (let step = 0; step < maxSteps && !result; step++) {
-        const message = await llm(run.messages, usage);
+        // A remember/keep-up-to-date task gets only the source tools: no one-off execute instead of a source.
+        // Once the source is added there is nothing left to call: only the answer.
+        const message = await llm(run.messages, usage, run.sync && builder ? SYNC_TOOLS : TOOLS, run.sourced ? "none" : undefined);
         run.messages.push({ role: "assistant", content: message.content ?? null, ...(message.tool_calls?.length && { tool_calls: message.tool_calls }) });
         if (!message.tool_calls?.length) {
-          result = { status: "done", answer: message.content ?? "" };
+          // A model that ends without text: the last tool note is the answer.
+          result = { status: "done", answer: message.content?.trim() || lastNote || "Done." };
           break;
         }
         // Independent calls run in parallel, like the model asked.
@@ -208,6 +238,10 @@ export function createAgent({
     } catch (error) {
       result = { status: "failed", answer: error.message };
     }
+    usage.cost_usd += run.usage_extra ?? 0; // the live sync builder's model: its steps are credits too
+    usage.llm_calls += run.calls_extra ?? 0;
+    run.usage_extra = 0;
+    run.calls_extra = 0;
     run.status = result.status;
     run.updated_at = new Date().toISOString();
     // Stored without raw tool results: each one is replaced by its summary.
@@ -242,6 +276,7 @@ export function createAgent({
         id: randomUUID(),
         task,
         mode,
+        sync: mode === "run" && canExecute && SYNC_INTENT.test(task),
         account,
         status: "running",
         created_at: new Date().toISOString(),
@@ -292,6 +327,9 @@ export function isEmpty(data) {
 
 // Search results as the model sees them: recipes in full, Composio tools with a compact arg schema.
 function compactFound(r) {
+  if (r.kind === "sync") {
+    return { id: r.id, kind: "live_sync", toolkit: r.toolkit, description: r.description, scope: r.scope, use: `add_source with template "${r.id}"`, score: r.score };
+  }
   if (r.id) {
     return { id: r.id, tool: r.tool, args: r.args, description: r.description, result_summary: r.summary, when: r.when, status: r.status, score: r.score };
   }
@@ -319,8 +357,11 @@ const syncText = (s) =>
       (s.last_run ? ` (+${s.last_run.added} new, ${s.last_run.updated} updated, ${s.last_run.removed} removed${s.last_run.failed ? `, ${s.last_run.failed} failed` : ""})` : "") +
       (s.status === "partial" ? `; ${s.last_run?.left ?? "some"} items left — it continues on the next sync (dashboard → Sources, or sync_source).` : "");
 
+const SYNC_INTENT = /запомн|помни|держи .*актуал|актуальн|синхрон|проиндекс|индексир|remember|keep .*(up to date|in sync|current)|\bsync\b|index /i;
+
 const TEMPLATE_HELP =
-  'Templates: github — files of a repository; notion — a page and every page under it, or all pages shared with Genter. ' +
+  'template: a live sync recipe — built in: github (files of a repository), notion (a page and every page under it, or all pages ' +
+  "shared with Genter) — or the id of a saved one (search shows them as live_sync). " +
   "Pass pick (the repo or page name as the user said it) or scope. It is kept up to date on every change unless watch is false. " +
   'depth: "titles" (names and links only, fast), "summary" (a short summary per item), "full" (whole text, default).';
 
@@ -333,6 +374,8 @@ function briefing({ task, mode, account, found, connected, canExecute, english, 
     english?.en && `In English: ${english.en}`,
     english?.terms?.length && `Search terms for keyword filters (use both languages, joined with OR): ${english.terms.join(" | ")}`,
     mode === "find" ? "Mode: find (read-only: answer the question; only execute tools that read data)." : "Mode: run (do the task).",
+    SYNC_INTENT.test(task) &&
+      "This asks to remember or keep content up to date: add_source (built-in github files / notion pages, or a saved live_sync recipe), otherwise build_live_sync. Not a one-off execute.",
     !canExecute && "This user cannot run tools: answer from recipe summaries, or say which tool and args would do it.",
     account && `Use connection: ${account}`,
     `Connected apps: ${apps.join(", ") || "none"}`,
@@ -349,7 +392,8 @@ const SYSTEM = `You are Genter's task agent. You act in the user's connected app
 
 The first message already holds everything for a fast start: saved recipes that match the task (proven past calls with their args and a summary of what they returned), candidate Composio tools with their args, and the connected apps.
 - If a recipe's result_summary or the knowledge from synced sources already answers the question, answer right away without calling anything; cite the titles and links.
-- Synced sources are an app's content kept searchable (a GitHub repo, Notion pages). Use search_knowledge for more of it. When the user asks to remember, index or keep an app's content up to date, call add_source; to refresh one, sync_source.
+- Synced sources are an app's content kept searchable (a GitHub repo, Notion pages). Use search_knowledge for more of it. When the user asks to remember, index or keep an app's content up to date, call add_source; to refresh one, sync_source. Filters in the user's words ("only docs/", "no tests", "only the last 200") go to add_source filter.
+- Built-in live sync recipes cover only: github = the FILES of a repository; notion = pages. A saved one (live_sync in the first message) fits too: add_source with its id. Anything else (issues, pull requests, commits, emails, tickets, messages, rows, any other app) needs a new live sync recipe: call build_live_sync with the whole goal in the user's words; it builds, tests, saves and adds the source. Never use a built-in one for something it does not cover, and never answer a remember/sync request with a one-off execute.
 - If a recipe fits, execute it by id and override only the args that differ. This is the fastest path.
 - Otherwise pick a candidate tool and execute it. Call get_tool_schema only when the args are unclear; call search_tools only when nothing fits.
 - Make independent calls in the same step (parallel). Chain only when a call needs another's output.
@@ -424,7 +468,15 @@ const TOOLS = [
     parameters: {
       type: "object",
       properties: {
-        template: { type: "string", enum: ["github", "notion"] },
+        template: { type: "string", description: "github, notion or a saved live sync recipe id" },
+        filter: {
+          type: "object",
+          properties: {
+            include: { type: "string", description: "Regex over '<id> <title>', case-insensitive, e.g. ^docs/ or roadmap" },
+            exclude: { type: "string", description: "Regex over '<id> <title>', e.g. (^|/)tests?/" },
+            maxItems: { type: "integer" },
+          },
+        },
         pick: { type: "string", description: "Name of the repo or top-level page as the user said it, e.g. genter-cli or Roadmap; found among the connection's repos/pages" },
         scope: { type: "object", additionalProperties: true, description: "Template fields when known exactly, e.g. {owner, repo}" },
         watch: { type: "boolean", description: "Keep it up to date on every change (default true)" },
@@ -432,6 +484,23 @@ const TOOLS = [
         account: { type: "string", description: "Connection alias or id when the app is connected several times" },
       },
       required: ["template"],
+    },
+  },
+  {
+    name: "build_live_sync",
+    description:
+      "Remember content that no live sync recipe covers yet (issues, pull requests, emails, tickets, rows... of any app): " +
+      "a builder writes a live sync recipe from the app's tools, tests it on real data, saves it, then adds, syncs and watches the source.",
+    parameters: {
+      type: "object",
+      properties: {
+        goal: { type: "string", description: "What to remember, with every known detail, e.g. 'all pull requests of Genterai/genter-backend: title and description'" },
+        toolkit: { type: "string", description: "App slug, e.g. github, linear, gmail" },
+        depth: { type: "string", enum: ["titles", "summary", "full"] },
+        watch: { type: "boolean" },
+        account: { type: "string" },
+      },
+      required: ["goal"],
     },
   },
   {
@@ -450,3 +519,5 @@ const TOOLS = [
     parameters: { type: "object", properties: { question: { type: "string" } }, required: ["question"] },
   },
 ].map(({ name, description, parameters }) => ({ type: "function", function: { name, description, parameters } }));
+
+const SYNC_TOOLS = TOOLS.filter((t) => ["add_source", "build_live_sync", "sync_source", "search_knowledge", "connect_app", "ask_user"].includes(t.function.name));
