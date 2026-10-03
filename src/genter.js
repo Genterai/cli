@@ -222,7 +222,11 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
   // What a result is and what it holds, from one model call: { title, about, summary }. title names the result of
   // this exact call ("Open pull requests of Genterai/genter-cli"): a recipe is named by it and has no parameters.
   // summary retells the content so it is found later by topic. Skipped without an OpenRouter key.
-  async function describe(tool, args, data) {
+  // items: one line per thing found, each embedded on its own, so one event among ten is found by itself ("Уборка" in a
+  // week of events scored 0.20 against "когда мне убираться" as one summary, 0.42 as its own line).
+  // task (the request the call was made for): relevant says whether the result has anything for it. A keyword search
+  // that only shares a word with it (a GitHub email with "clean up" for "when do I clean") is not kept as a recipe.
+  async function describe(tool, args, data, task) {
     if (!openrouterApiKey) return null;
     const text = await chat({
       model: process.env.SUMMARY_MODEL || "openai/gpt-oss-20b",
@@ -233,11 +237,17 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
           role: "user",
           content:
             `A call of ${tool} with args ${JSON.stringify(args).slice(0, 600)} returned the data below. ` +
-            'Reply with JSON only: {"title": "...", "about": "...", "summary": "..."}.\n' +
+            `Reply with JSON only: {"title": "...", "about": "...", "summary": "...", "items": ["..."]${task ? ', "relevant": true' : ""}}.\n` +
             'title: what this result is, as a name of up to 8 words for these exact args, in English, e.g. "Open pull requests of Genterai/genter-cli", "Unread emails from today".\n' +
             "about: 1-2 sentences: what the result is (which items, which filters) and what each item has, so someone knows what they get without running it.\n" +
             "summary: 1-3 sentences retelling what it contains, so it can be found later by topic: subjects, people, dates, and the ids or URLs " +
             "needed to open it again. Write in English, but quote subjects, titles and names exactly as they are.\n" +
+            "items: up to 15 things the result holds, one short line each, the way someone would look for it: what it is, its " +
+            'title or subject exactly as written, its date, e.g. "Calendar event «Уборка» on 2026-10-03 13:00". [] when it is empty.\n' +
+            (task
+              ? `relevant: true if the result holds what this request asks about, or ids, lists or names that lead to it: "${String(task).slice(0, 300)}". ` +
+                "false when it is empty or its items only share a word with the request and are about something else.\n"
+              : "") +
             "Only say what is in the data, do not guess. No passwords, tokens or keys." +
             `\n\n${JSON.stringify(data, decodeBase64).slice(0, 20000)}`,
         },
@@ -247,25 +257,58 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     try {
       const out = JSON.parse(text);
       const clean = (v, n) => (typeof v === "string" && v.trim() ? v.trim().slice(0, n) : null);
-      return { title: clean(out.title, 100)?.replace(/^#+\s*/, ""), about: clean(out.about, 600), summary: clean(out.summary, 1200) };
+      const items = (Array.isArray(out.items) ? out.items : []).map((i) => clean(i, 200)).filter(Boolean).slice(0, 15);
+      return {
+        title: clean(out.title, 100)?.replace(/^#+\s*/, ""),
+        about: clean(out.about, 600),
+        summary: clean(out.summary, 1200),
+        items,
+        relevant: out.relevant === false ? false : true,
+      };
     } catch {
       return { summary: text.slice(0, 1200) };
     }
   }
 
+  // How well a recipe fits a request: best of how it is described, what its result was about and each thing it held.
+  // A key term of the request written in its result (summary or an item: "Уборка") puts it among the recipes to use,
+  // since one word in a long list barely moves a vector. matched: the result's lines that made it fit.
+  function resultMatch(r, vector, terms) {
+    const lines = r.items ?? [];
+    const byItem = (r.itemEmbeddings ?? []).map((e, i) => [lines[i], cosine(vector, e)]);
+    let score = Math.max(...[r.memory.embedding, r.summaryEmbedding].filter(Boolean).map((e) => cosine(vector, e)), ...byItem.map(([, s]) => s));
+    const said = (text) => terms.some((t) => String(text ?? "").toLowerCase().includes(t));
+    const written = lines.filter(said);
+    if (written.length || said(r.summary)) score = Math.max(score, (minScore + strongScore) / 2);
+    const matched = [...new Set([...written, ...byItem.filter(([l, s]) => l && s >= minScore).sort((a, b) => b[1] - a[1]).map(([l]) => l)])].slice(0, 3);
+    return { score, matched };
+  }
+
   // Slow part of a call, after its result went back: summary, embedding, dedupe against the same call, recipe.
-  async function remember(record, data, { description, short, tags }) {
+  async function remember(record, data, { description, short, tags, task }) {
     const sameCall = (await store.all())
       .map((row) => open(row.blob))
       .filter((r) => r.id !== record.id && !r.alias && r.tool === record.tool && JSON.stringify(r.args) === JSON.stringify(record.args));
-    let summary = sameCall.find((r) => r.digest === record.digest && r.summaryEmbedding)?.summary;
+    const known = sameCall.find((r) => r.digest === record.digest && r.summaryEmbedding);
+    let summary = known?.summary;
     let summaryEmbedding;
+    let items = known?.items;
+    let itemEmbeddings = known?.itemEmbeddings;
     let named = null;
     if (!summary) {
-      named = await describe(record.tool, record.args, data);
+      named = await describe(record.tool, record.args, data, task);
       summary = named?.summary ?? null;
-      summaryEmbedding = summary ? await embed(summary).catch(() => undefined) : undefined;
+      items = named?.items?.length ? named.items : undefined;
+      [summaryEmbedding, ...itemEmbeddings] = summary ? await embedMany([summary, ...(items ?? [])]).catch(() => []) : [];
+      if (!itemEmbeddings?.length) itemEmbeddings = undefined;
     }
+    // Found nothing the request was about: a new call is not kept as a recipe (it stays openable by its id, unlisted).
+    // A recipe that already exists (a ready read, the same call saved before) keeps its place.
+    if (named?.relevant === false && !record.memory && !sameCall.length) {
+      await save({ ...record, summary, unrelated: true }, false);
+      return summary;
+    }
+    const found = { ...(items && { items }), ...(itemEmbeddings && { itemEmbeddings }) };
     // Same tool and args with the same result (identical, or a near-identical summary): refresh that recipe, keep this
     // id as its alias. A different result, e.g. a new latest email, is a recipe of its own.
     // A named recipe's own first run (a ready read) stays itself, never an alias of an older call.
@@ -274,11 +317,11 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       : sameCall.find((r) => r.digest === record.digest || (r.summaryEmbedding && summaryEmbedding && cosine(r.summaryEmbedding, summaryEmbedding) >= 0.9));
     let target = record;
     if (similar) {
-      target = { ...similar, created_at: record.created_at, digest: record.digest, ...(summaryEmbedding && { summary, summaryEmbedding }) };
+      target = { ...similar, created_at: record.created_at, digest: record.digest, ...(summaryEmbedding && { summary, summaryEmbedding, items, itemEmbeddings }) };
       await save(target);
       if (record.id !== similar.id) await save({ id: record.id, alias: similar.id }, false);
     } else {
-      target = { ...record, summary, summaryEmbedding };
+      target = { ...record, summary, summaryEmbedding, ...found };
       await save(target, Boolean(target.memory));
     }
     if (description) {
@@ -431,16 +474,16 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       const english = await translate(query);
       const toolkits = [...new Set([...also, ...namedApps(`${query} ${english?.en ?? ""}`, apps)])];
       const vector = await embed(english?.en ? `${query}\n${english.en}` : query).catch(() => null);
+      const terms = (english?.terms ?? []).map((t) => t.toLowerCase().trim()).filter((t) => t.length >= 4);
       const memories = vector
         ? (await store.all())
             .map((row) => open(row.blob))
             .filter((r) => r.memory?.embedding && !r.alias && !r.memory.disabled) // a disabled recipe is never offered
-            // Best of: how the recipe is described, and what its result was about.
-            .map((r) => ({ r, score: Math.max(...[r.memory.embedding, r.summaryEmbedding].filter(Boolean).map((e) => cosine(vector, e))) }))
+            .map((r) => ({ r, ...resultMatch(r, vector, terms) }))
             .filter(({ score }) => score >= minScore)
             .sort((a, b) => b.score - a.score)
             .slice(0, limit)
-            .map(({ r, score }) => ({
+            .map(({ r, score, matched }) => ({
               id: r.id,
               tool: r.tool,
               args: r.args,
@@ -450,6 +493,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
               ...(r.kind === "sync" && { kind: "sync", toolkit: r.sync.toolkit, scope: r.sync.scope }),
               live: Boolean(r.live || r.kind === "sync"),
               summary: r.summary,
+              ...(matched.length && { matched }),
               when: r.created_at,
               status: r.memory.status,
               score: Number(score.toFixed(2)),
@@ -487,7 +531,8 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     // Every successful call becomes a recipe: with the agent's description if given, otherwise Composio's.
     // remember: false runs it without saving it (an inner step, e.g. reading and committing a file for an edit).
     // (`remember: keep`: a parameter named remember hid the remember() below, and every saved call threw.)
-    async execute({ id, tool, args = {}, account, description, short, tags, remember: keep = true }) {
+    // task: the request the call is made for, in the user's words: a result with nothing for it is not kept as a recipe.
+    async execute({ id, tool, args = {}, account, description, short, tags, task, remember: keep = true }) {
       const previous = id && (await load(id));
       if (previous?.kind === "sync") throw new Error(`${id} is a sync recipe: its result is kept as embeddings (search_knowledge); live_sync or Run now refreshes it`);
       if (previous) {
@@ -525,7 +570,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       if (first) Object.assign(record, { ...previous, created_at, digest });
       else if (repeat) record.id = randomUUID(); // a new result of a known call: a new recipe, merged later if it is the same
       await save(record, Boolean(record.memory));
-      const summary = remember(record, result.data, { description, short, tags });
+      const summary = remember(record, result.data, { description, short, tags, task });
       later(summary);
       return {
         id: record.id,
@@ -740,18 +785,27 @@ const translations = new Map(); // query -> Promise<{ en, terms } | null>
 
 // Embeddings are stored as base64 float32 (8 KB instead of ~30 KB of JSON numbers each); older records keep arrays.
 const VECTORS = ["summaryEmbedding"];
+// A result's item vectors are int8 (1.5 KB each; cosine does not care about their scale).
 function pack(record) {
   const out = { ...record };
   for (const key of VECTORS) if (out[key]) out[key] = toB64(out[key]);
+  if (out.itemEmbeddings) out.itemEmbeddings = out.itemEmbeddings.map(toI8);
   if (out.memory?.embedding) out.memory = { ...out.memory, embedding: toB64(out.memory.embedding) };
   return out;
 }
 function unpack(record) {
   for (const key of VECTORS) if (typeof record[key] === "string") record[key] = fromB64(record[key]);
+  if (record.itemEmbeddings) record.itemEmbeddings = record.itemEmbeddings.map(fromI8);
   if (typeof record.memory?.embedding === "string") record.memory.embedding = fromB64(record.memory.embedding);
   return record;
 }
 const toB64 = (v) => (typeof v === "string" ? v : Buffer.from(Float32Array.from(v).buffer).toString("base64"));
+const toI8 = (v) => {
+  if (typeof v === "string") return v;
+  const max = Math.max(...Array.from(v, Math.abs)) || 1;
+  return Buffer.from(Int8Array.from(v, (x) => Math.round((x / max) * 127)).buffer).toString("base64");
+};
+const fromI8 = (s) => (typeof s === "string" ? new Int8Array(Uint8Array.from(Buffer.from(s, "base64")).buffer) : s);
 const fromB64 = (s) => {
   const b = Buffer.from(s, "base64"); // may sit unaligned in Node's pool: copy before viewing as floats
   return new Float32Array(Uint8Array.from(b).buffer);
