@@ -1,6 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
 import { Composio } from "@composio/core";
-import { createSources } from "./sync.js";
+import { createSources, inferList } from "./sync.js";
 
 // Genter = Composio + recipes of past calls.
 // A call record is { id, tool, args, created_at, summary, digest, memory }: memory is the recipe description,
@@ -159,7 +159,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
         get: async (id) => {
           const row = await store.get(id);
           const record = row && open(row.blob);
-          return record?.kind === "sync" ? record.sync : null;
+          return record?.kind === "sync" ? record.sync : (record?.live ?? null);
         },
         list: async () =>
           (await store.all())
@@ -225,7 +225,86 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
         recipes: [{ id: target.id, description: autoRecipe(info, record.tool, record.args), tags: [info.toolkit?.slug].filter(Boolean), auto: true }],
       });
     }
+    // How to keep this recipe live, decided now from the real result, so Live sync is one click later.
+    if (sources && !target.live) await planLive(target.id, data).catch((e) => console.error("genter: live plan failed:", e.message));
     return summary;
+  }
+
+  const toolInfos = new Map();
+  const toolInfo = (tool) => {
+    if (!toolInfos.has(tool)) toolInfos.set(tool, composio.tools.getRawComposioToolBySlug(tool).catch(() => ({})));
+    return toolInfos.get(tool);
+  };
+  const triggerTypes = new Map();
+  const triggersOf = (toolkit) => {
+    if (!triggerTypes.has(toolkit)) {
+      triggerTypes.set(toolkit, composio.triggers.listTypes({ toolkits: [toolkit], limit: 100 }).then((l) => l.items ?? l).catch(() => []));
+    }
+    return triggerTypes.get(toolkit);
+  };
+
+  // A recipe's live sync: the same call re-run, its list found in the result (inferList), every item as Markdown;
+  // updated by the triggers a model picks for it, or hourly when none fits.
+  async function planLive(id, data) {
+    const record = await load(id);
+    if (record.kind === "sync") return;
+    const info = await toolInfo(record.tool);
+    const toolkit = info.toolkit?.slug ?? record.tool.split("_")[0].toLowerCase();
+    const shape = inferList({ data });
+    const name = titleOf(record.memory?.description) || info.name || record.tool;
+    const triggers = await pickTriggers({ toolkit, record }).catch(() => []);
+    record.live = {
+      name,
+      toolkit,
+      description: `Keeps "${name}" up to date`,
+      title: name,
+      scope: {},
+      // Items that never change (messages) carry no version: the list is a window of the latest, keep what leaves it.
+      list: { tool: record.tool, args: record.args, ...shape, ...(shape.version && shape.version === shape.id && { append: true }) },
+      triggers,
+      every: triggers.length ? null : 60,
+    };
+    await save(record);
+    return record.live;
+  }
+
+  // Triggers that fire when this call's result may change, chosen by a model, with config it could fill.
+  async function pickTriggers({ toolkit, record }) {
+    const types = await triggersOf(toolkit);
+    if (!types.length || !openrouterApiKey) return [];
+    const options = types.map((t) => ({
+      slug: t.slug,
+      description: String(t.description ?? "").split("\n")[0].slice(0, 140),
+      required: t.config?.required ?? [],
+      config: Object.keys(t.config?.properties ?? {}),
+    }));
+    const text = await chat(
+      {
+        model: process.env.BUILDER_MODEL || "openai/gpt-6-luna",
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "user",
+            content:
+              `A recipe runs ${record.tool} with args ${JSON.stringify(record.args)}` +
+              `${record.memory?.description ? ` (${record.memory.description.slice(0, 400)})` : ""}. ` +
+              "Which of these triggers fire when its result may change (a new or updated item it would return)? " +
+              'Reply with JSON only: {"triggers": [{"slug": "...", "config": {...}, "label": "on every new email"}]}. ' +
+              "Fill every required config field from the args; skip a trigger you can not fill. Usually one or two; none fits: [].\n\n" +
+              JSON.stringify(options),
+          },
+        ],
+      },
+      20000,
+    );
+    const picked = JSON.parse(text).triggers ?? [];
+    return picked
+      .filter((t) => {
+        const type = types.find((x) => x.slug === t.slug);
+        return type && (type.config?.required ?? []).every((k) => t.config?.[k] != null && t.config[k] !== "");
+      })
+      .slice(0, 3)
+      .map((t) => ({ slug: t.slug, config: t.config ?? {}, label: String(t.label || t.slug).slice(0, 60) }));
   }
 
   const api = {
@@ -279,6 +358,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
               description: r.memory.description,
               short: r.memory.short,
               ...(r.kind === "sync" && { kind: "sync", toolkit: r.sync.toolkit, scope: r.sync.scope }),
+              live: Boolean(r.live || r.kind === "sync"),
               summary: r.summary,
               when: r.created_at,
               status: r.memory.status,
@@ -353,6 +433,43 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     // Sources: templates(), choices({template, account?}), list(), get(id), create({template, scope, depth?, account?}),
     // sync({id, budgetMs?}), watch({id, on?}), onTrigger({triggerId}), remove({id}).
     sources,
+
+    // The tools of an app that read, compact, for planning what can be synced: [{ tool, description, args }].
+    async app_tools({ toolkit }) {
+      const tools = await composio.tools.getRawComposioTools({ toolkits: [toolkit], limit: 400 });
+      return tools
+        .filter((t) => readsOnly(t.slug, t.tags))
+        .map((t) => ({
+          tool: t.slug,
+          description: String(t.description ?? "").split("\n")[0].slice(0, 140),
+          args: Object.entries(t.inputParameters?.properties ?? {})
+            .slice(0, 12)
+            .map(([k, v]) => `${k}${(t.inputParameters?.required ?? []).includes(k) ? "" : "?"}:${v.type ?? "any"}`)
+            .join(", "),
+        }));
+    },
+
+    // Live sync of any recipe in one call: its plan (made when it was saved, or now), a source, a first sync, then
+    // its triggers, or an hourly schedule when there are none (or they can not be turned on here).
+    async live_sync({ id, budgetMs = 60000, account }) {
+      if (!sources) throw new Error("Sources are not available here");
+      let record = await load(id);
+      if (record.kind !== "sync" && !record.live) {
+        const res = await composio.tools.execute(record.tool, { userId, arguments: record.args, ...(account && { connectedAccountId: await accountId(account) }), dangerouslySkipVersionCheck: true });
+        if (!res.successful) throw new Error(`${record.tool}: ${JSON.stringify(res.error).slice(0, 300)}`);
+        await planLive(record.id, res.data);
+        record = await load(record.id);
+      }
+      const plan = record.kind === "sync" ? record.sync : record.live;
+      const source = await sources.create({ template: record.id, scope: {}, account, recipe_of: record.id });
+      const synced = await sources.sync({ id: source.id, budgetMs });
+      if (plan.triggers?.length) {
+        const watched = await sources.watch({ id: source.id }).catch((e) => ({ watching: [], watch_error: e.message }));
+        if (watched.watching?.length) return watched;
+      }
+      if (synced.status === "failed") return synced;
+      return sources.schedule({ id: source.id, every: plan.every ?? 60 });
+    },
 
     // Saves a live sync recipe (see sync.js) after a test on real data passes; with id, replaces that recipe.
     // It is found by search like any recipe and used with sources.create({ template: id }).
@@ -455,6 +572,17 @@ const fromB64 = (s) => {
   const b = Buffer.from(s, "base64"); // may sit unaligned in Node's pool: copy before viewing as floats
   return new Float32Array(Uint8Array.from(b).buffer);
 };
+
+// A tool that only reads, by Composio's hint or the verb in its slug.
+function readsOnly(slug, tags = []) {
+  if (tags.includes("readOnlyHint")) return true;
+  const s = slug.toUpperCase();
+  if (/_(SEND|CREATE|DELETE|REMOVE|UPDATE|PATCH|POST|REPLY|FORWARD|MOVE|ARCHIVE|TRASH|ADD|INSERT|UPLOAD|SET|INVITE|MERGE|CLOSE|PUBLISH|SHARE|EXECUTE|RUN|START|STOP|CANCEL|WATCH|PIN|UNPIN|FOLLOW|UNFOLLOW|MODIFY|CLEAR|BATCH_UPDATE|IMPORT|COPY)(_|$)/.test(s)) return false;
+  return /_(GET|LIST|FETCH|SEARCH|FIND|READ|RETRIEVE|QUERY|HISTORY|EXPORT|DOWNLOAD)(_|$)/.test(s);
+}
+
+// "### Fetch unread emails\n..." -> "Fetch unread emails".
+const titleOf = (md) => (String(md ?? "").split("\n").find((l) => l.trim()) ?? "").replace(/^#+\s*/, "").replace(/[`*_]/g, "").trim().slice(0, 80);
 
 // A recipe in Markdown from Composio's generic tool description.
 function autoRecipe(info, tool, args) {

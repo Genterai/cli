@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { jsonToMarkdown } from "./markdown.js";
 
 // Sources: an app's content (a GitHub repo, Notion pages) kept as searchable knowledge.
 // The engine knows nothing about a connector. A live sync recipe (plain JSON, built by the agent from any app's tools,
@@ -23,6 +24,10 @@ import { createHash } from "node:crypto";
 // A placeholder that is the whole value keeps its type; a missing one drops the argument.
 
 // Source filters (per source, any app): include/exclude are regexes over "<id> <title>", maxItems caps the list.
+// list.text "@item": the item itself as Markdown (no read call). list.single: the whole response is one item.
+// list.append: keep items that left the list (streams: mail, chat) instead of removing them.
+// Every call recipe can be synced: inferList finds the list, id, version and title in a real response.
+// Updates: the recipe's triggers, or a schedule ({ every: minutes }); store rows carry next_sync_at for the scheduler.
 
 const BINARY = "\\.(png|jpe?g|gif|webp|ico|bmp|tiff?|psd|pdf|zip|gz|tgz|bz2|xz|7z|rar|tar|jar|war|woff2?|ttf|otf|eot|mp[34]|mov|avi|webm|wav|ogg|flac|exe|dll|so|dylib|bin|class|pyc|o|a|wasm|map|min\\.(js|css)|lock|sqlite|db)$";
 
@@ -149,7 +154,7 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
     if (!row) throw new Error(`Unknown source: ${id}`);
     return open(row.blob);
   };
-  const saveSource = (source) => store.putSource({ id: source.id, blob: seal(source) });
+  const saveSource = (source) => store.putSource({ id: source.id, blob: seal(source), next_sync_at: source.schedule?.next ?? null });
   // A recipe by key: built in (github, notion) or saved by the agent.
   const recipeOf = async (key) => {
     const recipe = BUILTIN[key] ?? (recipes ? await recipes.get(key) : null);
@@ -173,6 +178,12 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
       if (role.nextPage) page = n + 1;
       const res = await run(role.tool, fill(role.args, { ...source.scope, page }), source.account);
       if (res?.successful === false) throw new Error(`${role.tool}: ${errorText(res.error)}`);
+      if (role.single) {
+        // The whole response is the item, versioned by its content.
+        const data = res?.data ?? res;
+        out.push({ id: "all", version: createHash("sha256").update(JSON.stringify(data)).digest("hex").slice(0, 16), title: source.title, text: jsonToMarkdown(data) });
+        break;
+      }
       const found = [pick(res, role.items)].flat().filter(Boolean);
       if (raw && !found.length && !raw.length) raw.push({ response: res });
       for (const item of found) {
@@ -189,7 +200,7 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
           title: String(pick(raw, role.title) ?? id),
           url: role.url?.includes("{{") ? fill(role.url, ctx) : role.url ? pick(raw, role.url) : undefined,
           size: role.size ? Number(pick(raw, role.size)) || 0 : undefined,
-          text: role.text ? pick(raw, role.text) : undefined,
+          text: role.text === "@item" ? jsonToMarkdown(raw) : role.text ? pick(raw, role.text) : undefined,
           parent: role.parent ? pick(raw, role.parent) : undefined,
         });
         if (out.length > LIMITS.maxItems) {
@@ -270,7 +281,7 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
         }),
       );
       const seen = new Set(listed.map((i) => i.id));
-      const gone = [...known.values()].filter((k) => !seen.has(k.id));
+      const gone = template.list.append ? [] : [...known.values()].filter((k) => !seen.has(k.id));
       if (gone.length) await store.deleteItems(source.id, gone.map((k) => k.key));
       stats.removed = gone.length;
       const depth = source.depth ?? "full";
@@ -321,6 +332,8 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
       source.status = left > 0 ? "partial" : stats.failed ? "errors" : "ready";
       source.last_run = { ...stats, left, ms: Date.now() - started, at: new Date().toISOString() };
       if (left === 0) source.synced_at = source.last_run.at;
+      // A partial sync continues soon; a done one waits for its next turn.
+      if (source.schedule) source.schedule.next = new Date(Date.now() + (left > 0 ? 60_000 : source.schedule.every * 60_000)).toISOString();
     } catch (e) {
       source.status = "failed";
       source.last_run = { ...stats, error: e.message, ms: Date.now() - started, at: new Date().toISOString() };
@@ -354,8 +367,10 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
     },
 
     // A tool's real response, clipped: for whoever writes a recipe, to see the paths.
-    async probe({ tool, args = {}, account }) {
-      return clip(await run(tool, args, account));
+    // raw: the whole response (for code), not clipped.
+    async probe({ tool, args = {}, account, raw = false }) {
+      const res = await run(tool, args, account);
+      return raw ? res : clip(res);
     },
 
     // Tries a live sync recipe on real data without saving anything: checks its shape, lists the first page,
@@ -396,7 +411,7 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
     // Adds a source from a template; the same scope is not added twice. Call sync to fill it.
     // Same template + scope again: the existing source, with the new depth if one is given.
     // filter (optional): { include, exclude, maxItems } — regexes over "<id> <title>", e.g. include "^docs/".
-    async create({ template, scope = {}, account, depth, filter }) {
+    async create({ template, scope = {}, account, depth, filter, recipe_of }) {
       if (depth && !DEPTHS.includes(depth)) throw new Error(`depth is one of ${DEPTHS.join(", ")}`);
       const t = await recipeOf(template);
       const clean = cleanScope(t, scope);
@@ -417,6 +432,7 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
         account,
         depth: depth ?? "full",
         filter: filter ? cleanFilter(filter) : undefined,
+        recipe_of,
         status: "new",
         created_at: new Date().toISOString(),
         stats: { items: 0, chunks: 0 },
@@ -487,6 +503,14 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
       })().finally(() => running.delete(key));
       running.set(key, job);
       return job;
+    },
+
+    // Syncs a source every `every` minutes (null: off); the host's scheduler runs sources whose next_sync_at is due.
+    async schedule({ id, every }) {
+      const source = await loadSource(id);
+      source.schedule = every ? { every: Number(every), next: new Date(Date.now() + Number(every) * 60_000).toISOString() } : undefined;
+      await saveSource(source);
+      return publicSource(source);
     },
 
     // Keeps a source up to date by itself: turns its template's triggers on (or off). A trigger that can not be
@@ -616,8 +640,8 @@ function checkRecipe(r) {
   if (!r.toolkit) out.push("toolkit is required (the app's slug, e.g. linear)");
   if (!r.name) out.push("name is required");
   if (!r.list?.tool) out.push("list.tool is required");
-  if (!r.list?.items) out.push("list.items is required: the path to the array of items in the response, e.g. data.issues");
-  if (!r.list?.id) out.push("list.id is required: the path to an item's id");
+  if (!r.list?.single && !r.list?.items) out.push("list.items is required: the path to the array of items in the response, e.g. data.issues");
+  if (!r.list?.single && !r.list?.id) out.push("list.id is required: the path to an item's id");
   if (!r.read?.tool && !r.list?.text) out.push("read.tool (+ read.text) or list.text is required");
   if (r.read?.tool && !r.read.text) out.push("read.text is required: the path to the text in the read response");
   if (r.scope && typeof r.scope !== "object") out.push("scope must be an object of fields");
@@ -647,7 +671,9 @@ const clip = (v) => JSON.stringify(v, (k, x) => (typeof x === "string" && x.leng
 
 // What callers see of a source: no account internals. A sync that died with its process (no update for
 // 10 minutes) shows as partial, so it can be continued.
-const publicSource = ({ id, template, toolkit, title, scope, depth, filter, status, sync_started_at, created_at, synced_at, stats, last_run, watch, watch_error }) => ({
+const publicSource = ({ id, template, toolkit, title, scope, depth, filter, status, sync_started_at, created_at, synced_at, stats, last_run, watch, watch_error, schedule, recipe_of }) => ({
+  recipe_of: recipe_of ?? null,
+  every: schedule?.every ?? null,
   id,
   template,
   toolkit,
@@ -759,4 +785,34 @@ function cosine(a, b) {
     nb += b[i] * b[i];
   }
   return dot / Math.sqrt(na * nb);
+}
+
+// How to sync a call's result, found in a real response: the biggest list of objects, and in its items an id,
+// a version and a title. No list: the whole response is one item (re-read every sync).
+const ID = ["id", "uuid", "messageId", "message_id", "ts", "number", "key", "sha", "gid", "path", "name"];
+const VERSION = ["updated_at", "updatedAt", "modifiedTime", "modified_time", "last_edited_time", "lastModified", "updated", "etag", "historyId", "edited.ts", "internalDate", "sha", "ts"];
+const TITLE = ["subject", "title", "name", "summary", "full_name", "displayName", "display_name", "text", "snippet", "label", "email", "filename", "path"];
+const LINK = ["html_url", "web_url", "webViewLink", "htmlLink", "permalink", "url", "link"];
+
+export function inferList(response) {
+  let best = null;
+  const walk = (v, path, depth) => {
+    if (depth > 5 || v == null || typeof v !== "object") return;
+    if (Array.isArray(v)) {
+      const objects = v.filter((x) => x && typeof x === "object" && !Array.isArray(x));
+      if (objects.length && objects.length >= v.length / 2 && (!best || objects.length > best.n)) best = { path, n: objects.length, sample: objects };
+      return;
+    }
+    for (const [k, x] of Object.entries(v)) walk(x, path ? `${path}.${k}` : k, depth + 1);
+  };
+  walk(response, "", 0);
+  if (!best) return { single: true, text: "@item" };
+  const has = (key) => best.sample.every((x) => pick(x, key) != null && pick(x, key) !== "");
+  const id = ID.find((k) => has(k) && new Set(best.sample.map((x) => String(pick(x, k)))).size === best.sample.length);
+  if (!id) return { single: true, text: "@item" };
+  // No version field: items that do not change (messages), so the id is the version and each is read once.
+  const version = VERSION.find((k) => k !== id && has(k)) ?? id;
+  const title = TITLE.find((k) => best.sample.every((x) => typeof pick(x, k) === "string")) ?? id;
+  const url = LINK.find((k) => best.sample.every((x) => /^https?:\/\//.test(String(pick(x, k) ?? ""))));
+  return { items: best.path, id, ...(version && { version }), title, ...(url && { url }), text: "@item" };
 }
