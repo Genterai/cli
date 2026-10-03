@@ -321,10 +321,65 @@ describe("An app connected several times", () => {
     assert.deepEqual(genter.executed.map((e) => e.account), [undefined, "ca_two", "ca_two"]);
   });
 
+  it("M4 an account that can read but not push: the commit goes to the one that can", async () => {
+    const genter = twoAccounts();
+    const read = genter.execute;
+    genter.execute = async (input) => {
+      if (input.tool === "GITHUB_GET_REPOSITORY_CONTENT") return read({ ...input, account: "ca_two" }).then((out) => (genter.executed.at(-1).account = input.account, out));
+      if (input.account !== "ca_two") {
+        genter.executed.push({ tool: input.tool, account: input.account });
+        return { result: { successful: false, error: "Resource not accessible by integration (403)" } };
+      }
+      return read(input);
+    };
+    const out = await agentWith(genter).write({ ref: "https://github.com/Docsbook-io/docs/blob/main/CHANGELOG.md", edits: [{ find: "## 1.0", replace: "## 1.1\n\n## 1.0" }], message: "m" });
+    assert.equal(out.status, "done");
+    assert.deepEqual(genter.executed.map((e) => [e.tool, e.account]), [
+      ["GITHUB_GET_REPOSITORY_CONTENT", undefined],
+      ["GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS", undefined],
+      ["GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS", "ca_two"],
+    ]);
+  });
+
   it("M3 an account the user named is not second-guessed", async () => {
     const genter = twoAccounts();
     model = fakeModel([call("execute", { tool: "GITHUB_GET_REPOSITORY_CONTENT", args: where, account: "Main" }), answer("Not found.")]);
     await agentWith(genter).start({ task: "read the changelog of Docsbook-io/docs" });
     assert.deepEqual(genter.executed.map((e) => e.account), ["Main"]);
+  });
+});
+
+describe("A write that writes nothing", () => {
+  const contents = (text) => ({ content: { path: "src/sync.js", sha: "s1", content: Buffer.from(text).toString("base64"), encoding: "base64" } });
+  const found = async (results) => {
+    const genter = fakeGenter({ connected: ["github"], knowledge: [chunk], results });
+    const agent = agentWith(genter);
+    model = fakeModel([answer("Paging [1].")]);
+    const run = await agent.start({ task: "paging", mode: "find" });
+    model.restore();
+    return { genter, agent, run };
+  };
+
+  it("W1 an empty ending is sent back once to write, then the edit is committed", async () => {
+    const { genter, agent, run } = await found({ GITHUB_GET_REPOSITORY_CONTENT: contents("a\nb\n"), GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS: { commit: { html_url: "https://github.com/x/y/commit/c" } } });
+    model = fakeModel([
+      answer(""),
+      (body) => {
+        assert.match(lastOf(body, "user"), /Nothing has been written yet/);
+        return call("edit_file", { ref: 1, edits: [{ find: "b", replace: "c" }], message: "m" });
+      },
+      answer("Committed [1]."),
+    ]);
+    const out = await agent.write({ run_id: run.run_id, ref: 1, change: "b -> c" });
+    assert.equal(out.status, "done");
+    assert.equal(genter.executed.at(-1).tool, "GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS");
+  });
+
+  it("W2 no write at all is a failure, never Done", async () => {
+    const { agent, run } = await found({});
+    model = fakeModel([answer(""), answer("")]);
+    const out = await agent.write({ run_id: run.run_id, ref: 1, change: "b -> c" });
+    assert.equal(out.status, "failed");
+    assert.match(out.answer, /Nothing was written/);
   });
 });
