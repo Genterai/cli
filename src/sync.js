@@ -13,6 +13,10 @@ import { createHash } from "node:crypto";
 //   full    — the whole text, in chunks.
 // Changing a source's depth re-processes its items on the next sync.
 //
+// choices (optional): what can be picked to sync (a user's repos, top-level pages), each mapped to scope fields,
+//   so nobody types owner/repo by hand.
+// triggers (optional): Composio triggers that mean "this source changed"; an event syncs it (only changes are read).
+//   A spec may have a fallback, used when it can not be created (e.g. no admin rights for a repo webhook).
 // setup (optional): calls made before listing that fill scope fields left empty, e.g. a repo's default branch.
 // Template values may use {{name}}: scope fields, {{item.<path>}}, {{page}} (the pagination cursor).
 // A placeholder that is the whole value keeps its type; a missing one drops the argument.
@@ -24,6 +28,31 @@ export const TEMPLATES = {
     toolkit: "github",
     name: "GitHub repository",
     title: "{{owner}}/{{repo}}",
+    choices: {
+      tool: "GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER",
+      args: { per_page: 100, sort: "pushed", page: "{{page}}" },
+      items: "data.repositories",
+      skip: { archived: true },
+      pages: 3,
+      label: "full_name",
+      hint: "description",
+      updated: "pushed_at",
+      private: "private",
+      scope: { owner: "owner.login", repo: "name" },
+      nextPage: true,
+    },
+    triggers: [
+      {
+        slug: "GITHUB_COMMIT_EVENT",
+        config: { owner: "{{owner}}", repo: "{{repo}}" },
+        label: "on every commit",
+        fallback: {
+          slug: "GITHUB_BRANCH_CHANGED_TRIGGER",
+          config: { owner: "{{owner}}", repo: "{{repo}}", branch: "{{branch}}", interval: 5 },
+          label: "within 5 minutes of a push",
+        },
+      },
+    ],
     scope: {
       owner: { required: true, description: "Repository owner (user or organization)", example: "Genterai" },
       repo: { required: true, description: "Repository name", example: "genter-cli" },
@@ -55,9 +84,27 @@ export const TEMPLATES = {
   notion: {
     toolkit: "notion",
     name: "Notion pages",
-    title: "Notion{{query? · }}{{query}}",
+    title: "Notion{{name? · }}{{name}}{{query? · }}{{query}}",
+    choices: {
+      tool: "NOTION_SEARCH_NOTION_PAGE",
+      args: { filter_property: "object", filter_value: "page", page_size: 100, start_cursor: "{{page}}" },
+      items: "data.results",
+      where: { "parent.type": "workspace" },
+      skip: { archived: true, in_trash: true },
+      next: "data.next_cursor",
+      pages: 5,
+      label: ["properties.title.title.0.plain_text", "properties.*.title.0.plain_text"],
+      updated: "last_edited_time",
+      scope: { root: "id", name: ["properties.title.title.0.plain_text", "properties.*.title.0.plain_text"] },
+    },
+    triggers: [
+      { slug: "NOTION_PAGE_CONTENT_UPDATED", config: {}, label: "on every edit" },
+      { slug: "NOTION_PAGE_CREATED", config: {}, label: "on new pages" },
+    ],
     scope: {
-      query: { description: "Only pages whose title matches; all pages shared with Genter if empty", example: "Roadmap" },
+      root: { description: "A page: it and every page under it; all pages shared with Genter if empty" },
+      name: { description: "The page's title, for display", display: true },
+      query: { description: "Only pages whose title matches", example: "Roadmap" },
     },
     list: {
       tool: "NOTION_SEARCH_NOTION_PAGE",
@@ -68,8 +115,10 @@ export const TEMPLATES = {
       version: "last_edited_time",
       title: ["properties.title.title.0.plain_text", "properties.*.title.0.plain_text"],
       url: "url",
+      parent: "parent.page_id",
       next: "data.next_cursor",
     },
+    root: "{{root}}",
     read: {
       tool: "NOTION_GET_PAGE_MARKDOWN",
       args: { page_id: "{{item.id}}" },
@@ -86,13 +135,19 @@ const LIMITS = { maxItems: 3000, maxPages: 100, maxChunks: 80, chunkSize: 1600, 
 // namespace: the user or workspace, so ids and running syncs never mix between them.
 export const DEPTHS = ["titles", "summary", "full"];
 
-export function createSources({ run, embedMany, summarize, seal, open, store, namespace = "" }) {
+// triggers (optional): create(slug, config, account) -> trigger id, remove(id).
+export function createSources({ run, embedMany, summarize, triggers, seal, open, store, namespace = "" }) {
   const loadSource = async (id) => {
     const row = await store.getSource(id);
     if (!row) throw new Error(`Unknown source: ${id}`);
     return open(row.blob);
   };
   const saveSource = (source) => store.putSource({ id: source.id, blob: seal(source) });
+  // Same template + scope (display-only fields aside) = same source.
+  const sourceId = (template, clean) => {
+    const keyed = Object.fromEntries(Object.entries(clean).filter(([k]) => !TEMPLATES[template].scope[k]?.display));
+    return `src_${createHash("sha256").update(`${namespace}:${template}:${JSON.stringify(keyed)}`).digest("hex").slice(0, 16)}`;
+  };
 
   // Lists every item of a source, page by page.
   async function list(source, template) {
@@ -103,8 +158,7 @@ export function createSources({ run, embedMany, summarize, seal, open, store, na
       const res = await run(role.tool, fill(role.args, { ...source.scope, page }), source.account);
       if (res?.successful === false) throw new Error(`${role.tool}: ${errorText(res.error)}`);
       for (const raw of [pick(res, role.items)].flat().filter(Boolean)) {
-        if (role.where && !Object.entries(role.where).every(([p, v]) => pick(raw, p) === v)) continue;
-        if (role.skip && Object.entries(role.skip).some(([p, v]) => pick(raw, p) === v)) continue;
+        if (!matches(raw, role)) continue;
         const id = pick(raw, role.id);
         if (id == null) continue;
         const ctx = { ...source.scope, item: raw };
@@ -115,6 +169,7 @@ export function createSources({ run, embedMany, summarize, seal, open, store, na
           url: role.url?.includes("{{") ? fill(role.url, ctx) : role.url ? pick(raw, role.url) : undefined,
           size: role.size ? Number(pick(raw, role.size)) || 0 : undefined,
           text: role.text ? pick(raw, role.text) : undefined,
+          parent: role.parent ? pick(raw, role.parent) : undefined,
         });
         if (out.length > LIMITS.maxItems) {
           throw new Error(`More than ${LIMITS.maxItems} items in ${source.title}. Narrow the source down (a folder, a query).`);
@@ -125,8 +180,16 @@ export function createSources({ run, embedMany, summarize, seal, open, store, na
       page = next;
     }
     const prefix = template.prefix ? String(fill(template.prefix, source.scope) ?? "").replace(/^\/+/, "") : "";
+    // A root: only it and the items under it, by the parent links in the list itself.
+    const root = template.root ? fill(template.root, source.scope) : null;
+    const parents = new Map(out.map((i) => [i.id, i.parent]));
+    const under = (id) => {
+      for (let n = 0, cur = id; cur && n < 30; n++, cur = parents.get(cur)) if (cur === root) return true;
+      return false;
+    };
     return out.filter(
       (i) =>
+        (!root || under(i.id)) &&
         i.id.startsWith(prefix) &&
         !(template.exclude ?? []).some((re) => re.test(i.id)) &&
         !(template.maxSize && i.size > template.maxSize),
@@ -244,7 +307,14 @@ export function createSources({ run, embedMany, summarize, seal, open, store, na
 
   const api = {
     templates: () =>
-      Object.entries(TEMPLATES).map(([key, t]) => ({ template: key, toolkit: t.toolkit, name: t.name, scope: t.scope })),
+      Object.entries(TEMPLATES).map(([key, t]) => ({
+        template: key,
+        toolkit: t.toolkit,
+        name: t.name,
+        scope: t.scope,
+        choices: Boolean(t.choices),
+        triggers: (t.triggers ?? []).map((x) => x.label),
+      })),
 
     async list() {
       return (await store.sources()).map((row) => publicSource(open(row.blob))).sort((a, b) => a.created_at.localeCompare(b.created_at));
@@ -260,13 +330,8 @@ export function createSources({ run, embedMany, summarize, seal, open, store, na
       if (depth && !DEPTHS.includes(depth)) throw new Error(`depth is one of ${DEPTHS.join(", ")}`);
       const t = TEMPLATES[template];
       if (!t) throw new Error(`Unknown template "${template}". Available: ${Object.keys(TEMPLATES).join(", ")}`);
-      const clean = {};
-      for (const [name, field] of Object.entries(t.scope)) {
-        const value = String(scope[name] ?? "").trim() || field.default;
-        if (field.required && !value) throw new Error(`${name} is required: ${field.description}`);
-        if (value) clean[name] = value;
-      }
-      const id = `src_${createHash("sha256").update(`${namespace}:${template}:${JSON.stringify(clean)}`).digest("hex").slice(0, 16)}`;
+      const clean = cleanScope(t, scope);
+      const id = sourceId(template, clean);
       const existing = await store.getSource(id);
       if (existing) {
         const source = open(existing.blob);
@@ -289,25 +354,123 @@ export function createSources({ run, embedMany, summarize, seal, open, store, na
       return publicSource(source);
     },
 
-    // Brings a source up to date. Shared by concurrent callers; budgetMs stops early, the next sync continues.
-    async sync({ id, budgetMs }) {
-      const key = `${namespace}:${id}`;
-      if (!running.has(key)) {
-        running.set(
-          key,
-          (async () => {
-            const source = await loadSource(id);
-            source.status = "syncing";
-            source.sync_started_at = new Date().toISOString();
-            await saveSource(source);
-            return syncNow(source, { budgetMs });
-          })().finally(() => running.delete(key)),
-        );
+    // What can be picked to sync with this template (repos, top-level pages), newest first, each with its scope
+    // and the source already made from it, if any: [{ label, hint, updated, private, scope, source }].
+    async choices({ template, account }) {
+      const t = TEMPLATES[template];
+      if (!t) throw new Error(`Unknown template "${template}"`);
+      const role = t.choices;
+      if (!role) return [];
+      const out = [];
+      let page;
+      for (let n = 0; n < (role.pages ?? 1); n++) {
+        const res = await run(role.tool, fill(role.args, { page: role.nextPage ? n + 1 : page }), account);
+        if (res?.successful === false) throw new Error(`${role.tool}: ${errorText(res.error)}`);
+        const items = [pick(res, role.items)].flat().filter(Boolean);
+        for (const raw of items) {
+          if (!matches(raw, role)) continue;
+          const scope = {};
+          for (const [k, p] of Object.entries(role.scope)) {
+            const v = pick(raw, p);
+            if (v != null && v !== "") scope[k] = String(v);
+          }
+          out.push({
+            label: String(pick(raw, role.label) ?? "Untitled"),
+            hint: role.hint ? (pick(raw, role.hint) ?? null) : null,
+            updated: role.updated ? (pick(raw, role.updated) ?? null) : null,
+            private: role.private ? Boolean(pick(raw, role.private)) : null,
+            scope,
+          });
+        }
+        if (role.nextPage) {
+          if (!items.length) break;
+        } else {
+          page = role.next && pick(res, role.next);
+          if (!page) break;
+        }
       }
-      return running.get(key);
+      const known = new Map((await store.sources()).map((row) => open(row.blob)).map((src) => [src.id, publicSource(src)]));
+      return out
+        .map((c) => ({ ...c, source: known.get(sourceId(template, cleanScope(t, c.scope, { strict: false }))) ?? null }))
+        .sort((a, b) => String(b.updated ?? "").localeCompare(String(a.updated ?? "")));
+    },
+
+    // Brings a source up to date. Shared by concurrent callers; budgetMs stops early, the next sync continues.
+    // again: if a sync is running, run once more after it (an event arrived mid-sync), instead of piling up.
+    async sync({ id, budgetMs, again = false }) {
+      const key = `${namespace}:${id}`;
+      if (running.has(key)) {
+        if (again) rerun.add(key);
+        return running.get(key);
+      }
+      const job = (async () => {
+        let out;
+        do {
+          rerun.delete(key);
+          const source = await loadSource(id);
+          source.status = "syncing";
+          source.sync_started_at = new Date().toISOString();
+          await saveSource(source);
+          out = await syncNow(source, { budgetMs });
+        } while (rerun.has(key));
+        return out;
+      })().finally(() => running.delete(key));
+      running.set(key, job);
+      return job;
+    },
+
+    // Keeps a source up to date by itself: turns its template's triggers on (or off). A trigger that can not be
+    // created falls back to its fallback (e.g. polling); what could not be turned on is in watch_error.
+    async watch({ id, on = true }) {
+      if (!triggers) throw new Error("Triggers are not available here");
+      const source = await loadSource(id);
+      const t = templateOf(source);
+      if (on) {
+        if (source.watch?.length) return publicSource(source);
+        if (!t.triggers?.length) throw new Error(`${t.name} has no triggers`);
+        await setup(source, t);
+        const made = [];
+        const errors = [];
+        for (const spec of t.triggers) {
+          let error;
+          for (let cur = spec; cur; cur = cur.fallback) {
+            try {
+              made.push({ id: await triggers.create(cur.slug, fill(cur.config, source.scope), source.account), slug: cur.slug, label: cur.label });
+              error = null;
+              break;
+            } catch (e) {
+              error = `${cur.slug}: ${e.message}`;
+            }
+          }
+          if (error) errors.push(error);
+        }
+        source.watch = made;
+        source.watch_error = errors.length ? errors.join("; ").slice(0, 500) : undefined;
+      } else {
+        // Composio may share one trigger between sources (same app, same config): remove it only when unused.
+        const others = new Set(
+          (await store.sources())
+            .map((row) => open(row.blob))
+            .filter((src) => src.id !== id)
+            .flatMap((src) => (src.watch ?? []).map((w) => w.id)),
+        );
+        for (const w of source.watch ?? []) if (!others.has(w.id)) await triggers.remove(w.id).catch(() => {});
+        source.watch = [];
+        source.watch_error = undefined;
+      }
+      await saveSource(source);
+      return publicSource(source);
+    },
+
+    // A trigger fired: sync every source it belongs to. Events during a sync fold into one more sync.
+    async onTrigger({ triggerId, budgetMs }) {
+      const ids = new Set([triggerId].flat().filter(Boolean));
+      const hit = (await store.sources()).map((row) => open(row.blob)).filter((src) => (src.watch ?? []).some((w) => ids.has(w.id)));
+      return Promise.all(hit.map((src) => api.sync({ id: src.id, budgetMs, again: true })));
     },
 
     async remove({ id }) {
+      if (triggers && (await loadSource(id)).watch?.length) await api.watch({ id, on: false });
       const rows = await store.items(id);
       if (rows.length) await store.deleteItems(id, rows.map((r) => r.key));
       await store.deleteSource(id);
@@ -345,6 +508,23 @@ export function createSources({ run, embedMany, summarize, seal, open, store, na
 }
 
 const running = new Map(); // "<namespace>:<source id>" -> Promise of its sync, so a source never syncs twice at once
+const rerun = new Set(); // keys to sync once more when their running sync ends
+
+// where: every path must equal its value; skip: none may.
+const matches = (raw, role) =>
+  (!role.where || Object.entries(role.where).every(([p, v]) => pick(raw, p) === v)) &&
+  !(role.skip && Object.entries(role.skip).some(([p, v]) => pick(raw, p) === v));
+
+// Scope fields of a template from what was given: defaults applied, required ones checked (strict).
+function cleanScope(t, scope, { strict = true } = {}) {
+  const clean = {};
+  for (const [name, field] of Object.entries(t.scope)) {
+    const value = String(scope[name] ?? "").trim() || field.default;
+    if (strict && field.required && !value) throw new Error(`${name} is required: ${field.description}`);
+    if (value) clean[name] = value;
+  }
+  return clean;
+}
 
 const templateOf = (source) => {
   const t = TEMPLATES[source.template];
@@ -354,7 +534,7 @@ const templateOf = (source) => {
 
 // What callers see of a source: no account internals. A sync that died with its process (no update for
 // 10 minutes) shows as partial, so it can be continued.
-const publicSource = ({ id, template, toolkit, title, scope, depth, status, sync_started_at, created_at, synced_at, stats, last_run }) => ({
+const publicSource = ({ id, template, toolkit, title, scope, depth, status, sync_started_at, created_at, synced_at, stats, last_run, watch, watch_error }) => ({
   id,
   template,
   toolkit,
@@ -366,6 +546,8 @@ const publicSource = ({ id, template, toolkit, title, scope, depth, status, sync
   synced_at: synced_at ?? null,
   stats,
   last_run: last_run ?? null,
+  watching: (watch ?? []).map((w) => w.label),
+  watch_error: watch_error ?? null,
 });
 
 const itemKey = (sourceId, itemId) => createHash("sha256").update(`${sourceId}:${itemId}`).digest("hex").slice(0, 32);

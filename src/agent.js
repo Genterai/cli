@@ -110,11 +110,38 @@ export function createAgent({
       case "add_source": {
         if (!genter.sources) return { content: "Sources are not available here." };
         if (!canExecute) return { content: "Not allowed: this user can search but not add sources." };
-        const source = await genter.sources.create({ template: input.template, scope: input.scope ?? {}, depth: input.depth, account: input.account ?? run.account });
+        const account = input.account ?? run.account;
+        let scope = input.scope ?? {};
+        // "genter-cli", "Roadmap": picked from what the connection has, so nobody needs owner/repo or page ids.
+        if (input.pick && !Object.keys(scope).length) {
+          const all = await genter.sources.choices({ template: input.template, account });
+          const want = input.pick.toLowerCase().trim();
+          const exact = all.filter((c) => c.label.toLowerCase() === want || c.label.toLowerCase().endsWith(`/${want}`));
+          const found = exact.length ? exact : all.filter((c) => c.label.toLowerCase().includes(want));
+          if (found.length !== 1) {
+            return {
+              content: JSON.stringify({
+                error: found.length ? `Several match "${input.pick}"` : `Nothing matches "${input.pick}"`,
+                choices: (found.length ? found : all).slice(0, 15).map((c) => c.label),
+                hint: "Ask the user which one (ask_user), or call add_source again with the exact name.",
+              }),
+            };
+          }
+          scope = found[0].scope;
+        }
+        const source = await genter.sources.create({ template: input.template, scope, depth: input.depth, account });
         onEvent({ type: "step", tool: "sync_source", input: { source: source.title } });
         const synced = await genter.sources.sync({ id: source.id, budgetMs: 60000 });
+        let watching = synced.watching;
+        let watchError;
+        if (input.watch !== false && genter.sources.watch) {
+          const watched = await genter.sources.watch({ id: source.id }).catch((e) => ({ watch_error: e.message }));
+          watching = watched.watching ?? [];
+          watchError = watched.watch_error;
+        }
         onEvent({ type: "tool", tool: "sync_source", ok: synced.status !== "failed", summary: syncText(synced) });
-        return { content: JSON.stringify({ ...synced, note: syncText(synced) }) };
+        const note = `${syncText(synced)}${watching?.length ? ` Kept up to date ${watching.join(", ")}.` : ""}${watchError ? ` Auto-update could not be turned on: ${watchError}` : ""}`;
+        return { content: JSON.stringify({ ...synced, watching, note }) };
       }
       case "sync_source": {
         if (!genter.sources) return { content: "Sources are not available here." };
@@ -293,7 +320,8 @@ const syncText = (s) =>
       (s.status === "partial" ? `; ${s.last_run?.left ?? "some"} items left — it continues on the next sync (dashboard → Sources, or sync_source).` : "");
 
 const TEMPLATE_HELP =
-  'Templates: github {owner, repo, branch?, path?} — files of a repository; notion {query?} — pages shared with Genter. ' +
+  'Templates: github — files of a repository; notion — a page and every page under it, or all pages shared with Genter. ' +
+  "Pass pick (the repo or page name as the user said it) or scope. It is kept up to date on every change unless watch is false. " +
   'depth: "titles" (names and links only, fast), "summary" (a short summary per item), "full" (whole text, default).';
 
 function briefing({ task, mode, account, found, connected, canExecute, english, sources = [], knowledge = [] }) {
@@ -397,11 +425,13 @@ const TOOLS = [
       type: "object",
       properties: {
         template: { type: "string", enum: ["github", "notion"] },
-        scope: { type: "object", additionalProperties: true, description: "Template fields, e.g. {owner, repo}" },
+        pick: { type: "string", description: "Name of the repo or top-level page as the user said it, e.g. genter-cli or Roadmap; found among the connection's repos/pages" },
+        scope: { type: "object", additionalProperties: true, description: "Template fields when known exactly, e.g. {owner, repo}" },
+        watch: { type: "boolean", description: "Keep it up to date on every change (default true)" },
         depth: { type: "string", enum: ["titles", "summary", "full"] },
         account: { type: "string", description: "Connection alias or id when the app is connected several times" },
       },
-      required: ["template", "scope"],
+      required: ["template"],
     },
   },
   {

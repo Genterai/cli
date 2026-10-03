@@ -132,6 +132,13 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
         return composio.tools.execute(tool, { userId, arguments: args, ...(id && { connectedAccountId: id }), dangerouslySkipVersionCheck: true });
       },
       embedMany,
+      triggers: {
+        create: async (slug, config, account) => {
+          const id = await accountId(account, { strict: false });
+          return (await composio.triggers.create(userId, slug, { ...(id && { connectedAccountId: id }), triggerConfig: config })).triggerId;
+        },
+        remove: (id) => composio.triggers.delete(id),
+      },
       summarize: (title, text) =>
         chat({
           model: process.env.SUMMARY_MODEL || "openai/gpt-oss-20b",
@@ -326,7 +333,8 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       };
     },
 
-    // Sources: templates(), list(), get(id), create({template, scope, depth?, account?}), sync({id, budgetMs?}), remove({id}).
+    // Sources: templates(), choices({template, account?}), list(), get(id), create({template, scope, depth?, account?}),
+    // sync({id, budgetMs?}), watch({id, on?}), onTrigger({triggerId}), remove({id}).
     sources,
 
     // Chunks of synced sources closest to a question: [{ source, source_title, title, url, text, score }].
