@@ -1,0 +1,15 @@
+{
+  "name": "genter-cli",
+  "version": "0.1.0",
+  "description": "Composio tools with memory: search -> execute -> add_memory, so agents find ready-made tool calls next time.",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "type": "module",
+  "bin": { "genter": "bin/genter.js" },
+  "exports": { ".": "./src/genter.js", "./tools": "./src/tools.js" },
+  "files": ["bin", "src"],
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@composio/core": "^0.17.0",
+    "zod": "^4.0.0"
+  }
+}
