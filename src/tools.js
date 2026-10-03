@@ -190,7 +190,7 @@ export function agentTools({ connected = [] } = {}) {
         "remembering an app's content as searchable knowledge (\"remember the acme/api repo\", \"keep our Notion roadmap pages\"), " +
         "and workflows across apps (e.g. \"turn today's support emails into Linear issues and post a summary to #support\").\n" +
         "Pass the full task with every known detail (names, dates, ids, which account) in one call. " +
-        "If the result has status needs_input or needs_connection, show the question or the connect link to the user, " +
+        "If the result has status needs_connection, show the connect link to the user, " +
         "then call GENTER_CONTINUE_TASK with run_id." +
         have,
       input: z.object({
