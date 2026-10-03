@@ -133,16 +133,20 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       const same = (await store.all())
         .map((row) => open(row.blob))
         .find((r) => r.tool === tool && JSON.stringify(r.args) === JSON.stringify(args) && r.digest === digest);
-      const summary = same ? same.summary : await summarize(tool, result.data);
-      const summaryEmbedding = summary && !same ? await embed(summary) : undefined;
-      const record = same ?? { id: randomUUID(), tool, args, created_at: new Date().toISOString(), summary, summaryEmbedding, digest };
-      if (!same) await save(record);
+      let record = same ?? { id: randomUUID(), tool, args, created_at: new Date().toISOString(), digest };
+      if (!record.summaryEmbedding) {
+        // New call, or one saved by an older version without a searchable summary: (re)write the summary.
+        const summary = await summarize(tool, result.data);
+        record = { ...record, summary, summaryEmbedding: summary ? await embed(summary) : undefined };
+        await save(record);
+      }
+      const { summary } = record;
 
       if (description) {
         const [saved] = await api.save_recipes({ recipes: [{ id: record.id, description, tags }] });
         return { id: record.id, result, summary, saved, ...outdated };
       }
-      if (!same) {
+      if (!record.memory) {
         const info = await composio.tools.getRawComposioToolBySlug(tool);
         const keys = Object.keys(args).join(", ");
         await api.save_recipes({
@@ -154,7 +158,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
         result,
         summary,
         ...outdated,
-        ...((!same || same.memory?.auto) && {
+        ...((!record.memory || record.memory.auto) && {
           note:
             "Saved as a recipe with Composio's generic description. Optional: improve it with save_recipes " +
             "(the user's intent in plain words, what it returns, pitfalls, tags in English and Russian).",
