@@ -522,3 +522,15 @@ describe("A task of several parts on a recipe of one: the tools of the other par
     assert.equal(out.answer, "The latest commit is c1 [1].");
   });
 });
+
+describe("No answer is never Done", () => {
+  it("N1 empty twice after a read: the second try is on the strong model, then a failure that names what ran, with no references", async () => {
+    const commits = { id: "rec_commits", tool: "GITHUB_LIST_COMMITS", args: { owner: "o", repo: "r" }, description: "### Recent commits", summary: "20 commits", status: "valid", score: 0.8 };
+    const genter = fakeGenter({ connected: ["github"], recipes: [commits], results: { GITHUB_LIST_COMMITS: [{ sha: "c1" }] } });
+    model = fakeModel([call("execute", { tool: "GITHUB_LIST_COMMITS", args: { owner: "o", repo: "r" } }), answer(""), (body) => (assert.equal(body.model, "strong"), answer(""))]);
+    const out = await agentWith(genter, { model: "fast", strongModel: "strong" }).start({ task: "recent commits", mode: "find" });
+    assert.equal(out.status, "failed");
+    assert.match(out.answer, /ran GITHUB_LIST_COMMITS but gave no answer/);
+    assert.equal(out.references, undefined);
+  });
+});

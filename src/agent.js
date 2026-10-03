@@ -307,7 +307,7 @@ export function createAgent({
         // Once the source is added there is nothing left to call: only the answer.
         // A question or a one-off task never adds sources: without these the model reads the data instead.
         // Stuck on the fast model (failed calls, searching again and again): the rest of the run goes to the strong one.
-        if (!run.strong && (Object.keys(run.failures).length || run.searches >= 2 || run.nudged || run.unstuck || run.retried)) run.strong = true;
+        if (!run.strong && (Object.keys(run.failures).length || run.searches >= 2 || run.nudged || run.unstuck || run.prompted || run.retried)) run.strong = true;
         const message = await llm(run.messages, usage, run.sync && builder ? SYNC_TOOLS : run.sync ? TOOLS : TASK_TOOLS, run.sourced ? "none" : undefined, run.strong ? strongModel : model);
         run.messages.push({ role: "assistant", content: message.content ?? null, ...(message.tool_calls?.length && { tool_calls: message.tool_calls }) });
         if (!message.tool_calls?.length) {
@@ -341,9 +341,13 @@ export function createAgent({
             run.messages.push({ role: "user", content: ANSWER_NOW });
             continue;
           }
-          // A model that ends without text: the last tool note is the answer; with nothing done at all it is not "done".
+          // A model that ends without text: the last tool note is the answer; without one it is not "done" (a bare "Done."
+          // came with references picked for no answer).
           const text = message.content?.trim() || lastNote;
-          result = text || run.steps.length ? { status: "done", answer: text || "Done." } : { status: "failed", answer: "The agent stopped without doing anything or answering." };
+          const did = run.steps.filter((s) => s.ok).map((s) => s.tool);
+          result = text
+            ? { status: "done", answer: text }
+            : { status: "failed", answer: did.length ? `The agent ran ${[...new Set(did)].join(", ")} but gave no answer. Run it again.` : "The agent stopped without doing anything or answering." };
           break;
         }
         // Independent calls run in parallel, like the model asked.
