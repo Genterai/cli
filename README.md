@@ -73,7 +73,7 @@ genter continue '{"run_id":"...","message":"use my work account"}'
 
 A run ends `done`, `needs_input` (a question), `needs_connection` (a connect link) or `failed`; `continue` picks it up.
 `find` runs only tools that read (by Composio's hint or the verb in the slug). New calls are saved as recipes with
-the agent's description, so the next run finds them. The model is `AGENT_MODEL` on OpenRouter, default `openai/gpt-4.1-mini`.
+the agent's description, so the next run finds them. The model is `AGENT_MODEL` on OpenRouter, default `openai/gpt-oss-20b`.
 
 ```js
 import { createAgent } from "genter-cli/agent";
@@ -87,7 +87,7 @@ await agent.send({ run_id: out.run_id, message: "only the work calendar" });
 ## Data
 
 - Raw tool results are never stored, only a 1-3 sentence summary written by an LLM through OpenRouter
-  (`SUMMARY_MODEL`, default `openai/gpt-4o-mini`). The same call with the same result is not saved twice.
+  (`SUMMARY_MODEL`, default `openai/gpt-oss-20b`). The same call with the same result is not saved twice.
 - Every record (tool, args, description, summary, embedding) is encrypted with AES-256-GCM before it is stored.
   The store only sees `{id, remembered, blob}`. The CLI keeps its key in `~/.genter/config.json` and data in `~/.genter/calls.json`.
 - Agent runs are encrypted the same way (`~/.genter/runs.json`). Tool results in them are replaced by their summaries
