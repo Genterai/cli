@@ -86,6 +86,17 @@ export function createBuilder({ genter, openrouterApiKey, model = process.env.BU
     return { kinds: (json.kinds ?? []).filter((k) => k?.items?.tool).slice(0, 8), cost };
   }
 
+  // The plan of an app is about the app, not the person: cached for a day, shared by everyone in the process.
+  function planOf(toolkit) {
+    if (PLANS[toolkit]) return Promise.resolve({ kinds: structuredClone(PLANS[toolkit]), cost: 0 });
+    const hit = plans.get(toolkit);
+    if (hit && Date.now() - hit.at < 86_400_000) return hit.plan.then(({ kinds }) => ({ kinds: structuredClone(kinds), cost: 0 }));
+    const p = plan(toolkit);
+    plans.set(toolkit, { at: Date.now(), plan: p });
+    p.catch(() => plans.delete(toolkit));
+    return p;
+  }
+
   // Args fixed by the model once, from a real container and the error the first try gave.
   async function repair(kind, container, error) {
     const schemas = await Promise.all(
@@ -186,7 +197,8 @@ export function createBuilder({ genter, openrouterApiKey, model = process.env.BU
 
   // The containers of a kind: [{ id, label, raw }], as many as the plan says (default 20).
   async function containersOf(kind, account) {
-    const res = await genter.sources.probe({ tool: kind.containers.tool, args: kind.containers.args ?? {}, account, raw: true });
+    // The first page: an empty {{page}} drops the argument (a literal "{{page}}" made GitHub reject the call).
+    const res = await genter.sources.probe({ tool: kind.containers.tool, args: fill(kind.containers.args ?? {}, {}), account, raw: true });
     if (res?.successful === false) throw new Error(`${kind.containers.tool}: ${JSON.stringify(res.error).slice(0, 200)}`);
     const shape = inferList(res);
     if (!shape.items) throw new Error("no containers found");
@@ -194,18 +206,23 @@ export function createBuilder({ genter, openrouterApiKey, model = process.env.BU
     return [pick(res, shape.items)]
       .flat()
       .filter((x) => x && !skip(x))
-      .slice(0, Math.min(Number(kind.containers.max) || 20, 50))
+      .slice(0, Math.min(Number(kind.containers.max) || 10, 50)) // the most active first; more on request
       .map((raw) => ({ id: String(pick(raw, shape.id)), label: String(pick(raw, ["full_name", ...[shape.title].flat()]) ?? pick(raw, shape.id)), raw }));
   }
 
   // One kind: a recipe per container (or one without containers), each tested and saved.
-  async function discoverKind(toolkit, kind, account, onProgress, known) {
+  // run: { deadline, done: Set of recipe names already handled, left }: containers past the deadline are left
+  // for the next round, and the kind comes back with what it settled (repaired args, triggers) for that round.
+  async function discoverKind(toolkit, kind, account, onProgress, known, run) {
     let cost = 0;
     const made = [];
+    const nameOf = (container) => (container ? `${container.label} · ${kind.name}` : kind.name);
+    const late = () => Date.now() > run.deadline;
     const save = async (recipe, container) => {
       const { estimate: e } = recipe;
+      const name = nameOf(container);
       // Nothing there yet (a repo without issues): no recipe; Set up sync again picks it up once there is.
-      if (!e.items && !e.more) return onProgress({ kind: kind.name, container: container?.label ?? null, empty: true });
+      if (!e.items && !e.more) return onProgress({ kind: kind.name, container: container?.label ?? null, name, empty: true });
       // Set up sync again replaces the recipe of the same name instead of adding another.
       const id = known.get(recipe.name);
       const out = await genter.save_live_sync({
@@ -218,42 +235,71 @@ export function createBuilder({ genter, openrouterApiKey, model = process.env.BU
       });
       if (!out.saved) throw new Error((out.test?.problems ?? ["test failed"]).join("; "));
       made.push(out.id);
-      onProgress({ kind: kind.name, container: container?.label ?? null, recipe: out.id, estimate: e });
+      onProgress({ kind: kind.name, container: container?.label ?? null, name, recipe: out.id, estimate: e });
     };
+    const failed = (container, e) => onProgress({ kind: kind.name, container: container?.label ?? null, name: nameOf(container), error: e.message });
     if (!kind.containers?.tool) {
-      const triggers = await genter.pick_triggers({ toolkit, tool: kind.items.tool, args: kind.items.args ?? {}, description: kind.description });
-      await save(await shape(toolkit, kind, null, account, triggers));
-      return { made, cost };
+      if (run.done.has(nameOf(null))) return { made, cost, kind };
+      if (late()) return run.left++, { made, cost, kind };
+      await within(STEP_MS, async () => {
+        const triggers = await genter.pick_triggers({ toolkit, tool: kind.items.tool, args: kind.items.args ?? {}, description: kind.description });
+        await save(await shape(toolkit, kind, null, account, triggers));
+      }).catch((e) => failed(null, e));
+      return { made, cost, kind };
     }
-    const containers = await containersOf(kind, account);
-    if (!containers.length) throw new Error("nothing to keep: no containers");
-    onProgress({ kind: kind.name, containers: containers.map((c) => c.label) });
+    const all = await within(STEP_MS, () => containersOf(kind, account));
+    if (!all.length) throw new Error("nothing to keep: no containers");
+    onProgress({ kind: kind.name, containers: all.map((c) => c.label) });
+    const todo = all.filter((c) => !run.done.has(nameOf(c)));
+    if (!todo.length) return { made, cost, kind };
     // The first container settles the args (repaired once if they fail) and the triggers; the others reuse them.
-    const [first, ...rest] = containers;
-    let firstRecipe;
-    try {
-      firstRecipe = await shape(toolkit, kind, first, account, []);
-    } catch (e) {
-      const fixed = await repair(kind, first.raw, e.message);
-      cost += fixed.cost;
-      kind = fixed.kind;
-      firstRecipe = await shape(toolkit, kind, first, account, []);
-    }
-    const triggers = await genter.pick_triggers({ toolkit, tool: kind.items.tool, args: firstRecipe.list.args, description: kind.description });
-    firstRecipe.triggers = triggers;
-    firstRecipe.every = triggers.length ? null : 60;
-    await save(firstRecipe, first).catch((e) => onProgress({ kind: kind.name, container: first.label, error: e.message }));
-    await pool(rest, 4, async (c) => {
+    // A later round has them in kind.settled already.
+    let rest = todo;
+    if (!kind.settled) {
+      if (late()) return (run.left += todo.length), { made, cost, kind };
+      const [first] = todo;
+      rest = todo.slice(1);
       try {
-        const recipe = await shape(toolkit, kind, c, account, []);
-        recipe.triggers = retarget(triggers, firstRecipe.list.args, recipe.list.args);
-        recipe.every = triggers.length ? null : 60;
-        await save(recipe, c);
+        await within(STEP_MS * 2, async () => {
+          let firstRecipe;
+          try {
+            firstRecipe = await shape(toolkit, kind, first, account, []);
+          } catch (e) {
+            const fixed = await repair(kind, first.raw, e.message);
+            cost += fixed.cost;
+            kind = fixed.kind;
+            firstRecipe = await shape(toolkit, kind, first, account, []);
+          }
+          const triggers = await genter.pick_triggers({ toolkit, tool: kind.items.tool, args: firstRecipe.list.args, description: kind.description });
+          kind = { ...kind, settled: { triggers, args: firstRecipe.list.args } };
+          firstRecipe.triggers = triggers;
+          firstRecipe.every = triggers.length ? null : 60;
+          await save(firstRecipe, first);
+        });
       } catch (e) {
-        onProgress({ kind: kind.name, container: c.label, error: e.message });
+        failed(first, e);
+        if (!kind.settled) {
+          // The first container could not settle the kind: the others would fail the same way.
+          rest.forEach((c) => failed(c, new Error(`skipped: ${String(e.message).slice(0, 120)}`)));
+          return { made, cost, kind };
+        }
+      }
+    }
+    const { triggers, args } = kind.settled;
+    await pool(rest, 4, async (c) => {
+      if (late()) return run.left++;
+      try {
+        await within(STEP_MS, async () => {
+          const recipe = await shape(toolkit, kind, c, account, []);
+          recipe.triggers = retarget(triggers, args, recipe.list.args);
+          recipe.every = triggers.length ? null : 60;
+          await save(recipe, c);
+        });
+      } catch (e) {
+        failed(c, e);
       }
     });
-    return { made, cost };
+    return { made, cost, kind };
   }
 
   return {
@@ -262,26 +308,34 @@ export function createBuilder({ genter, openrouterApiKey, model = process.env.BU
     // recipe per container, each listing ALL of that container (every page, the whole tree) so a sync keeps all of it
     // up to date and reads only what changed. Every recipe is shaped from real responses, tested, saved, and carries
     // an estimate of how much its sync does. onProgress gets { planned }, { kind, containers },
-    // then { kind, container, recipe, estimate }, { kind, container, empty } or { kind, container?, error }.
-    // kinds (optional): a plan to use instead of planning one.
-    async discover({ toolkit, account, kinds: given, onProgress = () => {} }) {
-      const { kinds, cost: planCost } = given ? { kinds: given, cost: 0 } : await plan(toolkit);
+    // then { kind, container, name, recipe, estimate }, { kind, container, name, empty } or { kind, container?, name?, error }.
+    // It works in rounds: nothing new starts after budgetMs, and { left } says how much is still to do. The next
+    // round passes the returned kinds (the plan with what it settled) and done (names handled so far).
+    // kinds (optional): a plan to use instead of planning one; the plan of an app is cached for a day.
+    async discover({ toolkit, account, kinds: given, done = [], budgetMs = 200_000, onProgress = () => {} }) {
+      const started = Date.now();
+      const planned = given ? { kinds: given, cost: 0 } : await planOf(toolkit);
+      // Recommended kinds first, so what most people want appears first.
+      let kinds = [...planned.kinds].sort((a, b) => Number(Boolean(b.recommended)) - Number(Boolean(a.recommended)));
       const known = new Map(((await genter.sources.templates().catch(() => [])) ?? []).filter((t) => !t.builtin && t.toolkit === toolkit).map((t) => [t.name, t.template]));
-      let cost = planCost;
-      onProgress({ planned: kinds.map((k) => ({ name: k.name, description: k.description, recommended: Boolean(k.recommended), per_container: Boolean(k.containers?.tool) })) });
+      let cost = planned.cost;
+      onProgress({ planned: kinds.map((k) => ({ name: k.name, description: k.description, recommended: Boolean(k.recommended), per_container: Boolean(k.containers?.tool) })), kinds });
+      const run = { deadline: started + budgetMs, done: new Set(done), left: 0 };
       const made = [];
-      await Promise.all(
+      kinds = await Promise.all(
         kinds.map(async (kind) => {
           try {
-            const out = await discoverKind(toolkit, kind, account, onProgress, known);
+            const out = await discoverKind(toolkit, kind, account, onProgress, known, run);
             made.push(...out.made);
             cost += out.cost;
+            return out.kind;
           } catch (e) {
             onProgress({ kind: kind.name, error: e.message });
+            return kind;
           }
         }),
       );
-      return { kinds, made, cost };
+      return { kinds, made, cost, left: run.left };
     },
 
     // goal: what to sync in the user's words; toolkit, account: optional hints.
@@ -401,6 +455,161 @@ function fillContainer(value, ctx) {
 const clip = (v, max = 3000) => JSON.stringify(v, (k, x) => (typeof x === "string" && x.length > 200 ? `${x.slice(0, 200)}…` : Array.isArray(x) && x.length > 3 ? x.slice(0, 3) : x)).slice(0, max);
 
 // Runs fn over items, n at a time.
+// Ready plans for popular apps: no model call, the same kinds every time. Others are planned by the model.
+const repos = { tool: "GITHUB_LIST_REPOSITORIES_FOR_THE_AUTHENTICATED_USER", args: { sort: "updated", direction: "desc", per_page: 100 } };
+const PLANS = {
+  "github": [
+    {
+      "name": "Repository files",
+      "description": "All files in each repository owned by the connected user, recursively, on its default branch. Keep every page so the repository tree stays complete.",
+      "recommended": true,
+      "containers": repos,
+      "items": {
+        "tool": "GITHUB_GET_A_TREE",
+        "args": {
+          "owner": "{{container.owner.login}}",
+          "repo": "{{container.name}}",
+          "tree_sha": "{{container.default_branch}}",
+          "recursive": true
+        },
+        "where": {
+          "type": "blob"
+        }
+      },
+      "read": {
+        "tool": "GITHUB_GET_RAW_REPOSITORY_CONTENT",
+        "args": {
+          "owner": "{{container.owner.login}}",
+          "repo": "{{container.name}}",
+          "ref": "{{container.default_branch}}",
+          "path": "{{item.path}}"
+        }
+      }
+    },
+    {
+      "name": "Issues",
+      "description": "All issues in each owned repository, including open and closed issues, but excluding pull requests. Retrieve every page.",
+      "recommended": true,
+      "containers": repos,
+      "items": {
+        "tool": "GITHUB_LIST_REPOSITORY_ISSUES",
+        "args": {
+          "owner": "{{container.owner.login}}",
+          "repo": "{{container.name}}",
+          "state": "all",
+          "per_page": 100,
+          "page": "{{page}}"
+        },
+        "skip": {
+          "pull_request": "*"
+        }
+      }
+    },
+    {
+      "name": "Pull requests",
+      "description": "All pull requests in each owned repository, open and closed, with every page included.",
+      "recommended": true,
+      "containers": repos,
+      "items": {
+        "tool": "GITHUB_GET_PULL_REQUESTS",
+        "args": {
+          "owner": "{{container.owner.login}}",
+          "repo": "{{container.name}}",
+          "state": "all",
+          "per_page": 100,
+          "page": "{{page}}"
+        }
+      }
+    },
+    {
+      "name": "Releases",
+      "description": "Published, draft, and prerelease records for each owned repository, retrieved across all pages.",
+      "recommended": false,
+      "containers": repos,
+      "items": {
+        "tool": "GITHUB_LIST_RELEASES",
+        "args": {
+          "owner": "{{container.owner.login}}",
+          "repo": "{{container.name}}",
+          "per_page": 100,
+          "page": "{{page}}"
+        }
+      }
+    }
+  ],
+  "googletasks": [
+    {
+      "name": "Tasks",
+      "description": "Tasks from each of your Google Tasks lists, including completed, hidden, deleted, and assigned tasks where available. Each task list is kept up to date separately.",
+      "recommended": true,
+      "containers": {
+        "tool": "GOOGLETASKS_LIST_TASK_LISTS",
+        "args": {
+          "maxResults": 100
+        }
+      },
+      "items": {
+        "tool": "GOOGLETASKS_LIST_TASKS",
+        "args": {
+          "tasklist_id": "{{container.id}}",
+          "maxResults": 100,
+          "pageToken": "{{page}}",
+          "showCompleted": true,
+          "showHidden": true,
+          "showDeleted": true,
+          "showAssigned": true
+        }
+      },
+      "read": {
+        "tool": "GOOGLETASKS_GET_TASK",
+        "args": {
+          "tasklist_id": "{{container.id}}",
+          "task_id": "{{item.id}}"
+        }
+      }
+    }
+  ],
+  "gmail": [
+    {
+      "name": "Recent email threads",
+      "description": "Recent Gmail conversations, including message content, for searchable personal correspondence. Limited to the past year and refreshed with pagination.",
+      "recommended": true,
+      "items": {
+        "tool": "GMAIL_LIST_THREADS",
+        "args": {
+          "user_id": "me",
+          "query": "newer_than:1y",
+          "verbose": true,
+          "max_results": 500,
+          "page_token": "{{page}}"
+        }
+      }
+    },
+    {
+      "name": "Contacts",
+      "description": "The account’s saved contacts, including names, email addresses, organizations, and other available contact details.",
+      "recommended": true,
+      "items": {
+        "tool": "GMAIL_GET_CONTACTS",
+        "args": {
+          "person_fields": "names,emailAddresses,organizations,phoneNumbers,addresses,biographies",
+          "page_token": "{{page}}",
+          "include_other_contacts": false
+        }
+      }
+    }
+  ]
+};
+
+// A step that takes too long (an app call or a model that hangs) fails instead of holding up the whole round.
+const STEP_MS = 90_000;
+function within(ms, fn) {
+  let timer;
+  return Promise.race([fn(), new Promise((_, reject) => (timer = setTimeout(() => reject(new Error(`took over ${ms / 1000}s`)), ms)))]).finally(() => clearTimeout(timer));
+}
+
+const plans = new Map(); // toolkit -> { at, plan: Promise<{ kinds, cost }> }
+
 async function pool(items, n, fn) {
   let next = 0;
   await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
