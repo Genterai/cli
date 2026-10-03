@@ -150,6 +150,18 @@ export const tools = {
     input: z.object({ id: z.string() }),
     annotations: { readOnlyHint: false, destructiveHint: true },
   },
+  setup_recipes: {
+    description:
+      "Make the ready recipes of a connected app, no parameters: github (a sync recipe per repository: the whole project; " +
+      "reads like open pull requests, recent commits), gmail, googlecalendar, googletasks, notion. live_sync keeps a sync recipe as embeddings.",
+    input: z.object({ toolkit: z.string(), account: z.string().optional().describe("Connection (account id) when the app is connected several times") }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  },
+  live_sync: {
+    description: "Keep a recipe's result as embeddings: sync it now (a big one continues on the next call) and keep it up to date; once: true syncs it once.",
+    input: z.object({ id: z.string(), once: z.boolean().optional(), budget_ms: z.number().int().positive().optional() }),
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  },
   knowledge: {
     description: "Search synced sources by meaning: the closest text chunks with titles and links.",
     input: z.object({ query: z.string(), limit: z.number().int().min(1).max(20).optional(), source: z.string().optional() }),

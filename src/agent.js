@@ -319,7 +319,7 @@ export function createAgent({
         connecting,
         genter.translate ? genter.translate(task) : null, // shared with search, so no second model call
         genter.sources ? genter.sources.list().catch(() => []) : [],
-        genter.knowledge ? genter.knowledge({ query: task, limit: 6 }).catch(() => []) : [],
+        genter.knowledge ? genter.knowledge({ query: task, limit: 8 }).catch(() => []) : [],
       ]);
       const search_ms = Date.now() - searched;
       // The apps the task names: recipes of other apps are left out ("what's new in Google Tasks" is not a Gmail search).
@@ -388,7 +388,16 @@ export function isEmpty(data) {
 // Search results as the model sees them: recipes in full, Composio tools with a compact arg schema.
 function compactFound(r) {
   if (r.kind === "sync") {
-    return { id: r.id, kind: "live_sync", toolkit: r.toolkit, description: r.description, scope: r.scope, use: `add_source with template "${r.id}"`, score: r.score };
+    // A sync recipe's result is kept as embeddings: read it with search_knowledge, or sync it first.
+    return {
+      id: r.id,
+      kind: "sync",
+      toolkit: r.toolkit,
+      description: r.description,
+      kept: r.source ? `${r.source.items} items, ${r.source.status}` : "not synced yet",
+      use: r.source ? `search_knowledge with source "${r.source.id}"` : `add_source with template "${r.id}" (syncs it, then search_knowledge)`,
+      score: r.score,
+    };
   }
   if (r.id) {
     return { id: r.id, tool: r.tool, args: r.args, description: r.description, result_summary: r.summary, when: r.when, status: r.status, score: r.score };
@@ -477,8 +486,9 @@ The first message already holds everything for a fast start: saved recipes that 
 - "What's new in <app>" / "что нового в <app>" for a connected app means the user's own latest items there (recently created or updated tasks, issues, emails, files), read with that app's tools, not news about the product.
 - Every fact in the answer comes from a tool result, a recipe summary or synced knowledge of this run. Never answer from general knowledge about a product or company; if nothing was found, say what was checked.
 - An empty result is not an answer: retry once with translated or broader terms before saying nothing was found.
-- When you execute a tool that did not come from a recipe and it is a reusable step, pass description, short and tags so the next run finds it:
-  description is a general Markdown recipe: "### <Verb> <object>", a line "\`TOOL_SLUG\` · args: \`{a, b?}\`", what it returns, how to reuse it, "- pitfall: ..." bullets; short is one line under 100 characters for lists; tags in English and Russian.
+- Every successful call is saved as a recipe: the exact call, named by its result, with no parameters. When you execute a tool that did not come from a recipe, pass description, short and tags so the next run finds its result:
+  description is Markdown named by what this exact call returns: "### <the result>" (e.g. "### Open pull requests of Genterai/genter-cli"), then what the result holds and how it is filtered, "- pitfall: ..." bullets if any; short is that name in one line under 100 characters; tags in English and Russian. Leave them out for a step whose result is only a means (an id lookup): it is named automatically.
+- A sync recipe (kind sync) keeps an app's content as embeddings: a whole GitHub project (files, issues, pull requests), mail, events. Its knowledge is in the first message when it matches; search_knowledge with its source reads more of it.
 - If a recipe returned something different from its description, save it again with status "outdated" (save_recipes) and say why.
 - An app the task needs is not connected: call connect_app and stop.
 - Never ask the user anything and never end with a question or a choice for them. Ambiguous: take the most likely reading (the default account, the latest, all of them, the closest name), do it, and say in one line what you assumed. Only an irreversible action (delete, send, pay) on a target you cannot pin down is not done: say what was not done and why.
@@ -487,8 +497,8 @@ Always end with an answer built from what you found, even partial; never "I can'
 Final answer: short and concrete, in the user's language. Include the names, ids and links needed to open or continue the result. Say what was done, not how.`;
 
 const recipeFields = {
-  description: { type: "string", description: "General Markdown recipe for this call (see instructions)" },
-  short: { type: "string", description: "One line under 100 characters for compact lists, e.g. 'Fetch unread emails from the inbox'" },
+  description: { type: "string", description: "Markdown named by this call's result, no parameters (see instructions)" },
+  short: { type: "string", description: "The result's name in one line under 100 characters, e.g. 'Open pull requests of Genterai/genter-cli'" },
   tags: { type: "array", items: { type: "string" }, description: "Tags in English and Russian" },
 };
 

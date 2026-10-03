@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
 import { Composio } from "@composio/core";
-import { createSources, inferList } from "./sync.js";
+import { readyFor } from "./ready.js";
+import { createSources, fill, inferList } from "./sync.js";
 
 // Genter = Composio + recipes of past calls.
 // A call record is { id, tool, args, created_at, summary, digest, memory }: memory is the recipe description,
@@ -173,7 +174,11 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
         return composio.tools.execute(tool, { userId, arguments: args, ...(id && { connectedAccountId: id }), dangerouslySkipVersionCheck: true });
       },
       embedMany,
-      onSync,
+      // A sync recipe's last result is what its sync keeps: its summary says so, for cards and search.
+      onSync: async (source, info) => {
+        if (source.recipe_of && source.status !== "failed") await noteSynced(source).catch((e) => console.error("genter: recipe summary failed:", e.message));
+        if (onSync) await onSync(source, info);
+      },
       triggers: triggers && {
         create: async (slug, config, account) => {
           const id = await accountId(account, { strict: false });
@@ -214,23 +219,38 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       namespace: userId,
     });
 
-  // A short retelling of a result, so it can be found later by its topic. Skipped without an OpenRouter key.
-  async function summarize(tool, data) {
+  // What a result is and what it holds, from one model call: { title, about, summary }. title names the result of
+  // this exact call ("Open pull requests of Genterai/genter-cli"): a recipe is named by it and has no parameters.
+  // summary retells the content so it is found later by topic. Skipped without an OpenRouter key.
+  async function describe(tool, args, data) {
     if (!openrouterApiKey) return null;
-    return chat({
+    const text = await chat({
       model: process.env.SUMMARY_MODEL || "openai/gpt-oss-20b",
       reasoning: { effort: "low" },
+      response_format: { type: "json_object" },
       messages: [
         {
           role: "user",
           content:
-            `Retell in 1-3 sentences what this ${tool} result contains, so it can be found later by topic: ` +
-            "subjects, people, dates, and the ids or URLs needed to open it again. Write in English, but quote subjects, " +
-            "titles and names exactly as they are. Only say what is in the data, do not guess. No passwords, tokens or keys." +
+            `A call of ${tool} with args ${JSON.stringify(args).slice(0, 600)} returned the data below. ` +
+            'Reply with JSON only: {"title": "...", "about": "...", "summary": "..."}.\n' +
+            'title: what this result is, as a name of up to 8 words for these exact args, in English, e.g. "Open pull requests of Genterai/genter-cli", "Unread emails from today".\n' +
+            "about: 1-2 sentences: what the result is (which items, which filters) and what each item has, so someone knows what they get without running it.\n" +
+            "summary: 1-3 sentences retelling what it contains, so it can be found later by topic: subjects, people, dates, and the ids or URLs " +
+            "needed to open it again. Write in English, but quote subjects, titles and names exactly as they are.\n" +
+            "Only say what is in the data, do not guess. No passwords, tokens or keys." +
             `\n\n${JSON.stringify(data, decodeBase64).slice(0, 20000)}`,
         },
       ],
     }).catch(() => null); // a recipe without a summary is still useful
+    if (!text) return null;
+    try {
+      const out = JSON.parse(text);
+      const clean = (v, n) => (typeof v === "string" && v.trim() ? v.trim().slice(0, n) : null);
+      return { title: clean(out.title, 100)?.replace(/^#+\s*/, ""), about: clean(out.about, 600), summary: clean(out.summary, 1200) };
+    } catch {
+      return { summary: text.slice(0, 1200) };
+    }
   }
 
   // Slow part of a call, after its result went back: summary, embedding, dedupe against the same call, recipe.
@@ -240,15 +260,18 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       .filter((r) => r.id !== record.id && !r.alias && r.tool === record.tool && JSON.stringify(r.args) === JSON.stringify(record.args));
     let summary = sameCall.find((r) => r.digest === record.digest && r.summaryEmbedding)?.summary;
     let summaryEmbedding;
+    let named = null;
     if (!summary) {
-      summary = await summarize(record.tool, data);
+      named = await describe(record.tool, record.args, data);
+      summary = named?.summary ?? null;
       summaryEmbedding = summary ? await embed(summary).catch(() => undefined) : undefined;
     }
     // Same tool and args with the same result (identical, or a near-identical summary): refresh that recipe, keep this
     // id as its alias. A different result, e.g. a new latest email, is a recipe of its own.
-    const similar = sameCall.find(
-      (r) => r.digest === record.digest || (r.summaryEmbedding && summaryEmbedding && cosine(r.summaryEmbedding, summaryEmbedding) >= 0.9),
-    );
+    // A named recipe's own first run (a ready read) stays itself, never an alias of an older call.
+    const similar = record.memory
+      ? null
+      : sameCall.find((r) => r.digest === record.digest || (r.summaryEmbedding && summaryEmbedding && cosine(r.summaryEmbedding, summaryEmbedding) >= 0.9));
     let target = record;
     if (similar) {
       target = { ...similar, created_at: record.created_at, digest: record.digest, ...(summaryEmbedding && { summary, summaryEmbedding }) };
@@ -256,14 +279,20 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       if (record.id !== similar.id) await save({ id: record.id, alias: similar.id }, false);
     } else {
       target = { ...record, summary, summaryEmbedding };
-      await save(target, false);
+      await save(target, Boolean(target.memory));
     }
     if (description) {
       await api.save_recipes({ recipes: [{ id: target.id, description, short, tags }] });
     } else if (!target.memory) {
-      const info = await composio.tools.getRawComposioToolBySlug(record.tool).catch(() => ({}));
+      // Named by its result: what this exact call returns, no parameters to fill in.
+      const info = await toolInfo(record.tool);
+      const tags = [info.toolkit?.slug].filter(Boolean);
       await api.save_recipes({
-        recipes: [{ id: target.id, description: autoRecipe(info, record.tool, record.args), tags: [info.toolkit?.slug].filter(Boolean), auto: true }],
+        recipes: [
+          named?.title
+            ? { id: target.id, description: resultRecipe(named, record.tool), short: named.title, tags, auto: true }
+            : { id: target.id, description: autoRecipe(info, record.tool, record.args), tags, auto: true },
+        ],
       });
     }
     // How to keep this recipe live, decided now from the real result, so Live sync is one click later.
@@ -349,6 +378,19 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       .map((t) => ({ slug: t.slug, config: t.config ?? {}, label: String(t.label || t.slug).slice(0, 60) }));
   }
 
+  // What a sync recipe keeps, as its result summary: "412 items kept: 380 files, 31 issues and pull requests, about".
+  async function noteSynced(source) {
+    const record = await load(source.recipe_of);
+    const plan = record.kind === "sync" ? record.sync : record.live;
+    if (!plan) return;
+    const parts = plan.parts?.length && source.stats?.parts
+      ? `: ${plan.parts.map((p) => `${source.stats.parts[p.key] ?? 0} ${String(p.name ?? p.key).toLowerCase()}`).join(", ")}`
+      : "";
+    const summary = `${source.stats?.items ?? 0} items kept as embeddings${parts}. Synced ${String(source.synced_at ?? source.last_run?.at ?? "").slice(0, 16).replace("T", " ")}${source.status === "partial" ? ", still syncing" : ""}.`;
+    if (record.summary === summary) return;
+    await save({ ...record, summary });
+  }
+
   const api = {
     // Returns a Composio link the user opens to connect an app (gmail, github, ...).
     // callback_url: where Composio sends the user afterwards (with ?status=success|failed).
@@ -411,6 +453,14 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
               score: Number(score.toFixed(2)),
             }))
         : [];
+      // A sync recipe's result is its synced source: which one, and how much it keeps.
+      if (sources && memories.some((m) => m.kind === "sync" || m.live)) {
+        const kept = new Map((await sources.list().catch(() => [])).filter((s) => s.recipe_of).map((s) => [s.recipe_of, s]));
+        for (const m of memories) {
+          const s = kept.get(m.id);
+          if (s) m.source = { id: s.id, status: s.status, items: s.stats?.items ?? 0, synced_at: s.synced_at, watching: s.watching, every: s.every };
+        }
+      }
       if (memories.some((m) => m.status === "valid" && m.score >= strongScore)) return memories;
 
       const search = english?.en ?? query;
@@ -435,16 +485,18 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     // Every successful call becomes a recipe: with the agent's description if given, otherwise Composio's.
     async execute({ id, tool, args = {}, account, description, short, tags }) {
       const previous = id && (await load(id));
-      if (previous?.kind === "sync") throw new Error(`${id} is a live sync recipe: add it as a source (add_source) instead of executing it`);
+      if (previous?.kind === "sync") throw new Error(`${id} is a sync recipe: its result is kept as embeddings (search_knowledge); live_sync or Run now refreshes it`);
       if (previous) {
         tool ??= previous.tool;
         args = { ...previous.args, ...args };
+        account ??= previous.memory?.account; // a ready read runs on the account it was made for
       }
       if (!tool) throw new Error("Pass `tool` or `id`");
       account = await accountId(account); // an alias from login
+      // Dates stay placeholders in the recipe ({{today}}, {{ago.7d}}) and are filled for this run.
       const result = await composio.tools.execute(tool, {
         userId,
-        arguments: args,
+        arguments: withDates(args),
         ...(account && { connectedAccountId: account }),
         dangerouslySkipVersionCheck: true,
       });
@@ -463,8 +515,11 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
         later(save({ ...previous, created_at }));
         return { id: record.id, result, summary: previous.summary, ...outdated };
       }
-      if (repeat) record.id = randomUUID(); // a new result of a known call: a new recipe, merged later if it is the same
-      await save(record, false);
+      // A recipe made before it ever ran (a ready read): this first result is its own, kept in place.
+      const first = repeat && !previous.digest && !previous.alias;
+      if (first) Object.assign(record, { ...previous, created_at, digest });
+      else if (repeat) record.id = randomUUID(); // a new result of a known call: a new recipe, merged later if it is the same
+      await save(record, Boolean(record.memory));
       const summary = remember(record, result.data, { description, short, tags });
       later(summary);
       return {
@@ -504,6 +559,56 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
         }));
     },
 
+    // Apps with ready recipes (made at once when an account is connected, no model): [{ toolkit, name }].
+    ready_apps: () => ["github", "gmail", "googlecalendar", "googletasks", "notion"].map((toolkit) => ({ toolkit, name: readyFor(toolkit).name })),
+
+    // The ready recipes of one connected account, saved (or updated: the same project or read keeps its recipe) in
+    // one go, with no model and no sample calls. None has parameters: a sync recipe is kept with live_sync, a read
+    // recipe is one fixed call. Returns { toolkit, made: [{ id, kind, name, short, estimate, ran }] }, or null when the
+    // app has no ready recipes. A read with ran: false has never run: run it once (execute by id) so its result is known.
+    async setup_recipes({ toolkit, account }) {
+      const ready = readyFor(toolkit);
+      if (!ready) return null;
+      const run = async (tool, args, acc) => {
+        const id = await accountId(acc, { strict: false });
+        return composio.tools.execute(tool, { userId, arguments: args, ...(id && { connectedAccountId: id }), dangerouslySkipVersionCheck: true });
+      };
+      const specs = await ready.recipes({ run, account });
+      // Every description embedded in a few calls, not one per recipe.
+      const vectors = [];
+      for (let i = 0; i < specs.length; i += 64) {
+        const batch = specs.slice(i, i + 64).map((x) => `${x.description}\ntags: ${x.tags.join(", ")}\ntool: ${x.tool ?? partsTool(x.recipe)}`);
+        // Without embeddings the recipes are still made; search finds them once they are made again.
+        vectors.push(...(openrouterApiKey ? await embedMany(batch).catch((e) => (console.error("genter: recipe embeddings failed:", e.message), batch.map(() => null))) : batch.map(() => null)));
+      }
+      const created_at = new Date().toISOString();
+      const made = [];
+      for (const [i, x] of specs.entries()) {
+        const id = `${x.kind === "read" ? "read" : "sync"}_${createHash("sha256").update(`${userId}:${toolkit}:${account ?? ""}:${x.key}`).digest("hex").slice(0, 24)}`;
+        const old = await store.get(id).then((row) => row && open(row.blob)).catch(() => null);
+        const memory = {
+          created_at,
+          tags: x.tags,
+          description: x.description,
+          short: x.short,
+          status: "valid",
+          ...(vectors[i] && { embedding: vectors[i] }),
+          ...(old?.memory?.disabled && { disabled: old.memory.disabled }),
+          ...(x.kind === "read" && { account }),
+        };
+        if (x.kind === "read") {
+          // A read keeps its last result (digest, summary) when it is made again.
+          await save({ ...old, id, tool: x.tool, args: x.args, created_at: old?.created_at ?? created_at, memory, ready: toolkit });
+        } else {
+          const recipe = { ...x.recipe, ...(x.estimate && { estimate: x.estimate }), ready: toolkit };
+          await save({ ...(old && { summary: old.summary }), id, kind: "sync", tool: partsTool(recipe), args: {}, sync: recipe, created_at: old?.created_at ?? created_at, memory });
+        }
+        made.push({ id, kind: x.kind, name: x.name, short: x.short, estimate: x.estimate ?? null, ...(x.kind === "read" && { ran: Boolean(old?.digest) }) });
+      }
+      return { toolkit, made };
+    },
+    setup_sync: (args) => api.setup_recipes(args),
+
     // Live sync of any recipe in one call: its plan (made when it was saved, or now), a source, a first sync, then
     // its triggers, or an hourly schedule when there are none (or they can not be turned on here).
     // once: just sync it now, without triggers or a schedule.
@@ -519,13 +624,16 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       const plan = record.kind === "sync" ? record.sync : record.live;
       const source = await sources.create({ template: record.id, scope: {}, account: account ?? plan.account, recipe_of: record.id });
       const synced = await sources.sync({ id: source.id, budgetMs, reason: once ? "manual" : "live" });
-      if (once) return synced;
+      if (once || synced.status === "failed") return synced;
+      // Triggers bring changes as they happen; the schedule is a safety net for what they miss (daily with
+      // triggers, the recipe's own pace without them).
+      let watched = null;
       if (plan.triggers?.length) {
-        const watched = await sources.watch({ id: source.id }).catch((e) => ({ watching: [], watch_error: e.message }));
-        if (watched.watching?.length) return watched;
+        watched = await sources.watch({ id: source.id }).catch((e) => ({ watching: [], watch_error: e.message }));
       }
-      if (synced.status === "failed") return synced;
-      return sources.schedule({ id: source.id, every: plan.every ?? 60 });
+      const on = watched?.watching?.length > 0;
+      const scheduled = await sources.schedule({ id: source.id, every: on ? Math.max(plan.every ?? 1440, 1440) : (plan.every ?? 60) });
+      return { ...scheduled, watch_error: watched?.watch_error ?? scheduled.watch_error };
     },
 
     // Saves a live sync recipe (see sync.js) after a test on real data passes; with id, replaces that recipe.
@@ -688,6 +796,11 @@ function readsOnly(slug, tags = []) {
 // "### Fetch unread emails\n..." -> "Fetch unread emails".
 const titleOf = (md) => (String(md ?? "").split("\n").find((l) => l.trim()) ?? "").replace(/^#+\s*/, "").replace(/[`*_]/g, "").trim().slice(0, 80);
 
+// A recipe named by its result: "### Open pull requests of Genterai/genter-cli", what it holds, the call.
+function resultRecipe({ title, about }, tool) {
+  return `### ${title}\n\n${about ?? ""}\n\n\`${tool}\``.replace(/\n{3,}/g, "\n\n");
+}
+
 // A recipe in Markdown from Composio's generic tool description.
 function autoRecipe(info, tool, args) {
   const keys = Object.keys(args).join(", ");
@@ -729,4 +842,17 @@ function cosine(a, b) {
     nb += b[i] * b[i];
   }
   return dot / Math.sqrt(na * nb);
+}
+
+// The call a sync recipe is named by: its first list (a repository's files for a project).
+const partsTool = (recipe) => (recipe.parts?.find((p) => p.read) ?? recipe.parts?.[0] ?? recipe)?.list?.tool ?? "SYNC";
+
+// Date placeholders of a recipe's args filled for this run: {{now}}, {{today}}, {{tomorrow}}, {{ago.7d}}, {{ahead.30d}}.
+function withDates(args) {
+  if (!JSON.stringify(args ?? {}).includes("{{")) return args;
+  const day = new Date();
+  day.setUTCHours(0, 0, 0, 0);
+  const at = (days, from = Date.now()) => new Date(from + days * 86_400_000).toISOString();
+  const span = (sign) => Object.fromEntries([1, 2, 7, 14, 30, 90, 180, 365].map((d) => [`${d}d`, at(sign * d)]));
+  return fill(args, { now: at(0), today: day.toISOString(), tomorrow: at(1, day.getTime()), yesterday: at(-1, day.getTime()), ago: span(-1), ahead: span(1) });
 }

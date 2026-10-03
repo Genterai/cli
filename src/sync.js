@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { gunzipSync } from "node:zlib";
 import { jsonToMarkdown } from "./markdown.js";
 
 // Sources: an app's content (a GitHub repo, Notion pages) kept as searchable knowledge.
@@ -24,10 +25,21 @@ import { jsonToMarkdown } from "./markdown.js";
 // A placeholder that is the whole value keeps its type; a missing one drops the argument.
 
 // Source filters (per source, any app): include/exclude are regexes over "<id> <title>", maxItems caps the list.
-// list.text "@item": the item itself as Markdown (no read call). list.single: the whole response is one item.
+// list.text "@item": the item itself as Markdown (no read call); list.fields: only these paths of it, as plain text
+// (an issue's title, state, labels and its whole body). list.single: the whole response is one item.
+// list.title may be a template: "#{{item.number}} {{item.title}}".
 // list.append: keep items that left the list (streams: mail, chat) instead of removing them.
+// A list without items/id is shaped from its first real response (inferList): a ready recipe needs only the call.
 // Every call recipe can be synced: inferList finds the list, id, version and title in a real response.
 // Updates: the recipe's triggers, or a schedule ({ every: minutes }); store rows carry next_sync_at for the scheduler.
+// A sync cut short by its time budget (partial) is due again a minute later, so the scheduler finishes it.
+//
+// A recipe with no parameters: vars hold its fixed values ({ owner, repo, branch }), used like scope fields, so the
+// recipe is one call to make and nothing to fill in. parts: several lists in one recipe, e.g. a repository's files,
+// its issues and pull requests, and its description: [{ key, name, list, read?, bulk?, exclude?, maxSize? }].
+// Item ids get the part's key ("files:src/a.js"); a part that fails keeps what it had and the others go on.
+// bulk (optional, on a part with read): a call that returns a link to a .tar.gz of everything (a repository's
+// archive). When many items changed, their texts come from that one download instead of a read per item.
 
 const BINARY = "\\.(png|jpe?g|gif|webp|ico|bmp|tiff?|psd|pdf|zip|gz|tgz|bz2|xz|7z|rar|tar|jar|war|woff2?|ttf|otf|eot|mp[34]|mov|avi|webm|wav|ogg|flac|exe|dll|so|dylib|bin|class|pyc|o|a|wasm|map|min\\.(js|css)|lock|sqlite|db)$";
 
@@ -138,7 +150,8 @@ export const BUILTIN = {
   },
 };
 
-const LIMITS = { maxItems: 10000, maxPages: 100, maxChunks: 80, chunkSize: 1600, overlap: 200, readers: 6, embedBatch: 64 };
+// batch: items read, embedded and stored together; bulkMin: changed items of a part that make its bulk download worth it.
+const LIMITS = { maxItems: 10000, maxPages: 100, maxChunks: 80, chunkSize: 1600, overlap: 200, readers: 8, embedBatch: 64, batch: 48, bulkMin: 15, bulkBytes: 150_000_000 };
 
 // run(tool, args, account) -> Composio result; embedMany(texts) -> vectors; seal/open: encryption; store: see below.
 // store: getSource(id), putSource({id, blob}), deleteSource(id), sources() -> [{id, blob}],
@@ -154,7 +167,15 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
     if (!row) throw new Error(`Unknown source: ${id}`);
     return open(row.blob);
   };
-  const saveSource = (source) => store.putSource({ id: source.id, blob: seal(source), next_sync_at: source.schedule?.next ?? null });
+  // When the scheduler runs a source next: a partial sync continues in a minute; a running one is retried in
+  // 10 minutes in case its process dies; otherwise its schedule, if any.
+  const nextAt = (source) =>
+    source.status === "partial"
+      ? new Date(Date.now() + 60_000).toISOString()
+      : source.status === "syncing"
+        ? new Date(Date.now() + 600_000).toISOString()
+        : (source.schedule?.next ?? null);
+  const saveSource = (source) => store.putSource({ id: source.id, blob: seal(source), next_sync_at: nextAt(source) });
   // A recipe by key: built in (github, notion) or saved by the agent.
   const recipeOf = async (key) => {
     const recipe = BUILTIN[key] ?? (recipes ? await recipes.get(key) : null);
@@ -169,20 +190,22 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
   };
 
   // The containers a recipe's list runs over: [{ id, label }], the newest/first `max` (default 20).
-  async function containers(each, source, depth, max) {
+  async function containers(each, source, template, depth, max) {
     if (depth > 3) throw new Error("Containers nest deeper than 3 levels");
     const limit = max ?? each.max ?? 20;
-    const parents = each.each ? await containers(each.each, source, depth + 1, max) : [null];
+    const parents = each.each ? await containers(each.each, source, template, depth + 1, max) : [null];
     const out = [];
     for (const p of parents) {
-      const ctx = { ...source.scope, ...(p && { container: p.id, container_label: p.label }) };
+      const ctx = { ...ctxOf(source, template), ...(p && { container: p.id, container_label: p.label }) };
       const res = await run(each.tool, fill(each.args ?? {}, ctx), source.account);
       if (res?.successful === false) throw new Error(`${each.tool}: ${errorText(res.error)}`);
-      for (const raw of [pick(res, each.items)].flat().filter(Boolean)) {
-        if (!matches(raw, each)) continue;
-        const id = pick(raw, each.id);
+      // Containers given only as a call: their list, id and name found in the response.
+      const shape = each.items ? each : { ...inferList(res), ...each };
+      for (const raw of [pick(res, shape.items)].flat().filter(Boolean)) {
+        if (!matches(raw, each) || raw.archived === true || raw.deleted === true) continue;
+        const id = pick(raw, shape.id);
         if (id == null) continue;
-        out.push({ id: String(id), label: `${p ? `${p.label} / ` : ""}${pick(raw, each.label ?? each.id) ?? id}` });
+        out.push({ id: String(id), label: `${p ? `${p.label} / ` : ""}${pick(raw, each.label ?? shape.title ?? shape.id) ?? id}` });
       }
       if (out.length >= limit) break;
     }
@@ -190,20 +213,33 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
   }
 
   // One run of the list role (all its pages) with extra placeholders, items appended to out.
-  async function listFrom(source, role, extra, { pages, raw, template }, out) {
+  async function listFrom(source, role, extra, { pages, raw, part, template }, out) {
     let page;
     // Excluded and too big items never count toward the item limit (a repo's node_modules, binaries).
-    const exclude = (template?.exclude ?? []).map((x) => new RegExp(x, "i"));
-    const dropped = (id, size) => exclude.some((re) => re.test(id)) || (template?.maxSize && size > template.maxSize);
+    const exclude = (part.exclude ?? []).map((x) => new RegExp(x, "i"));
+    const dropped = (id, size) => exclude.some((re) => re.test(id)) || (part.maxSize && size > part.maxSize);
+    const base = { ...ctxOf(source, template), ...extra };
     for (let n = 0; n < pages; n++) {
       // nextPage: numbered pages (1, 2, ...) until one comes back empty; otherwise the cursor from list.next.
       if (role.nextPage) page = n + 1;
-      const res = await run(role.tool, fill(role.args, { ...source.scope, ...extra, page }), source.account);
+      const res = await run(role.tool, fill(role.args ?? {}, { ...base, page }), source.account);
       if (res?.successful === false) throw new Error(`${role.tool}: ${errorText(res.error)}`);
+      // A list given only as a call: its items, id, version and title are found in the first real response.
+      if (n === 0 && !role.single && !role.items) {
+        role = shaped(role, res);
+        if (role.nextPage) page = 1;
+      }
       if (role.single) {
-        // The whole response is the item, versioned by its content.
+        // The whole response is the item, versioned by its content (only the kept fields, when there are some).
         const data = res?.data ?? res;
-        out.push({ id: extra.container ?? "all", version: createHash("sha256").update(JSON.stringify(data)).digest("hex").slice(0, 16), title: extra.container_label ?? source.title, text: jsonToMarkdown(data) });
+        const ctx = { ...base, item: data };
+        out.push({
+          id: extra.container ?? "all",
+          version: hash(role.fields ? project(data, role.fields) : data),
+          title: (isTemplate(role.title) && fill(role.title, ctx)) || extra.container_label || part.name || source.title,
+          url: isTemplate(role.url) ? fill(role.url, ctx) : role.url ? pick(data, role.url) : undefined,
+          text: (role.fields && fieldsText(data, role.fields)) || jsonToMarkdown(data),
+        });
         break;
       }
       const found = [pick(res, role.items)].flat().filter(Boolean);
@@ -216,14 +252,14 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
         const id = pick(raw, role.id);
         if (id == null) continue;
         if (dropped(String(id), role.size ? Number(pick(raw, role.size)) || 0 : 0)) continue;
-        const ctx = { ...source.scope, ...extra, item: raw };
+        const ctx = { ...base, item: raw };
         out.push({
           id: String(id),
-          version: String(pick(raw, role.version) ?? ""),
-          title: String(pick(raw, role.title) ?? id),
-          url: role.url?.includes("{{") ? fill(role.url, ctx) : role.url ? pick(raw, role.url) : undefined,
+          version: role.version === "@fields" && role.fields ? hash(project(raw, role.fields)) : String(pick(raw, role.version) ?? ""),
+          title: isTemplate(role.title) ? String(fill(role.title, ctx) || id) : String(pick(raw, role.title) ?? id),
+          url: isTemplate(role.url) ? fill(role.url, ctx) : role.url ? pick(raw, role.url) : undefined,
           size: role.size ? Number(pick(raw, role.size)) || 0 : undefined,
-          text: role.text === "@item" ? jsonToMarkdown(raw) : role.text ? pick(raw, role.text) : undefined,
+          text: role.text === "@item" ? (role.fields && fieldsText(raw, role.fields)) || jsonToMarkdown(raw) : role.text ? pick(raw, role.text) : undefined,
           parent: role.parent ? pick(raw, role.parent) : undefined,
           raw, // for read args like {{item.path}}; never stored
         });
@@ -232,7 +268,9 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
         }
       }
       if (role.nextPage) {
-        if (!found.length) break;
+        // A page shorter than the page size asked for is the last one: no call for an empty page after it.
+        const size = Number(pick(role.args ?? {}, ["per_page", "page_size", "pageSize", "limit", "maxResults", "max_results"])) || 0;
+        if (!found.length || (size && found.length < size)) break;
         continue;
       }
       const next = role.next && pick(res, role.next);
@@ -241,68 +279,115 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
     }
   }
 
-  // Lists every item of a source, page by page. raw (optional) collects the first raw items, for a test.
-  async function list(source, template, { pages = LIMITS.maxPages, raw, containersMax } = {}) {
-    const role = template.list;
+  // Every item of one part, page by page, with the part's own prefix, root and exclusions applied.
+  async function listPart(source, template, part, { pages, raw, containersMax, vars = {} }) {
+    const role = part.list;
     const out = [];
     // each: the list runs once per container (a label, a channel...), found by its own call, nested up to 3 levels.
     if (role.each) {
-      const found = await containers(role.each, source, 0, containersMax);
+      const found = await containers(role.each, source, template, 0, containersMax);
       for (const c of found) {
         const before = out.length;
-        await listFrom(source, role, { container: c.id, container_label: c.label }, { pages, raw, template }, out);
+        await listFrom(source, role, { ...vars, container: c.id, container_label: c.label }, { pages, raw, part, template }, out);
         for (const item of out.slice(before)) {
           item.id = `${c.id}/${item.id}`;
           item.title = `${c.label} · ${item.title}`;
         }
       }
     } else {
-      await listFrom(source, role, {}, { pages, raw, template }, out);
+      await listFrom(source, role, vars, { pages, raw, part, template }, out);
     }
-    const prefix = template.prefix ? String(fill(template.prefix, source.scope) ?? "").replace(/^\/+/, "") : "";
+    const ctx = ctxOf(source, template);
+    const prefix = part.prefix ? String(fill(part.prefix, ctx) ?? "").replace(/^\/+/, "") : "";
     // A root: only it and the items under it, by the parent links in the list itself.
-    const root = template.root ? fill(template.root, source.scope) : null;
+    const root = part.root ? fill(part.root, ctx) : null;
     const parents = new Map(out.map((i) => [i.id, i.parent]));
     const under = (id) => {
       for (let n = 0, cur = id; cur && n < 30; n++, cur = parents.get(cur)) if (cur === root) return true;
       return false;
     };
-    const exclude = (template.exclude ?? []).map((x) => new RegExp(x, "i"));
+    const exclude = (part.exclude ?? []).map((x) => new RegExp(x, "i"));
+    return out.filter((i) => (!root || under(i.id)) && i.id.startsWith(prefix) && !exclude.some((re) => re.test(i.id)) && !(part.maxSize && i.size > part.maxSize));
+  }
+
+  // Lists every item of a source: { items, failed, incremental }. Each item knows its part (index) and its id within
+  // it (local); a recipe with parts prefixes ids with the part's key. One part of several may fail: it is in failed,
+  // the rest go on. A part whose args use {{since}} lists only what changed since its last complete sync
+  // (incremental: the items it does not list are kept), and everything again once a week.
+  // raw (optional) collects the first raw items, for a test.
+  async function list(source, template, { pages = LIMITS.maxPages, raw, containersMax } = {}) {
+    const parts = partsOf(template);
+    const out = [];
+    const failed = [];
+    const incremental = [];
+    for (const [index, part] of parts.entries()) {
+      const mark = usesSince(part) && source.since?.[part.key || "_"];
+      const since = mark && Date.now() - new Date(mark.full).getTime() < 7 * 86_400_000 ? mark.at : undefined;
+      if (since) incremental.push(part.key);
+      const vars = since ? { since, since_unix: Math.floor(new Date(since).getTime() / 1000) } : {};
+      try {
+        for (const item of await listPart(source, template, part, { pages, raw, containersMax, vars })) {
+          item.part = index;
+          item.local = item.id;
+          if (part.key) item.id = `${part.key}:${item.id}`;
+          out.push(item);
+        }
+      } catch (e) {
+        if (parts.length === 1) throw e;
+        failed.push({ key: part.key, error: `${part.name ?? part.key}: ${e.message}`.slice(0, 300) });
+      }
+    }
+    if (parts.length > 1 && failed.length === parts.length) throw new Error(failed.map((f) => f.error).join("; "));
     const filter = source.filter ?? {};
     const include = filter.include ? new RegExp(filter.include, "i") : null;
     const skip = filter.exclude ? new RegExp(filter.exclude, "i") : null;
-    const kept = out.filter(
-      (i) =>
-        (!root || under(i.id)) &&
-        i.id.startsWith(prefix) &&
-        !exclude.some((re) => re.test(i.id)) &&
-        !(template.maxSize && i.size > template.maxSize) &&
-        (!include || include.test(`${i.id} ${i.title}`)) &&
-        !(skip && skip.test(`${i.id} ${i.title}`)),
-    );
-    return filter.maxItems ? kept.slice(0, filter.maxItems) : kept;
+    // An item listed twice (pages that shift while they are read) counts once.
+    const ids = new Set();
+    const kept = out.filter((i) => !ids.has(i.id) && ids.add(i.id) && (!include || include.test(`${i.id} ${i.title}`)) && !(skip && skip.test(`${i.id} ${i.title}`)));
+    return { items: filter.maxItems ? kept.slice(0, filter.maxItems) : kept, failed, incremental };
   }
 
-  // The text of one item: from the list itself, or with the read role.
+  // The text of one item: from the list itself, or with its part's read role.
   async function read(source, template, item) {
     if (item.text != null) return String(item.text);
-    const role = template.read;
+    const role = partsOf(template)[item.part ?? 0]?.read;
+    if (!role) return "";
     const { raw, ...listed } = item;
-    const res = await run(role.tool, fill(role.args, { ...source.scope, item: { ...raw, ...listed } }), source.account);
+    const res = await run(role.tool, fill(role.args, { ...ctxOf(source, template), item: { ...raw, ...listed, id: item.local ?? item.id } }), source.account);
     if (res?.successful === false) throw new Error(errorText(res.error));
-    let text = pick(res, role.text);
+    // A read given only as a call: the text is found in the response.
+    const at = role.text ?? inferText(res);
+    let text = pick(res, at?.text ?? at);
     if (text == null) return "";
-    if (role.encoding && pick(res, role.encoding) === "base64") text = Buffer.from(String(text), "base64").toString("utf8");
-    text = String(text);
+    const encoding = role.encoding ?? at?.encoding;
+    if (encoding && pick(res, encoding) === "base64") text = Buffer.from(String(text), "base64").toString("utf8");
+    text = typeof text === "string" ? text : jsonToMarkdown(text);
     return text.includes("\u0000") ? "" : text; // binary content
+  }
+
+  // The texts of a part's items in one download (a repository's archive): Map(local id -> text).
+  async function bulkTexts(source, template, part, wanted) {
+    const { bulk } = part;
+    const res = await run(bulk.tool, fill(bulk.args ?? {}, ctxOf(source, template)), source.account);
+    if (res?.successful === false) throw new Error(`${bulk.tool}: ${errorText(res.error)}`);
+    const url = pick(res, bulk.url);
+    if (typeof url !== "string" || !/^https:\/\//.test(url)) throw new Error(`${bulk.tool}: no download link`);
+    const r = await fetch(url, { signal: AbortSignal.timeout(120_000) });
+    if (!r.ok) throw new Error(`archive download failed: ${r.status}`);
+    if (Number(r.headers.get("content-length")) > LIMITS.bulkBytes) {
+      await r.body?.cancel();
+      throw new Error("archive too big, reading files one by one");
+    }
+    const gz = Buffer.from(await r.arrayBuffer());
+    return untar(gunzipSync(gz, { maxOutputLength: LIMITS.bulkBytes * 4 }), { strip: bulk.strip ?? 1, wanted });
   }
 
   // Fills scope fields left empty (setup calls). Saved with the source, so it runs once.
   async function setup(source, template) {
     for (const step of template.setup ?? []) {
-      const missing = Object.keys(step.set).filter((k) => source.scope[k] == null);
+      const missing = Object.keys(step.set).filter((k) => source.scope[k] == null && template.vars?.[k] == null);
       if (!missing.length) continue;
-      const res = await run(step.tool, fill(step.args, source.scope), source.account);
+      const res = await run(step.tool, fill(step.args, ctxOf(source, template)), source.account);
       if (res?.successful === false) throw new Error(`${step.tool}: ${errorText(res.error)}`);
       for (const k of missing) {
         const v = pick(res, step.set[k]);
@@ -313,76 +398,128 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
 
   async function syncNow(source, { budgetMs = 240_000, reason } = {}) {
     const template = await templateOf(source);
+    const parts = partsOf(template);
     const started = Date.now();
     const stats = { listed: 0, added: 0, updated: 0, removed: 0, unchanged: 0, failed: 0, errors: [] };
+    const error = (text) => stats.errors.length < 5 && stats.errors.push(String(text).slice(0, 300));
     try {
       await setup(source, template);
-      const listed = await list(source, template);
+      const { items: listed, failed: failedParts, incremental } = await list(source, template);
+      for (const f of failedParts) error(f.error);
       stats.listed = listed.length;
+      // What is kept: id -> { key, version, depth, chunks }, read from the store once.
       const known = new Map(
         (await store.items(source.id)).map((row) => {
-          const { id, version, depth } = open(row.blob);
-          return [id, { key: row.key, id, version, depth: depth ?? "full" }];
+          const item = cachedItem(row, open);
+          return [item.id, { key: row.key, id: item.id, version: item.version, depth: item.depth ?? "full", chunks: item.chunks.length }];
         }),
       );
+      // A part that could not be listed, or listed only what changed, keeps its items; so does a list that only
+      // appends (mail, chat).
+      const keptParts = [...failedParts.map((f) => f.key), ...incremental].map((k) => `${k}:`);
+      const appendOnly = parts.length === 1 && (parts[0].list?.append || incremental.length > 0);
       const seen = new Set(listed.map((i) => i.id));
-      const gone = template.list.append ? [] : [...known.values()].filter((k) => !seen.has(k.id));
+      const gone = appendOnly ? [] : [...known.values()].filter((k) => !seen.has(k.id) && !keptParts.some((p) => k.id.startsWith(p)));
       if (gone.length) await store.deleteItems(source.id, gone.map((k) => k.key));
+      for (const k of gone) known.delete(k.id);
       stats.removed = gone.length;
       const depth = source.depth ?? "full";
       const todo = listed.filter((i) => known.get(i.id)?.version !== i.version || known.get(i.id)?.depth !== depth || !i.version);
       stats.unchanged = listed.length - todo.length;
 
-      let next = 0;
-      const worker = async () => {
-        while (next < todo.length && Date.now() - started < budgetMs) {
-          const item = todo[next++];
+      // Many changed items of a part with a bulk call (a repository's archive): their texts in one download.
+      const toRead = (i) => depth !== "titles" && i.text == null && parts[i.part]?.read;
+      const bulks = new Map();
+      const bulkOf = (index) => {
+        if (!bulks.has(index)) {
+          const wanted = new Set(todo.filter((i) => i.part === index && toRead(i)).map((i) => i.local));
+          bulks.set(
+            index,
+            bulkTexts(source, template, parts[index], wanted).catch((e) => {
+              error(`${parts[index].name ?? "bulk"}: ${e.message}`);
+              return null;
+            }),
+          );
+        }
+        return bulks.get(index);
+      };
+      const wantsBulk = new Set(parts.map((p, index) => index).filter((index) => parts[index].bulk && todo.filter((i) => i.part === index && toRead(i)).length >= LIMITS.bulkMin));
+      const textOf = async (item) => {
+        if (wantsBulk.has(item.part) && toRead(item)) {
+          const hit = (await bulkOf(item.part))?.get(item.local);
+          if (hit != null) return hit;
+        }
+        return read(source, template, item);
+      };
+
+      // In batches: texts read side by side, every chunk of the batch embedded in a few calls, stored together.
+      let done = 0;
+      while (done < todo.length && Date.now() - started < budgetMs) {
+        const batch = todo.slice(done, done + LIMITS.batch);
+        done += batch.length;
+        const prepared = await mapPool(batch, LIMITS.readers, async (item) => {
           try {
-            let chunks;
-            let summary;
-            if (depth === "titles") {
-              chunks = [`${item.title}${item.url ? `\n${item.url}` : ""}`];
-            } else {
-              const text = await read(source, template, item);
-              if (depth === "summary" && text.trim()) {
-                summary = (await summarize?.(item.title, text)) || text.slice(0, 600);
-                chunks = [summary];
-              } else {
-                chunks = chunk(text);
-              }
-            }
-            const vectors = await embedChunks(item.title, chunks);
-            const key = itemKey(source.id, item.id);
-            const record = {
-              id: item.id,
-              version: item.version,
-              depth,
-              title: item.title,
-              url: item.url,
-              chunks: chunks.map((t, i) => ({ text: t, embedding: toB64(vectors[i]) })),
-            };
-            await store.putItems([{ source_id: source.id, key, blob: seal(record) }]);
-            if (known.has(item.id)) stats.updated++;
-            else stats.added++;
+            if (depth === "titles") return { item, chunks: [`${item.title}${item.url ? `\n${item.url}` : ""}`] };
+            const text = await textOf(item);
+            if (depth === "summary" && text.trim()) return { item, chunks: [(await summarize?.(item.title, text)) || text.slice(0, 600)] };
+            return { item, chunks: chunk(text) };
           } catch (e) {
             stats.failed++;
-            if (stats.errors.length < 5) stats.errors.push(`${item.title}: ${e.message}`.slice(0, 300));
+            error(`${item.title}: ${e.message}`);
+            return null;
           }
+        });
+        const ready = prepared.filter(Boolean);
+        let vectors;
+        try {
+          vectors = await embedAll(ready.flatMap(({ item, chunks }) => chunks.map((t) => `${item.title}\n\n${t}`)));
+        } catch (e) {
+          stats.failed += ready.length;
+          error(`embeddings: ${e.message}`);
+          continue;
         }
-      };
-      await Promise.all(Array.from({ length: LIMITS.readers }, worker));
-      const left = todo.length - stats.added - stats.updated - stats.failed;
-      const rows = await store.items(source.id);
-      source.stats = { items: rows.length, chunks: rows.reduce((n, r) => n + cachedItem(r, open).chunks.length, 0) };
-      source.status = left > 0 ? "partial" : stats.failed ? "errors" : "ready";
+        let k = 0;
+        const rows = ready.map(({ item, chunks }) => {
+          const record = {
+            id: item.id,
+            version: item.version,
+            depth,
+            title: item.title,
+            url: item.url,
+            chunks: chunks.map((t) => ({ text: t, embedding: toB64(vectors[k++]) })),
+          };
+          return { source_id: source.id, key: itemKey(source.id, item.id), blob: seal(record) };
+        });
+        await store.putItems(rows);
+        for (const { item, chunks } of ready) {
+          if (known.has(item.id)) stats.updated++;
+          else stats.added++;
+          known.set(item.id, { id: item.id, version: item.version, depth, chunks: chunks.length });
+        }
+      }
+      const left = todo.length - done;
+      // Items and chunks kept, and items per part ("files", "issues"...).
+      const all = [...known.values()];
+      const byPart = {};
+      if (parts.length > 1) for (const p of parts) byPart[p.key] = all.filter((i) => i.id.startsWith(`${p.key}:`)).length;
+      source.stats = { items: all.length, chunks: all.reduce((n, i) => n + i.chunks, 0), ...(parts.length > 1 && { parts: byPart }) };
+      source.status = left > 0 ? "partial" : stats.failed || failedParts.length ? "errors" : "ready";
       source.last_run = { ...stats, left, ms: Date.now() - started, at: new Date().toISOString() };
-      if (left === 0) source.synced_at = source.last_run.at;
+      if (left === 0) {
+        source.synced_at = source.last_run.at;
+        // Parts that list by {{since}}: the next sync lists what changed from a little before this one started.
+        const at = new Date(started - 300_000).toISOString();
+        for (const p of parts.filter((p) => usesSince(p) && !failedParts.some((f) => f.key === p.key))) {
+          const k = p.key || "_";
+          source.since = { ...source.since, [k]: { at, full: incremental.includes(p.key) ? source.since[k].full : new Date(started).toISOString() } };
+        }
+      }
     } catch (e) {
       source.status = "failed";
       source.last_run = { ...stats, error: e.message, ms: Date.now() - started, at: new Date().toISOString() };
     }
-    // A partial sync continues soon; a done or failed one waits for its next turn.
-    if (source.schedule) source.schedule.next = new Date(Date.now() + (source.status === "partial" ? 60_000 : source.schedule.every * 60_000)).toISOString();
+    // A done or failed sync waits for its next turn; a partial one is due again in a minute (nextAt).
+    if (source.schedule) source.schedule.next = new Date(Date.now() + source.schedule.every * 60_000).toISOString();
     await saveSource(source);
     const out = publicSource(source);
     // The host logs every run (e.g. a feed of calls); a failing log never fails the sync.
@@ -390,12 +527,30 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
     return out;
   }
 
-  async function embedChunks(title, chunks) {
-    const out = [];
-    for (let i = 0; i < chunks.length; i += LIMITS.embedBatch) {
-      out.push(...(await embedMany(chunks.slice(i, i + LIMITS.embedBatch).map((t) => `${title}\n\n${t}`))));
+  // Embeddings of many texts: up to embedBatch per call, three calls at a time, in order.
+  async function embedAll(texts) {
+    const groups = [];
+    for (let i = 0; i < texts.length; i += LIMITS.embedBatch) groups.push(texts.slice(i, i + LIMITS.embedBatch));
+    return (await mapPool(groups, 3, (g) => embedMany(g))).flat();
+  }
+
+  // Every kept item with its vectors, decrypted once per change: with a store that lists stamps, only rows that
+  // changed since the last search are loaded, so a search does not pull every embedding from the database.
+  async function keptItems(only) {
+    if (!store.itemStamps || !store.itemsByKey) {
+      return (await store.allItems()).filter((row) => !only || only.has(row.source_id)).map((row) => ({ row, item: cachedItem(row, open) }));
     }
-    return out;
+    const stamps = (await store.itemStamps()).filter((r) => !only || only.has(r.source_id));
+    const missing = stamps.filter((r) => rowCache.get(`${r.source_id}:${r.key}`)?.stamp !== String(r.stamp));
+    const stampOf = new Map(missing.map((r) => [`${r.source_id}:${r.key}`, String(r.stamp)]));
+    for (let i = 0; i < missing.length; i += 500) {
+      for (const row of await store.itemsByKey(missing.slice(i, i + 500))) {
+        const stamp = stampOf.get(`${row.source_id}:${row.key}`) ?? "";
+        rowCache.set(`${row.source_id}:${row.key}`, { stamp, row: { source_id: row.source_id, key: row.key }, item: cachedItem(row, open) });
+      }
+    }
+    if (rowCache.size > 60000) for (const k of [...rowCache.keys()].slice(0, rowCache.size - 60000)) rowCache.delete(k);
+    return stamps.map((r) => rowCache.get(`${r.source_id}:${r.key}`)).filter((x) => x?.item);
   }
 
   const api = {
@@ -408,6 +563,7 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
         name: recipe.name,
         description: recipe.description ?? "",
         scope: recipe.scope ?? {},
+        ...(recipe.parts?.length && { parts: recipe.parts.map((p) => p.name ?? p.key) }),
         choices: Boolean(recipe.choices),
         triggers: (recipe.triggers ?? []).map((x) => x.label),
         builtin: Boolean(builtin),
@@ -430,7 +586,7 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
       const raw = [];
       try {
         await setup(source, recipe);
-        const items = await list(source, recipe, { pages: 1, raw, containersMax: 2 });
+        const { items } = await list(source, recipe, { pages: 1, raw, containersMax: 2 });
         const sample = [];
         for (const item of items.slice(0, 2)) {
           const text = await read(source, recipe, item).catch((e) => `ERROR: ${e.message}`);
@@ -538,6 +694,12 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
         if (again) rerun.add(key);
         return running.get(key);
       }
+      // Another process (a page's next round, the scheduler) is on it right now: its state, not a second sync.
+      // A trigger event always syncs, so a change that came mid-sync is not lost.
+      if (reason !== "trigger") {
+        const current = await loadSource(id);
+        if (current.status === "syncing" && Date.now() - new Date(current.sync_started_at).getTime() < 150_000) return publicSource(current);
+      }
       const job = (async () => {
         let out;
         do {
@@ -578,7 +740,7 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
           let error;
           for (let cur = spec; cur; cur = cur.fallback) {
             try {
-              made.push({ id: await triggers.create(cur.slug, fill(cur.config, source.scope), source.account), slug: cur.slug, label: cur.label });
+              made.push({ id: await triggers.create(cur.slug, fill(cur.config, ctxOf(source, t)), source.account), slug: cur.slug, label: cur.label });
               error = null;
               break;
             } catch (e) {
@@ -634,16 +796,24 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
     },
 
     // Chunks closest to the query, across sources (or one): { source, title, url, text, score }.
+    // source: one source id or several. Hits carry the recipe the source keeps (recipe_of), if any.
     async search({ vector, limit = 6, source, minScore = 0.3 }) {
       if (!vector) return [];
-      const titles = new Map((await store.sources()).map((row) => [row.id, open(row.blob).title]));
+      const only = source ? new Set([source].flat()) : null;
+      const info = new Map(
+        (await store.sources()).map((row) => {
+          const s = open(row.blob);
+          return [row.id, { title: s.title, recipe_of: s.recipe_of ?? null }];
+        }),
+      );
       const hits = [];
-      for (const row of await store.allItems()) {
-        if (source && row.source_id !== source) continue;
-        const item = cachedItem(row, open);
+      for (const { row, item } of await keptItems(only)) {
         for (const c of item.chunks) {
           const score = cosine(vector, c.vector);
-          if (score >= minScore) hits.push({ source: row.source_id, source_title: titles.get(row.source_id), title: item.title, url: item.url, text: c.text, score });
+          if (score >= minScore) {
+            const src = info.get(row.source_id);
+            hits.push({ source: row.source_id, source_title: src?.title, recipe_of: src?.recipe_of ?? null, title: item.title, url: item.url, text: c.text, score });
+          }
         }
       }
       // Best chunk per item first, so one long file does not fill every slot.
@@ -664,6 +834,7 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
 }
 
 const running = new Map(); // "<namespace>:<source id>" -> Promise of its sync, so a source never syncs twice at once
+const rowCache = new Map(); // "<source id>:<key>" -> { stamp, row, item }: kept items for search, by the store's stamp
 const rerun = new Set(); // keys to sync once more when their running sync ends
 
 // where: every path must equal its value; skip: none may. The value "*" means the path is there at all
@@ -671,6 +842,130 @@ const rerun = new Set(); // keys to sync once more when their running sync ends
 const is = (raw, p, v) => (v === "*" ? pick(raw, p) != null : pick(raw, p) === v);
 export const matches = (raw, role) =>
   (!role.where || Object.entries(role.where).every(([p, v]) => is(raw, p, v))) && !(role.skip && Object.entries(role.skip).some(([p, v]) => is(raw, p, v)));
+
+// The parts of a recipe: its parts, or the recipe itself as one part (no key, so its item ids stay as they are).
+export const partsOf = (t) =>
+  t.parts?.length ? t.parts : [{ key: "", list: t.list, read: t.read, bulk: t.bulk, exclude: t.exclude, maxSize: t.maxSize, prefix: t.prefix, root: t.root }];
+
+// Placeholders of a source: the recipe's fixed values, the source's scope, and dates ({{ago.30d}}, {{ahead.365d}}, {{now}}).
+function ctxOf(source, template) {
+  const at = (days) => new Date(Date.now() + days * 86_400_000).toISOString();
+  const span = (sign) => Object.fromEntries([1, 7, 30, 90, 180, 365].map((d) => [`${d}d`, at(sign * d)]));
+  return { now: at(0), ago: span(-1), ahead: span(1), ...template?.vars, ...source.scope };
+}
+
+const usesSince = (part) => JSON.stringify(part.list?.args ?? {}).includes("{{since");
+const isTemplate = (v) => typeof v === "string" && v.includes("{{");
+const hash = (v) => createHash("sha256").update(JSON.stringify(v ?? null)).digest("hex").slice(0, 16);
+
+// Values at a path, through arrays: "labels.name" of an issue -> ["bug", "ui"].
+function gather(obj, path) {
+  const [head, ...rest] = String(path).split(".");
+  if (obj == null) return undefined;
+  if (Array.isArray(obj)) return obj.map((x) => gather(x, path)).flat().filter((x) => x != null && x !== "");
+  if (typeof obj !== "object") return undefined;
+  const v = obj[head];
+  return rest.length ? gather(v, rest.join(".")) : v;
+}
+
+// Only the given paths of an object: { "user.login": "dan", labels: [...] }.
+function project(obj, fields) {
+  return Object.fromEntries(fields.map((f) => [f, gather(obj, f)]).filter(([, v]) => v != null && v !== "" && !(Array.isArray(v) && !v.length)));
+}
+
+// An item as plain text for embeddings: short fields as "name: value" lines, long texts (a body) in full below them.
+function fieldsText(obj, fields) {
+  const lines = [];
+  const long = [];
+  for (const [f, v] of Object.entries(project(obj, fields))) {
+    const text = Array.isArray(v) ? v.map((x) => (typeof x === "object" ? JSON.stringify(x) : x)).join(", ") : typeof v === "object" ? JSON.stringify(v) : String(v);
+    if (text.length > 200 || text.includes("\n")) long.push(text);
+    else lines.push(`${f.replace(/[._]/g, " ")}: ${text}`);
+  }
+  return [lines.join("\n"), ...long].filter(Boolean).join("\n\n");
+}
+
+// A list role given only as a call, shaped from a real response: items, id, version, title, url (inferList),
+// and how it pages when "{{page}}" is in its args: a token or cursor arg follows the cursor found in the response
+// (none: one page), any other (page, page_number) counts pages.
+function shaped(role, res) {
+  const shape = inferList(res);
+  const arg = Object.entries(role.args ?? {}).find(([, v]) => v === "{{page}}")?.[0];
+  let next = {};
+  if (arg && !role.next && !role.nextPage) {
+    const cursor = /token|cursor|after|start|offset/i.test(arg);
+    next = cursor ? { next: inferNext(res) ?? "__none__" } : { nextPage: true };
+  }
+  return { ...shape, ...next, ...role };
+}
+
+// Where the next page's cursor is in a response: nextPageToken, next_cursor, ... up to three levels down.
+function inferNext(res) {
+  const NEXT = /^(next_?page_?token|next_?cursor|next_?page_?cursor|end_?cursor|cursor|next)$/i;
+  const walk = (v, path, depth) => {
+    if (depth > 3 || v == null || typeof v !== "object" || Array.isArray(v)) return null;
+    for (const [k, x] of Object.entries(v)) {
+      const at = path ? `${path}.${k}` : k;
+      if (NEXT.test(k) && (typeof x === "string" || typeof x === "number")) return at;
+    }
+    for (const [k, x] of Object.entries(v)) {
+      const found = walk(x, path ? `${path}.${k}` : k, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  };
+  return walk(res, "", 0);
+}
+
+// Files of a tar archive as texts: Map(path without its first `strip` folders -> text); only `wanted` paths,
+// binaries as "". Reads ustar, pax (long paths) and GNU long names.
+export function untar(tar, { strip = 0, wanted } = {}) {
+  const out = new Map();
+  const str = (b) => b.toString("utf8").replace(/\0[\s\S]*$/, "");
+  let longName = null;
+  for (let off = 0; off + 512 <= tar.length; ) {
+    const h = tar.subarray(off, off + 512);
+    if (h.every((b) => b === 0)) break;
+    const size = parseInt(str(h.subarray(124, 136)).trim() || "0", 8) || 0;
+    const type = String.fromCharCode(h[156] || 48);
+    const body = tar.subarray(off + 512, off + 512 + size);
+    off += 512 + Math.ceil(size / 512) * 512;
+    if (type === "x") {
+      const m = body.toString("utf8").match(/\d+ path=([^\n]*)\n/);
+      if (m) longName = m[1];
+      continue;
+    }
+    if (type === "L") {
+      longName = str(body);
+      continue;
+    }
+    if (type === "g") continue;
+    const prefix = str(h.subarray(345, 500));
+    const name = longName ?? (prefix ? `${prefix}/${str(h.subarray(0, 100))}` : str(h.subarray(0, 100)));
+    longName = null;
+    if (type !== "0" && type !== "7") continue; // regular files only
+    const path = name.split("/").slice(strip).join("/");
+    if (!path || (wanted && !wanted.has(path))) continue;
+    const text = body.toString("utf8");
+    out.set(path, text.includes("\u0000") ? "" : text);
+  }
+  return out;
+}
+
+// fn over items, n at a time, results in order.
+async function mapPool(items, n, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(n, items.length) }, async () => {
+      while (next < items.length) {
+        const i = next++;
+        out[i] = await fn(items[i], i);
+      }
+    }),
+  );
+  return out;
+}
 
 // Scope fields of a template from what was given: defaults applied, required ones checked (strict).
 function cleanScope(t, scope, { strict = true } = {}) {
@@ -689,22 +984,27 @@ function checkRecipe(r) {
   const out = [];
   if (!r.toolkit) out.push("toolkit is required (the app's slug, e.g. linear)");
   if (!r.name) out.push("name is required");
-  if (!r.list?.tool) out.push("list.tool is required");
-  if (!r.list?.single && !r.list?.items) out.push("list.items is required: the path to the array of items in the response, e.g. data.issues");
-  if (!r.list?.single && !r.list?.id) out.push("list.id is required: the path to an item's id");
-  for (let e = r.list?.each, n = 0; e && n < 4; e = e.each, n++) {
-    if (!e.tool || !e.items || !e.id) out.push("list.each needs tool, items and id (and label): the call that lists the containers");
-  }
-  if (!r.read?.tool && !r.list?.text && !r.list?.single) out.push("read.tool (+ read.text) or list.text is required");
-  if (r.read?.tool && !r.read.text) out.push("read.text is required: the path to the text in the read response");
-  if (r.scope && typeof r.scope !== "object") out.push("scope must be an object of fields");
-  for (const x of r.exclude ?? []) {
-    try {
-      new RegExp(x);
-    } catch {
-      out.push(`exclude: invalid regex ${x}`);
+  if (r.parts && (!Array.isArray(r.parts) || !r.parts.length)) out.push("parts must be a non-empty array of { key, name, list, read? }");
+  for (const p of partsOf(r)) {
+    const at = r.parts ? `parts.${p.key ?? "?"}.` : "";
+    if (r.parts && !p.key) out.push("every part needs a key (files, issues...)");
+    if (!p.list?.tool) out.push(`${at}list.tool is required`);
+    if (!p.list?.single && !p.list?.items) out.push(`${at}list.items is required: the path to the array of items in the response, e.g. data.issues`);
+    if (!p.list?.single && !p.list?.id) out.push(`${at}list.id is required: the path to an item's id`);
+    for (let e = p.list?.each, n = 0; e && n < 4; e = e.each, n++) {
+      if (!e.tool || !e.items || !e.id) out.push(`${at}list.each needs tool, items and id (and label): the call that lists the containers`);
+    }
+    if (!p.read?.tool && !p.list?.text && !p.list?.single) out.push(`${at}read.tool (+ read.text) or list.text is required`);
+    if (p.read?.tool && !p.read.text) out.push(`${at}read.text is required: the path to the text in the read response`);
+    for (const x of p.exclude ?? []) {
+      try {
+        new RegExp(x);
+      } catch {
+        out.push(`${at}exclude: invalid regex ${x}`);
+      }
     }
   }
+  if (r.scope && typeof r.scope !== "object") out.push("scope must be an object of fields");
   return out;
 }
 
