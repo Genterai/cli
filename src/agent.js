@@ -82,7 +82,7 @@ export function createAgent({
   async function call(run, name, input) {
     switch (name) {
       case "search_tools": {
-        const found = await genter.search({ query: input.query, limit: 6 });
+        const found = await genter.search({ query: input.query, limit: 6, toolkits: namedApps(`${input.query} ${run.task}`, run.apps) });
         return { content: JSON.stringify(found.map(compactFound)) };
       }
       case "get_tool_schema": {
@@ -95,12 +95,30 @@ export function createAgent({
         if (run.mode === "find" && tool && !isReadOnly(tool)) {
           return { content: `Not allowed: ${tool} changes data and this is a read-only find. Only read, or tell the user to use run_task.` };
         }
+        // A call that already failed is not run again: the model gets the error back and must change course.
+        const key = `${tool ?? input.id} ${JSON.stringify(input.args ?? {})}`;
+        const failed = run.failed[key];
+        if (failed) {
+          onEvent({ type: "tool", tool: tool ?? input.id, ok: false, summary: "same call failed before, not repeated" });
+          return { content: JSON.stringify({ error: `This exact call already failed: ${failed}`, hint: "Do not repeat it. Change the args, use another tool, or answer with what you have." }) };
+        }
+        if (tool && (run.failures[tool] ?? 0) >= MAX_TOOL_FAILURES) {
+          onEvent({ type: "tool", tool, ok: false, summary: `failed ${MAX_TOOL_FAILURES} times, not run again` });
+          return { content: JSON.stringify({ error: `${tool} failed ${MAX_TOOL_FAILURES} times in this run and is not run again.`, hint: "Answer with what you have and say what did not work." }) };
+        }
+        run.failed[key] = "the same call is already running"; // parallel duplicates in one step run once
         const started = Date.now();
         const out = await genter.execute({ ...input, account: input.account ?? run.account }).catch((e) => ({ thrown: e.message }));
         run.timing.tool_ms += Date.now() - started;
-        // A slug that does not exist: answer with real ones right away instead of spending a step on search_tools.
         const error = out.thrown ?? (out.result?.successful === false ? out.result?.error : null);
-        if (error && tool && /not found|does not exist|invalid tool|unknown tool|no tool/i.test(String(error))) {
+        if (error) {
+          run.failed[key] = String(typeof error === "string" ? error : JSON.stringify(error)).slice(0, 300);
+          if (tool) run.failures[tool] = (run.failures[tool] ?? 0) + 1;
+        } else delete run.failed[key];
+        // A slug that does not exist: answer with real ones right away instead of spending a step on search_tools.
+        // "Not Found" is also what an app says about a repo, file or id that does not exist: only a slug Composio
+        // does not know is a missing tool, otherwise the model drops a working tool or retries it forever.
+        if (error && tool && /not found|does not exist|invalid tool|unknown tool|no tool/i.test(String(error)) && !(await genter.schema(tool).then(() => true, () => false))) {
           const similar = await genter.search({ query: tool.toLowerCase().replace(/_/g, " "), limit: 5 }).catch(() => []);
           onEvent({ type: "tool", tool, ok: false, summary: "no such tool" });
           return { content: JSON.stringify({ error: `${tool} does not exist`, use_one_of: similar.map(compactFound) }) };
@@ -120,7 +138,10 @@ export function createAgent({
                 "(the data is often in English when the user writes in another language, and the other way round), " +
                 "plus close synonyms, fewer words and no date filter.")
             : undefined;
-        const short = { id: out.id, successful: ok, summary: out.summary ?? undefined, error: ok ? undefined : out.result?.error, hint: retry ?? out.hint };
+        const missing = !ok && /not found|404|does not exist/i.test(String(JSON.stringify(out.result?.error ?? "")))
+          ? "What these args point to does not exist (wrong owner, repo, path or id?). Do not guess again: find the real name with a list or search tool first, or answer without it."
+          : undefined;
+        const short = { id: out.id, successful: ok, summary: out.summary ?? undefined, error: ok ? undefined : out.result?.error, hint: retry ?? missing ?? out.hint };
         const text = ok ? JSON.stringify(data) : "";
         return {
           content: JSON.stringify({ ...short, data: text.length > 10000 ? `${text.slice(0, 10000)}… (truncated)` : text || undefined }),
@@ -202,12 +223,15 @@ export function createAgent({
     lastNote = null;
     currentRun = run;
     run.sourced = false;
+    run.failed = {}; // "<tool> <args>" -> error of a call that failed in this round
+    run.failures = {}; // tool -> failed calls in this round
     let result = null;
     try {
       for (let step = 0; step < maxSteps && !result; step++) {
         // A remember/keep-up-to-date task gets only the source tools: no one-off execute instead of a source.
         // Once the source is added there is nothing left to call: only the answer.
-        const message = await llm(run.messages, usage, run.sync && builder ? SYNC_TOOLS : TOOLS, run.sourced ? "none" : undefined);
+        // A question or a one-off task never adds sources: without these the model reads the data instead.
+        const message = await llm(run.messages, usage, run.sync && builder ? SYNC_TOOLS : run.sync ? TOOLS : TASK_TOOLS, run.sourced ? "none" : undefined);
         run.messages.push({ role: "assistant", content: message.content ?? null, ...(message.tool_calls?.length && { tool_calls: message.tool_calls }) });
         if (!message.tool_calls?.length) {
           // A model that ends without text: the last tool note is the answer.
@@ -262,9 +286,10 @@ export function createAgent({
     async start({ task, mode = "run", account }) {
       onEvent({ type: "step", tool: "search_recipes", input: { query: task } });
       const searched = Date.now();
+      const connecting = genter.login().then((l) => l.connected ?? []).catch(() => []);
       const [found, connected, english, sources, knowledge] = await Promise.all([
-        genter.search({ query: task, limit: 8 }).catch(() => []),
-        genter.login().then((l) => l.connected ?? []).catch(() => []),
+        connecting.then((c) => genter.search({ query: task, limit: 8, toolkits: namedApps(task, c.map((x) => x.toolkit)) })).catch(() => []),
+        connecting,
         genter.translate ? genter.translate(task) : null, // shared with search, so no second model call
         genter.sources ? genter.sources.list().catch(() => []) : [],
         genter.knowledge ? genter.knowledge({ query: task, limit: 6 }).catch(() => []) : [],
@@ -280,6 +305,7 @@ export function createAgent({
         account,
         status: "running",
         created_at: new Date().toISOString(),
+        apps: [...new Set(connected.map((c) => c.toolkit))],
         recipes: Object.fromEntries(recipes.map((r) => [r.id, r.tool])),
         steps: [],
         timing: { search_ms },
@@ -357,6 +383,15 @@ const syncText = (s) =>
       (s.last_run ? ` (+${s.last_run.added} new, ${s.last_run.updated} updated, ${s.last_run.removed} removed${s.last_run.failed ? `, ${s.last_run.failed} failed` : ""})` : "") +
       (s.status === "partial" ? `; ${s.last_run?.left ?? "some"} items left — it continues on the next sync (dashboard → Sources, or sync_source).` : "");
 
+// Connected apps the text names: "Google Tasks" -> googletasks, "гугл таски" stays unmatched (the model searches).
+export function namedApps(text, apps = []) {
+  const flat = String(text).toLowerCase().replace(/[^a-z0-9]/g, "");
+  return [...new Set(apps)].filter((slug) => slug && flat.includes(slug.toLowerCase().replace(/[^a-z0-9]/g, "")));
+}
+
+// A tool that keeps failing is stopped after this many failures in one round, so a run never spins on it.
+const MAX_TOOL_FAILURES = 3;
+
 const SYNC_INTENT = /запомн|помни|держи .*актуал|актуальн|синхрон|проиндекс|индексир|remember|keep .*(up to date|in sync|current)|\bsync\b|index /i;
 
 const TEMPLATE_HELP =
@@ -399,6 +434,8 @@ The first message already holds everything for a fast start: saved recipes that 
 - Make independent calls in the same step (parallel). Chain only when a call needs another's output.
 - Never invent tool slugs or argument names: use only slugs from the first message, search results or error hints.
 - Keyword search in apps (Gmail q, Slack, Drive, Notion, GitHub search) matches literal words, and the data is often in another language than the request (English emails, Russian request). Put the key terms in both languages in one query, joined with OR, e.g. Gmail: ("объединенные знания" OR "unified knowledge" OR "merged knowledge"). The first message lists the terms.
+- A failed call is not retried with the same args. "Not Found" from an app means the repo, file or id is wrong, not the tool: find the real one (list the user's repos, search) instead of guessing. After two failures of a tool, answer with what you have.
+- A connected app always has tools: never answer that there is no tool for it. If no candidate fits, search_tools with the app name and what to do (e.g. "Google Tasks list tasks"), then execute.
 - An empty result is not an answer: retry once with translated or broader terms before saying nothing was found.
 - When you execute a tool that did not come from a recipe and it is a reusable step, pass description, short and tags so the next run finds it:
   description is a general Markdown recipe: "### <Verb> <object>", a line "\`TOOL_SLUG\` · args: \`{a, b?}\`", what it returns, how to reuse it, "- pitfall: ..." bullets; short is one line under 100 characters for lists; tags in English and Russian.
@@ -520,4 +557,5 @@ const TOOLS = [
   },
 ].map(({ name, description, parameters }) => ({ type: "function", function: { name, description, parameters } }));
 
+const TASK_TOOLS = TOOLS.filter((t) => !["add_source", "build_live_sync"].includes(t.function.name));
 const SYNC_TOOLS = TOOLS.filter((t) => ["add_source", "build_live_sync", "sync_source", "search_knowledge", "connect_app", "ask_user"].includes(t.function.name));
