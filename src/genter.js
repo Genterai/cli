@@ -458,7 +458,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
         const kept = new Map((await sources.list().catch(() => [])).filter((s) => s.recipe_of).map((s) => [s.recipe_of, s]));
         for (const m of memories) {
           const s = kept.get(m.id);
-          if (s) m.source = { id: s.id, status: s.status, items: s.stats?.items ?? 0, synced_at: s.synced_at };
+          if (s) m.source = { id: s.id, status: s.status, items: s.stats?.items ?? 0, synced_at: s.synced_at, watching: s.watching, every: s.every };
         }
       }
       if (memories.some((m) => m.status === "valid" && m.score >= strongScore)) return memories;

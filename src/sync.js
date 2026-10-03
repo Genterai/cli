@@ -339,7 +339,9 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
     const filter = source.filter ?? {};
     const include = filter.include ? new RegExp(filter.include, "i") : null;
     const skip = filter.exclude ? new RegExp(filter.exclude, "i") : null;
-    const kept = out.filter((i) => (!include || include.test(`${i.id} ${i.title}`)) && !(skip && skip.test(`${i.id} ${i.title}`)));
+    // An item listed twice (pages that shift while they are read) counts once.
+    const ids = new Set();
+    const kept = out.filter((i) => !ids.has(i.id) && ids.add(i.id) && (!include || include.test(`${i.id} ${i.title}`)) && !(skip && skip.test(`${i.id} ${i.title}`)));
     return { items: filter.maxItems ? kept.slice(0, filter.maxItems) : kept, failed, incremental };
   }
 
