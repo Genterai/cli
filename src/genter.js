@@ -44,8 +44,9 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
               role: "user",
               content:
                 `Retell in 1-3 sentences what this ${tool} result contains, so it can be found later by topic: ` +
-                "subjects, people, dates, and the ids or URLs needed to open it again. Write in the language of the content. " +
-                `No passwords, tokens or keys.\n\n${JSON.stringify(data).slice(0, 20000)}`,
+                "subjects, people, dates, and the ids or URLs needed to open it again. Write in English, but quote subjects, " +
+                "titles and names exactly as they are. Only say what is in the data, do not guess. No passwords, tokens or keys." +
+                `\n\n${JSON.stringify(data, decodeBase64).slice(0, 20000)}`,
             },
           ],
         }),
@@ -194,6 +195,14 @@ function cipher(secret) {
       return JSON.parse(Buffer.concat([d.update(b.subarray(28)), d.final()]));
     },
   };
+}
+
+// APIs like GitHub return file contents as base64; decode them so the summary can read them.
+function decodeBase64(key, value) {
+  if (value?.encoding === "base64" && typeof value.content === "string") {
+    return { ...value, content: Buffer.from(value.content, "base64").toString("utf8") };
+  }
+  return value;
 }
 
 function cosine(a, b) {
