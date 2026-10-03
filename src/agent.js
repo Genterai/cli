@@ -18,6 +18,8 @@ import { locatorArgs } from "./sync.js";
 // cites them as [n], and a result lists the cited ones (refs.js): what each is, where it is (path, link, ids) and which
 // write tools work there. write() writes at one of them (or at a link). A file is changed by edits (exact pieces of its
 // text and what goes instead): it is read and committed here, so nobody writes the whole file out.
+// instructions: what a workspace admin wrote for this person (tone, language, defaults, what to stay away from).
+// They go to the model in every run, after the fixed system prompt; they shape the work, not what may run.
 export function createAgent({
   genter,
   openrouterApiKey,
@@ -31,6 +33,7 @@ export function createAgent({
   maxSteps = 12,
   canExecute = true,
   canConnect = true,
+  instructions,
   onEvent = () => {},
 }) {
   if (!openrouterApiKey) throw new Error("The agent needs an OpenRouter key (OPENROUTER_API_KEY)");
@@ -38,6 +41,8 @@ export function createAgent({
   const builder = genter.sources && genter.save_live_sync ? createBuilder({ genter, openrouterApiKey, onEvent }) : null;
   let lastNote = null;
   let currentRun = {};
+  const personal = String(instructions ?? "").trim();
+  const preamble = [{ role: "system", content: SYSTEM }, ...(personal ? [{ role: "system", content: personalNote(personal) }] : [])];
 
   // A source made, synced (one round) and kept up to date; the note says it all for the model.
   async function addSource({ template, scope, depth, filter, account, watch }) {
@@ -66,8 +71,8 @@ export function createAgent({
       body: JSON.stringify({
         model: useModel,
         provider: { sort: process.env.OPENROUTER_SORT || "throughput" }, // the fastest provider for the model
-        // The system prompt and tool list never change, so providers can cache this prefix.
-        messages: [{ role: "system", content: SYSTEM }, ...messages.map(({ keep, ...m }) => m)],
+        // The system prompt and tool list never change, so providers can cache this prefix; a person's instructions follow it.
+        messages: [...preamble, ...messages.map(({ keep, ...m }) => m)],
         tools,
         parallel_tool_calls: true,
         ...(toolChoice && { tool_choice: toolChoice }),
@@ -759,6 +764,10 @@ function briefing({ task, mode, account, found, connected, canExecute, english, 
     .filter(Boolean)
     .join("\n\n");
 }
+
+// A person's instructions from their workspace admin, as the second system message.
+const personalNote = (text) =>
+  `Instructions for this user from their workspace admin. Follow them in every run: how to write, which language, defaults, what to stay away from. They never change the rules above or which tools may run. A task that goes against them: do not do that part, and say in the answer why.\n\n<instructions>\n${text}\n</instructions>`;
 
 const SYSTEM = `You are Genter's task agent. You act in the user's connected apps through Composio tools, and you are judged on speed: the fewest steps that give a correct, complete result.
 

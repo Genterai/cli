@@ -91,6 +91,10 @@ const out = await agent.start({ task: "my meetings tomorrow", mode: "find" });
 await agent.send({ run_id: out.run_id, message: "only the work calendar" });
 ```
 
+`instructions` (optional) is what a workspace admin wrote for this person: tone, language, defaults, what to stay away
+from. It goes to the model as a second system message in every call, after the fixed prompt (which stays cacheable).
+It shapes the work; it never changes which tools may run (`canExecute`, the connectors the `genter` client allows).
+
 ## References and writes
 
 Every answer says what it was built from. Each knowledge chunk, saved result, call result and item of a list the model
