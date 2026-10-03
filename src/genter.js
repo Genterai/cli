@@ -60,19 +60,27 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
   const api = {
     // Returns a Composio link the user opens to connect an app (gmail, github, ...).
     // callback_url: where Composio sends the user afterwards (with ?status=success|failed).
-    async register_tool({ toolkit, callback_url }) {
+    // An app can be connected several times (e.g. work and personal gmail); alias names the connection.
+    async register_tool({ toolkit, callback_url, alias }) {
       const configs = await composio.authConfigs.list({ toolkit });
       const authConfigId =
         configs.items[0]?.id ??
         (await composio.authConfigs.create(toolkit, { type: "use_composio_managed_auth", name: `${toolkit} auth config` })).id;
-      const request = await composio.connectedAccounts.link(userId, authConfigId, callback_url ? { callbackUrl: callback_url } : {});
+      const request = await composio.connectedAccounts.link(userId, authConfigId, {
+        allowMultiple: true,
+        ...(callback_url && { callbackUrl: callback_url }),
+        ...(alias && { alias }),
+      });
       return { toolkit, connect_url: request.redirectUrl, connection_id: request.id };
     },
 
-    // Who am I and which apps are connected.
+    // Who am I and which apps are connected. `account` is what execute takes when an app has several connections.
     async login() {
-      const { items } = await composio.connectedAccounts.list({ userIds: [userId] });
-      return { user_id: userId, connected: items.map((a) => ({ toolkit: a.toolkit.slug, status: a.status })) };
+      const { items } = await composio.connectedAccounts.list({ userIds: [userId], limit: 100 });
+      return {
+        user_id: userId,
+        connected: items.map((a) => ({ toolkit: a.toolkit.slug, account: a.id, alias: a.alias ?? undefined, status: a.status })),
+      };
     },
 
     // Memory first (ready-made calls with args), plain Composio search as fallback.
@@ -114,15 +122,26 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     },
 
     // Run a tool. Pass `id` to repeat a saved recipe (args are merged on top).
+    // `account` picks a connection (from login) when an app is connected several times.
     // Every successful call becomes a recipe: with the agent's description if given, otherwise Composio's.
-    async execute({ id, tool, args = {}, description, tags }) {
+    async execute({ id, tool, args = {}, account, description, tags }) {
       const previous = id && (await load(id));
       if (previous) {
         tool ??= previous.tool;
         args = { ...previous.args, ...args };
       }
       if (!tool) throw new Error("Pass `tool` or `id`");
-      const result = await composio.tools.execute(tool, { userId, arguments: args, dangerouslySkipVersionCheck: true });
+      if (account && !account.startsWith("ca_")) {
+        // an alias from login
+        const { items } = await composio.connectedAccounts.list({ userIds: [userId], limit: 100 });
+        account = items.find((a) => a.alias === account)?.id ?? account;
+      }
+      const result = await composio.tools.execute(tool, {
+        userId,
+        arguments: args,
+        ...(account && { connectedAccountId: account }),
+        dangerouslySkipVersionCheck: true,
+      });
       const outdated = previous?.memory && {
         hint: `If this result does not match the saved description, save recipe ${id} with status "outdated" and say what changed.`,
       };
@@ -152,9 +171,8 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       }
       if (!record.memory) {
         const info = await composio.tools.getRawComposioToolBySlug(tool);
-        const keys = Object.keys(args).join(", ");
         await api.save_recipes({
-          recipes: [{ id: record.id, description: `${info.description} — ${tool}, args: {${keys}}.`, tags: [info.toolkit?.slug].filter(Boolean), auto: true }],
+          recipes: [{ id: record.id, description: autoRecipe(info, tool, args), tags: [info.toolkit?.slug].filter(Boolean), auto: true }],
         });
       }
       return {
@@ -187,6 +205,12 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     },
   };
   return api;
+}
+
+// A recipe in Markdown from Composio's generic tool description.
+function autoRecipe(info, tool, args) {
+  const keys = Object.keys(args).join(", ");
+  return `### ${info.name || tool}\n\n\`${tool}\` · args: \`{${keys}}\`\n\n${(info.description ?? "").trim()}`;
 }
 
 // AES-256-GCM. Blob = iv (12 bytes) + auth tag (16 bytes) + ciphertext, base64.

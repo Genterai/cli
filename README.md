@@ -15,8 +15,15 @@ intermediate ones too, is found next time. The same tool + args is not saved twi
 If a recipe stops matching its description, the agent saves it with `status: "outdated"` and says why.
 Search then falls back to Composio again.
 
-Good descriptions are general recipes, not one case:
-`<Verb> <object> — TOOL_SLUG, args: {...}. Returns <what>. For another target override <args>.`
+Recipes are Markdown, written as general recipes, not one case:
+
+```md
+### Fetch unread emails
+`GMAIL_FETCH_EMAILS` · args: `{query, max_results?}`
+Returns a list of messages. For other filters override `query`.
+- pitfall: bodies are truncated, open one with `GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID`
+```
+
 plus tags in English and Russian. The MCP server sends these rules to clients as `instructions`.
 
 ## Install
@@ -34,17 +41,17 @@ Without it, `search` uses Composio only.
 
 | tool | input | output |
 | --- | --- | --- |
-| `register_tool` | `{toolkit}` | `{toolkit, connect_url, connection_id}` — open the URL to connect the app |
-| `login` | `{}` | `{user_id, connected: [{toolkit, status}]}` |
+| `register_tool` | `{toolkit, alias?}` | `{toolkit, connect_url, connection_id}` — open the URL to connect the app; an app can be connected several times |
+| `login` | `{}` | `{user_id, connected: [{toolkit, account, alias, status}]}` |
 | `search` | `{query, limit?}` | `[{id, tool, args, description, summary, when, tags, status}]` |
-| `execute` | `{tool, args}` or `{id, args?}`, optional `{description, tags}` | `{id, result, summary, saved?, note?}` |
+| `execute` | `{tool, args}` or `{id, args?}`, optional `{account, description, tags}` | `{id, result, summary, saved?, note?}` |
 | `save_recipes` | `{recipes: [{id, description, tags?, status?}]}` | `[{id, created_at, tags, description, status}]` |
 
 ```bash
 genter register_tool '{"toolkit":"gmail"}'
 genter search '{"query":"unread emails from today"}'
 genter execute '{"tool":"GMAIL_FETCH_EMAILS","args":{"query":"is:unread newer_than:1d"},
-  "description":"Fetch unread emails — GMAIL_FETCH_EMAILS, args: {query, max_results?}. Returns a list of messages. For other filters override query.",
+  "description":"### Fetch unread emails\n`GMAIL_FETCH_EMAILS` · args: `{query, max_results?}`\nReturns a list of messages. For other filters override `query`.",
   "tags":["gmail","inbox","почта","письма"]}'
 ```
 
