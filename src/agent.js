@@ -143,6 +143,7 @@ export function createAgent({
         }
         if (out.thrown) throw new Error(out.thrown);
         const ok = out.result?.successful !== false;
+        if (ok && tool && !isReadOnly(tool)) run.wrote = true;
         const data = ok ? (out.result?.data ?? null) : null;
         const empty = ok && isEmpty(data);
         run.steps.push({ tool: tool ?? input.id, recipe: input.id ?? null, ok, summary: out.summary ?? null, saved: out.id ?? null, ...(out.account && { account: out.account }) });
@@ -192,6 +193,7 @@ export function createAgent({
           run.failures.edit_file = (run.failures.edit_file ?? 0) + 1;
           return { content: JSON.stringify({ ref: n, error: out.error, hint: "Make find the file's exact current text (the lines given above), or read the file first; then call edit_file again." }) };
         }
+        if (!out.unchanged) run.wrote = true;
         return { content: JSON.stringify({ ref: n, committed: !out.unchanged, ...out }) };
       }
       case "search_knowledge": {
@@ -274,6 +276,8 @@ export function createAgent({
     run.seen = new Set();
     run.failed = {}; // "<tool> <args>" -> error of a call that failed in this round
     run.failures = {}; // tool -> failed calls in this round
+    run.wrote = false; // something was written or committed in this round
+    run.pressed = false;
     let result = null;
     try {
       for (let step = 0; step < maxSteps && !result; step++) {
@@ -291,8 +295,20 @@ export function createAgent({
             run.messages.push({ role: "user", content: NO_QUESTIONS });
             continue;
           }
-          // A model that ends without text: the last tool note is the answer.
-          result = { status: "done", answer: message.content?.trim() || lastNote || "Done." };
+          // A write that ends without writing anything (no commit, no write call that worked): sent back once to write,
+          // then it fails. Never "done" for a change that is not there.
+          if (run.writing && !run.wrote) {
+            if (!run.pressed && step < maxSteps - 2) {
+              run.pressed = true;
+              run.messages.push({ role: "user", content: NOTHING_WRITTEN });
+              continue;
+            }
+            result = { status: "failed", answer: `Nothing was written.${message.content?.trim() ? ` ${message.content.trim()}` : ""}` };
+            break;
+          }
+          // A model that ends without text: the last tool note is the answer; with nothing done at all it is not "done".
+          const text = message.content?.trim() || lastNote;
+          result = text || run.steps.length ? { status: "done", answer: text || "Done." } : { status: "failed", answer: "The agent stopped without doing anything or answering." };
           break;
         }
         // Independent calls run in parallel, like the model asked.
@@ -375,6 +391,7 @@ export function createAgent({
         mode,
         sync: mode === "run" && canExecute && !target && SYNC_INTENT.test(task),
         account,
+        writing: Boolean(target), // a write: the run must write, not only read
         // Active connections, so a call one account cannot see is tried on the app's others (executeOn).
         connections: connected.filter((c) => !c.status || c.status === "ACTIVE").map((c) => ({ toolkit: c.toolkit, account: c.account, alias: c.alias, default: c.default })),
         status: "running",
@@ -401,6 +418,7 @@ export function createAgent({
     async send({ run_id, message }) {
       const run = await load(run_id);
       run.steps = [];
+      run.writing = false; // only a write round (write, start with a target) must write
       run.messages.push({ role: "user", content: message });
       return loop(run);
     },
@@ -421,6 +439,7 @@ export function createAgent({
       run.steps = [];
       run.mode = "run"; // a find goes on as a run: writing is what was asked
       run.sync = false;
+      run.writing = true; // this round must write
       if (account) run.account = account;
       run.messages.push({ role: "user", content: writeNote({ ...place, n: register(run, place) }, change) });
       return loop(run);
@@ -527,8 +546,9 @@ export function createAgent({
     const file = editor.file(read.result?.data);
     const text = applyEdits(file.text, edits);
     if (text === file.text) return { unchanged: true, summary: "nothing changed: the edits give the same text" };
-    // Committed on the account the file was read on.
-    const out = await genter.execute({ ...editor.write({ text, sha: file.sha, message: String(message).trim() }), account: read.accountId ?? account, remember: false });
+    // Committed on the account the file was read on. Read on the default one: an account that can read but not push
+    // (403, no permission) gets the commit tried on the app's other connections too.
+    const out = await executeOn(run ?? {}, { ...editor.write({ text, sha: file.sha, message: String(message).trim() }), remember: false }, read.accountId ?? account);
     if (out.result?.successful === false) throw new Error(`Could not commit ${refLabel(place)}: ${errorText(out.result.error)}`);
     const before = file.text.split("\n").length;
     const after = text.split("\n").length;
@@ -556,7 +576,7 @@ export function createAgent({
 
 // A failure that may be this account's view, not the call: what it points to is missing or not visible to it.
 const notHere = (out) =>
-  out?.result?.successful === false && /not found|\b40[134]\b|forbidden|not accessible|permission|unauthori[sz]ed|bad credentials/i.test(errorText(out.result.error));
+  out?.result?.successful === false && /not found|\b40[134]\b|forbidden|not accessible|permission|denied|push access|unauthori[sz]ed|bad credentials/i.test(errorText(out.result.error));
 
 const errorText = (e) => (typeof e === "string" ? e : JSON.stringify(e ?? "failed")).slice(0, 300);
 
@@ -698,6 +718,10 @@ const ASKS = /\?\s*$|let me know|which (one|tool|account)|would you like|do you 
 const NO_QUESTIONS =
   "Do not ask the user. Do the task now with the most likely reading: find the tool (search_tools with the app name and the action), " +
   "run it, and answer from the result; say in one line what you assumed.";
+
+const NOTHING_WRITTEN =
+  "Nothing has been written yet: no commit and no write call worked in this round. Do the change now (edit_file for a file, " +
+  "the write tool otherwise), then answer with what was written and its link. If it cannot be done, say exactly why.";
 
 // A tool that keeps failing is stopped after this many failures in one round, so a run never spins on it.
 const MAX_TOOL_FAILURES = 3;
