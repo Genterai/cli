@@ -3,7 +3,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { z } from "zod";
 import { createGenter } from "../src/genter.js";
 import { tools } from "../src/tools.js";
 
@@ -45,7 +44,7 @@ try {
     userId: process.env.GENTER_USER_ID || config.user_id || "default",
     store,
   });
-  const input = z.object(tools[name].input).parse(args);
+  const input = tools[name].input.parse(args);
   console.log(JSON.stringify(await genter[name](input), null, 2));
 } catch (error) {
   console.error(error.message);
