@@ -1,11 +1,11 @@
 {
   "name": "genter-cli",
-  "version": "0.1.0",
-  "description": "Composio tools with memory: search -> execute -> add_memory, so agents find ready-made tool calls next time.",
+  "version": "0.2.0",
+  "description": "Composio tools with saved call recipes and a fast agent that works from them.",
   "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "bin": { "genter": "bin/genter.js" },
-  "exports": { ".": "./src/genter.js", "./tools": "./src/tools.js" },
+  "exports": { ".": "./src/genter.js", "./tools": "./src/tools.js", "./agent": "./src/agent.js" },
   "files": ["bin", "src"],
   "engines": { "node": ">=20" },
   "dependencies": {

@@ -188,6 +188,12 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       };
     },
 
+    // Full argument schema of a tool, for the agent.
+    async schema(tool) {
+      const t = await composio.tools.getRawComposioToolBySlug(tool);
+      return { tool: t.slug, description: t.description, args: t.inputParameters };
+    },
+
     // Save reusable recipes for calls: each description is embedded for search.
     // Use status "outdated" when a saved recipe no longer does what its description says.
     async save_recipes({ recipes }) {
@@ -214,7 +220,7 @@ function autoRecipe(info, tool, args) {
 }
 
 // AES-256-GCM. Blob = iv (12 bytes) + auth tag (16 bytes) + ciphertext, base64.
-function cipher(secret) {
+export function cipher(secret) {
   const key = createHash("sha256").update(secret).digest();
   return {
     seal(value) {

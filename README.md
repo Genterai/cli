@@ -4,7 +4,15 @@ Composio tools with saved call recipes. An AI agent finds a tool and runs it; ev
 Each recipe also keeps a short summary of what the call returned (topics, names, ids to open it again),
 so `search` finds a past result by its topic, e.g. an email subject, and the agent knows where to dig.
 
+On top of that, an agent does whole tasks fast: before its first LLM call it already has the matching recipes,
+candidate tools with compact arg schemas and the connected apps, so a known task is one tool call, and a result summary
+can answer a question with no call at all. The hosted MCP server exposes only the agent.
+
 ```
+run          → the agent does a task in your apps, recipes first
+find         → read-only agent: answers from past results, reads live data if needed
+continue     → answer a run's question or give a follow-up
+
 search       → saved recipes first, Composio tools if none is valid
 execute      → runs a tool (or repeats a recipe by id) and saves it as a recipe; description + tags make it easier to find
 save_recipes → improves descriptions of several recipes at once; each description is embedded for search
@@ -55,16 +63,39 @@ genter execute '{"tool":"GMAIL_FETCH_EMAILS","args":{"query":"is:unread newer_th
   "tags":["gmail","inbox","почта","письма"]}'
 ```
 
+## Agent
+
+```bash
+genter run '{"task":"reply to Anna\'s last email: Thursday 3pm works"}'
+genter find '{"question":"what did Anna write about the contract?"}'
+genter continue '{"run_id":"...","message":"use my work account"}'
+```
+
+A run ends `done`, `needs_input` (a question), `needs_connection` (a connect link) or `failed`; `continue` picks it up.
+`find` runs only tools that read (by Composio's hint or the verb in the slug). New calls are saved as recipes with
+the agent's description, so the next run finds them. The model is `AGENT_MODEL` on OpenRouter, default `openai/gpt-4.1-mini`.
+
+```js
+import { createAgent } from "genter-cli/agent";
+import { agentTools, agentInstructions, agentResultText } from "genter-cli/tools"; // MCP definitions
+
+const agent = createAgent({ genter, openrouterApiKey, secret, userId, runs }); // runs: get(id), put({id, blob})
+const out = await agent.start({ task: "my meetings tomorrow", mode: "find" });
+await agent.send({ run_id: out.run_id, message: "only the work calendar" });
+```
+
 ## Data
 
 - Raw tool results are never stored, only a 1-3 sentence summary written by an LLM through OpenRouter
   (`SUMMARY_MODEL`, default `openai/gpt-4o-mini`). The same call with the same result is not saved twice.
 - Every record (tool, args, description, summary, embedding) is encrypted with AES-256-GCM before it is stored.
   The store only sees `{id, remembered, blob}`. The CLI keeps its key in `~/.genter/config.json` and data in `~/.genter/calls.json`.
+- Agent runs are encrypted the same way (`~/.genter/runs.json`). Tool results in them are replaced by their summaries
+  before they are stored; a follow-up re-runs the recipe when it needs details.
 
 ## Hosted MCP
 
-The same tools run as a remote MCP server with OAuth (Google or email) in
+The agent tools (`GENTER_RUN_TASK`, `GENTER_FIND`, `GENTER_CONTINUE_TASK`) run as a remote MCP server with OAuth (Google or email) in
 [genter-backend](https://github.com/Genterai/genter-backend).
 
 ## Library

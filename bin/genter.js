@@ -4,8 +4,9 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { createAgent } from "../src/agent.js";
 import { createGenter } from "../src/genter.js";
-import { tools } from "../src/tools.js";
+import { agentResultText, agentTools, tools } from "../src/tools.js";
 
 const dir = join(homedir(), ".genter");
 const read = (file) => (existsSync(join(dir, file)) ? JSON.parse(readFileSync(join(dir, file), "utf8")) : {});
@@ -14,16 +15,30 @@ const write = (file, data) => {
   writeFileSync(join(dir, file), JSON.stringify(data, null, 2));
 };
 
-// Local store: encrypted recipes in ~/.genter/calls.json.
+// Local store: encrypted recipes in ~/.genter/calls.json, agent runs in ~/.genter/runs.json.
 const store = {
   get: async (id) => read("calls.json")[id],
   put: async (row) => write("calls.json", { ...read("calls.json"), [row.id]: row }),
   all: async () => Object.values(read("calls.json")).filter((r) => r.remembered),
 };
+const runs = {
+  get: async (id) => read("runs.json")[id],
+  put: async (row) => write("runs.json", { ...read("runs.json"), [row.id]: row }),
+};
+
+// Agent commands: the same agent the MCP server runs (GENTER_RUN_TASK, GENTER_FIND, GENTER_CONTINUE_TASK).
+const agentCommands = {
+  run: { tool: "GENTER_RUN_TASK", start: (agent, { task, account }) => agent.start({ task, account }) },
+  find: { tool: "GENTER_FIND", start: (agent, { question, account }) => agent.start({ task: question, mode: "find", account }) },
+  continue: { tool: "GENTER_CONTINUE_TASK", start: (agent, args) => agent.send(args) },
+};
 
 const [name, json = "{}"] = process.argv.slice(2);
-if (!tools[name]) {
-  console.log("genter <tool> '<json args>'\n");
+if (!tools[name] && !agentCommands[name]) {
+  console.log("genter <command> '<json args>'\n");
+  console.log(`  ${"run".padEnd(14)} {task, account?}: an agent does the task in your apps, recipes first`);
+  console.log(`  ${"find".padEnd(14)} {question, account?}: read-only agent, answers from past results and live data`);
+  console.log(`  ${"continue".padEnd(14)} {run_id, message}: answer a run's question or give a follow-up\n`);
   for (const [tool, { description }] of Object.entries(tools)) console.log(`  ${tool.padEnd(14)} ${description}`);
   console.log(`\nKeys: genter login '{"composio_api_key":"...","openrouter_api_key":"...","user_id":"me"}'`);
   console.log("or env COMPOSIO_API_KEY, OPENROUTER_API_KEY, GENTER_USER_ID");
@@ -47,8 +62,22 @@ try {
     secret: config.secret,
     store,
   });
-  const input = tools[name].input.parse(args);
-  console.log(JSON.stringify(await genter[name](input), null, 2));
+  if (agentCommands[name]) {
+    const { tool, start } = agentCommands[name];
+    const input = agentTools()[tool].input.parse(args);
+    const agent = createAgent({
+      genter,
+      openrouterApiKey: process.env.OPENROUTER_API_KEY || config.openrouter_api_key,
+      secret: config.secret,
+      userId: process.env.GENTER_USER_ID || config.user_id || "default",
+      runs,
+      onEvent: (e) => e.type === "step" && console.error(`· ${e.tool}`),
+    });
+    console.log(agentResultText(await start(agent, input)));
+  } else {
+    const input = tools[name].input.parse(args);
+    console.log(JSON.stringify(await genter[name](input), null, 2));
+  }
 } catch (error) {
   console.error(error.message);
   process.exit(1);
