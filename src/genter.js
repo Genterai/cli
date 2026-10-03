@@ -166,7 +166,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
         list: async () =>
           (await store.all())
             .map((row) => open(row.blob))
-            .filter((r) => r.kind === "sync" && !r.alias)
+            .filter((r) => r.kind === "sync" && !r.alias && !r.memory?.disabled)
             .map((r) => ({ id: r.id, recipe: r.sync })),
       },
       seal: (value) => seal(value),
@@ -347,7 +347,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       const memories = vector
         ? (await store.all())
             .map((row) => open(row.blob))
-            .filter((r) => r.memory?.embedding && !r.alias)
+            .filter((r) => r.memory?.embedding && !r.alias && !r.memory.disabled) // a disabled recipe is never offered
             // Best of: how the recipe is described, and what its result was about.
             .map((r) => ({ r, score: Math.max(...[r.memory.embedding, r.summaryEmbedding].filter(Boolean).map((e) => cosine(vector, e))) }))
             .filter(({ score }) => score >= minScore)
@@ -551,10 +551,20 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
           const embedding = await embed(
             `${description}\nresult: ${record.summary ?? ""}\ntags: ${tags.join(", ")}\ntool: ${record.tool}\nargs: ${JSON.stringify(record.args)}`,
           );
-          await save({ ...record, memory: { created_at, tags, description, ...(short && { short }), status, embedding, ...(auto && { auto }) } });
+          const { disabled } = record.memory ?? {};
+          await save({ ...record, memory: { created_at, tags, description, ...(short && { short }), status, embedding, ...(auto && { auto }), ...(disabled && { disabled }) } });
           return { id: record.id, created_at, tags, description, short, status };
         }),
       );
+    },
+
+    // Turn a recipe off (search and the agent skip it, it stays saved) or back on. disabled holds when it was turned off.
+    async disable_recipe({ id, disabled = true }) {
+      const record = await load(id);
+      if (!record?.memory) throw new Error(`No recipe ${id}`);
+      const { disabled: _, ...memory } = record.memory;
+      await save({ ...record, memory: disabled ? { ...memory, disabled: new Date().toISOString() } : memory });
+      return { id: record.id, disabled: Boolean(disabled) };
     },
   };
   return api;
