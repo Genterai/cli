@@ -486,7 +486,8 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     // `account` picks a connection (from login) when an app is connected several times.
     // Every successful call becomes a recipe: with the agent's description if given, otherwise Composio's.
     // remember: false runs it without saving it (an inner step, e.g. reading and committing a file for an edit).
-    async execute({ id, tool, args = {}, account, description, short, tags, remember = true }) {
+    // (`remember: keep`: a parameter named remember hid the remember() below, and every saved call threw.)
+    async execute({ id, tool, args = {}, account, description, short, tags, remember: keep = true }) {
       const previous = id && (await load(id));
       if (previous?.kind === "sync") throw new Error(`${id} is a sync recipe: its result is kept as embeddings (search_knowledge); live_sync or Run now refreshes it`);
       if (previous) {
@@ -507,7 +508,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
         hint: `If this result does not match the saved description, save recipe ${id} with status "outdated" and say what changed.`,
       };
       if (!result.successful) return { result, ...outdated }; // failed calls are not recipes
-      if (!remember) return { result };
+      if (!keep) return { result };
 
       // The result goes back now; summary, embedding and the recipe are saved after (see remember).
       // Repeating a recipe with its own args answers with its id; a new call gets an id of its own right away.
