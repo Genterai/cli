@@ -543,6 +543,10 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     // Triggers that fire when a call's result may change, picked by a model: [{ slug, config, label }].
     pick_triggers: (args) => pickTriggers(args).catch(() => []),
 
+    // Every tool of an app as Composio describes it ({ slug, description, inputParameters, tags }), cached for an hour:
+    // which of them write at a reference (refs.js writeHints).
+    catalog: ({ toolkit }) => toolsOf([toolkit]),
+
     // The tools of an app that read, compact, for planning what can be synced: [{ tool, description, args }].
     async app_tools({ toolkit }) {
       // GitHub alone has ~900 tools: a lower cap drops its repos, issues and pull requests.

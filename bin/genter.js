@@ -45,11 +45,12 @@ const runs = {
   put: async (row) => write("runs.json", { ...read("runs.json"), [row.id]: row }),
 };
 
-// Agent commands: the same agent the MCP server runs (GENTER_RUN_TASK, GENTER_FIND, GENTER_CONTINUE_TASK).
+// Agent commands: the same agent the MCP server runs (GENTER_RUN_TASK, GENTER_FIND, GENTER_CONTINUE_TASK, GENTER_WRITE).
 const agentCommands = {
   run: { tool: "GENTER_RUN_TASK", start: (agent, { task, account }) => agent.start({ task, account }) },
   find: { tool: "GENTER_FIND", start: (agent, { question, account }) => agent.start({ task: question, mode: "find", account }) },
   continue: { tool: "GENTER_CONTINUE_TASK", start: (agent, args) => agent.send(args) },
+  write: { tool: "GENTER_WRITE", start: (agent, args) => agent.write(args) },
 };
 
 const [name, json = "{}"] = process.argv.slice(2);
@@ -57,7 +58,8 @@ if (!tools[name] && !agentCommands[name]) {
   console.log("genter <command> '<json args>'\n");
   console.log(`  ${"run".padEnd(14)} {task, account?}: an agent does the task in your apps, recipes first`);
   console.log(`  ${"find".padEnd(14)} {question, account?}: read-only agent, answers from past results and live data`);
-  console.log(`  ${"continue".padEnd(14)} {run_id, message}: answer a run's question or give a follow-up\n`);
+  console.log(`  ${"continue".padEnd(14)} {run_id, message}: answer a run's question or give a follow-up`);
+  console.log(`  ${"write".padEnd(14)} {run_id, ref, change} or {run_id, ref, tool, args}: write where a result's reference [n] (or a link) points\n`);
   for (const [tool, { description }] of Object.entries(tools)) console.log(`  ${tool.padEnd(14)} ${description}`);
   console.log(`\nKeys: genter login '{"composio_api_key":"...","openrouter_api_key":"...","user_id":"me"}'`);
   console.log("or env COMPOSIO_API_KEY, OPENROUTER_API_KEY, GENTER_USER_ID");
@@ -94,7 +96,7 @@ try {
   };
   if (agentCommands[name]) {
     const { tool, start } = agentCommands[name];
-    const input = agentTools()[tool].input.parse(args);
+    const input = agentTools({ write: true })[tool].input.parse(args);
     const agent = createAgent({
       genter,
       openrouterApiKey: process.env.OPENROUTER_API_KEY || config.openrouter_api_key,
@@ -103,7 +105,7 @@ try {
       runs,
       onEvent: (e) => e.type === "step" && console.error(`· ${e.tool}`),
     });
-    console.log(agentResultText(await start(agent, input)));
+    console.log(agentResultText(await start(agent, input), { write: true }));
   } else {
     const input = tools[name].input.parse(args);
     const res = await (sourceCommands[name] ?? genter[name])(input);

@@ -1,0 +1,2127 @@
+{
+  "linear": {
+    "tools": [
+      {
+        "slug": "LINEAR_LIST_LINEAR_ISSUES",
+        "description": "Lists non-archived Linear issues; if project_id is not specified, issues from all accessible projects are returned.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": [],
+          "properties": {
+            "after": {"type": "string", "description": "Cursor for pagination (opaque string). Use the exact `endCursor` value from the previous..."},
+            "first": {"type": "integer", "description": "Number of issues to return. Maximum 250 per page. To retrieve all issues, loop using..."},
+            "project_id": {"type": "string", "description": "ID of the project to filter issues by. If provided, only issues belonging to this project will..."},
+            "assignee_id": {"type": "string", "description": "UUID of the user to filter issues by assignee. Use 'me' to filter by the current authenticated..."},
+            "original_cursor": {"type": "string", "description": "The original cursor value before it was reset."},
+            "include_transitions": {"type": "boolean", "description": "When true, includes the full status transition history for each issue, along with timestamps and..."},
+            "cursor_was_corrupted": {"type": "boolean", "description": "Indicates whether the pagination cursor was corrupted and reset."}
+          }
+        }
+      },
+      {
+        "slug": "LINEAR_LIST_ISSUES_BY_TEAM_ID",
+        "description": "Tool to list all issues for a specific Linear team, scoped by team ID.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["team_id"],
+          "properties": {
+            "after": {"type": "string", "description": "Opaque pagination cursor for fetching the next page of results. MUST be the exact `end_cursor`..."},
+            "first": {"type": "integer", "description": "Number of issues to return per page (forward pagination). Must be between 1 and 250."},
+            "team_id": {"type": "string", "description": "The unique identifier (UUID) of the Linear team whose issues you want to list. This is the..."},
+            "include_archived": {"type": "boolean", "description": "Whether to include archived issues in the results. Default is false (only active issues are..."}
+          }
+        }
+      },
+      {
+        "slug": "LINEAR_SEARCH_ISSUES",
+        "description": "Search Linear issues using full-text search across identifier, title, and description.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["query"],
+          "properties": {
+            "after": {"type": "string", "description": "Cursor for pagination. Use the endCursor from the previous response's page_info to fetch the..."},
+            "first": {"type": "integer", "description": "Number of issues to return per page. Must be between 1 and 50. Defaults to 25."},
+            "query": {"type": "string", "description": "The search query text. Searches across issue identifier (e.g., 'ENG-123'), title, and..."},
+            "include_archived": {"type": "boolean", "description": "Whether to include archived issues in search results. Defaults to false (only active issues)."}
+          }
+        }
+      },
+      {
+        "slug": "LINEAR_GET_LINEAR_ISSUE",
+        "description": "Retrieves an existing Linear issue's comprehensive details, including id, identifier, title, description, timestamps, state, team, creator, attachments...",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["issue_id"],
+          "properties": {
+            "issue_id": {"type": "string", "description": "ID of the Linear issue. Must be in one of two formats: (1) UUID format: a 36-character string..."}
+          }
+        }
+      },
+      {
+        "slug": "LINEAR_LIST_LINEAR_PROJECTS",
+        "description": "Retrieves all projects from the Linear account.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": [],
+          "properties": {
+            "after": {"type": "string", "description": "Cursor for pagination. Use the `endCursor` from the previous response's `page_info` to fetch the..."},
+            "first": {"type": "integer", "description": "Number of projects to return per page. Use with `after` to paginate through all projects."}
+          }
+        }
+      },
+      {
+        "slug": "LINEAR_GET_LINEAR_PROJECT",
+        "description": "Retrieves a single Linear project by its unique identifier.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["project_id"],
+          "properties": {
+            "project_id": {"type": "string", "description": "The unique identifier (UUID) of the Linear project to retrieve."},
+            "include_teams": {"type": "boolean", "description": "Whether to include teams associated with the project in the response."},
+            "include_members": {"type": "boolean", "description": "Whether to include project members in the response."},
+            "include_initiatives": {"type": "boolean", "description": "Whether to include related initiatives in the response."}
+          }
+        }
+      },
+      {
+        "slug": "LINEAR_LIST_LINEAR_STATES",
+        "description": "Retrieves all workflow states for a specified team in Linear, representing the stages an issue progresses through in that team's workflow.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["team_id"],
+          "properties": {
+            "after": {"type": "string", "description": "Cursor for pagination. Use the `endCursor` value from the previous response's `page_info` to..."},
+            "first": {"type": "integer", "description": "Number of states to return per page. Maximum 250. Use with `after` to paginate through all states."},
+            "team_id": {"type": "string", "description": "UUID of a team in your Linear workspace. Must be a valid UUID (e.g...."}
+          }
+        }
+      },
+      {
+        "slug": "LINEAR_UPDATE_ISSUE",
+        "description": "Updates an existing Linear issue using its `issue_id`; requires at least one other attribute for modification, and all provided entity IDs (for state...",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["issueId"],
+          "properties": {
+            "title": {"type": "string", "description": "New title for the issue."},
+            "teamId": {"type": "string", "description": "UUID of the team to move the issue to. Use this to transfer an issue from one team to another...."},
+            "cycleId": {"type": "string", "description": "UUID of the cycle (sprint) to assign this issue to. Must be a valid UUID in the format..."},
+            "dueDate": {"type": "string", "description": "New due date in ISO8601 datetime format or YYYY-MM-DD TimelessDate format (e.g., '2024-12-31' or..."},
+            "issueId": {"type": "string", "description": "Identifier of the issue to update. Accepts either UUID format (e.g...."},
+            "stateId": {"type": "string", "description": "UUID of the workflow state to transition the issue to. Must be a valid UUID in the format..."},
+            "estimate": {"type": "integer", "description": "Estimate points for the issue (e.g., 1, 2, 3, 5, 8). Teams may use different estimation types..."},
+            "labelIds": {"type": "array", "description": "List of label identifiers to set; replaces all existing labels. An empty list removes all labels."},
+            "parentId": {"type": "string", "description": "UUID of an existing issue to set as this issue's parent (making this issue a sub-issue). The..."},
+            "priority": {"type": "integer", "description": "Priority: 0 (No), 1 (Urgent), 2 (High), 3 (Normal), 4 (Low)."},
+            "projectId": {"type": "string", "description": "UUID of the project to associate the issue with. Must be a valid UUID in the format..."},
+            "assigneeId": {"type": "string", "description": "UUID of the user to assign to the issue. Must be a valid user UUID from your Linear workspace..."},
+            "description": {"type": "string", "description": "New Markdown description for the issue."}
+          }
+        }
+      },
+      {
+        "slug": "LINEAR_CREATE_LINEAR_COMMENT",
+        "description": "Creates a new comment on a specified Linear issue.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["issueId", "body"],
+          "properties": {
+            "body": {"type": "string", "description": "Non-empty comment content, in plain text or Markdown. Must not be whitespace-only."},
+            "issueId": {"type": "string", "description": "ID of the Linear issue to add the comment to. Must be in one of two formats: (1) UUID format: a..."}
+          }
+        }
+      },
+      {
+        "slug": "LINEAR_CREATE_COMMENT_REACTION",
+        "description": "Tool to add a reaction to an existing Linear comment.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["comment_id", "emoji"],
+          "properties": {
+            "emoji": {"type": "string", "description": "Emoji for the reaction. Supports Unicode emojis or shortcodes like ':thumbsup:'."},
+            "comment_id": {"type": "string", "description": "Identifier of the existing Linear comment to add the reaction to."}
+          }
+        }
+      },
+      {
+        "slug": "LINEAR_CREATE_LINEAR_ISSUE",
+        "description": "Creates a new issue in a specified Linear project and team, requiring team_id and title, and allowing optional properties like description, assignee, state...",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["team_id", "title"],
+          "properties": {
+            "title": {"type": "string", "description": "The title of the new issue."},
+            "team_id": {"type": "string", "description": "UUID of the team responsible for this issue. IMPORTANT: You must use a valid team UUID that..."},
+            "cycle_id": {"type": "string", "description": "UUID of the cycle (sprint) to assign this issue to. Cycles are time-bound periods used to..."},
+            "due_date": {"type": "string", "description": "The target completion date for the issue in ISO8601 datetime format or YYYY-MM-DD TimelessDate..."},
+            "estimate": {"type": "integer", "description": "The estimated complexity or effort for the issue, represented as a numerical point value (e.g...."},
+            "priority": {"type": "integer", "description": "Priority of the issue. 0 indicates no priority, 1 is Urgent, 2 is High, 3 is Normal, and 4 is Low."},
+            "state_id": {"type": "string", "description": "UUID of the workflow state to assign to the issue (must be a valid UUID format, not a state name..."},
+            "label_ids": {"type": "array", "description": "A list of UUIDs for labels to be added to this issue. EXCLUSIVE GROUP CONSTRAINT: Linear..."},
+            "parent_id": {"type": "string", "description": "UUID of an existing issue to set as the parent of this new issue, creating a sub-issue..."},
+            "project_id": {"type": "string", "description": "UUID of the project to associate with this issue. Must be a valid UUID format..."},
+            "assignee_id": {"type": "string", "description": "UUID of the user to assign to this issue (must be a valid UUID format) User must be a member of..."},
+            "description": {"type": "string", "description": "A detailed description of the issue, which can include markdown formatting."}
+          }
+        }
+      },
+      {
+        "slug": "LINEAR_DELETE_LINEAR_ISSUE",
+        "description": "Archives an existing Linear issue by its ID, which is Linear's standard way of deleting issues; the operation is idempotent.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["issue_id"],
+          "properties": {
+            "issue_id": {"type": "string", "description": "ID of the Linear issue to be archived. Must be in one of two formats: (1) UUID format: a..."}
+          }
+        }
+      },
+      {
+        "slug": "LINEAR_ARCHIVE_ISSUE",
+        "description": "Archives an existing Linear issue by its ID, removing it from active views while preserving its data for future reference.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["issue_id"],
+          "properties": {
+            "issue_id": {"type": "string", "description": "ID of the Linear issue to be archived. Must be in one of two formats: (1) UUID format: a..."}
+          }
+        }
+      },
+      {
+        "slug": "LINEAR_UPDATE_LINEAR_PROJECT",
+        "description": "Tool to update an existing Linear project.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["project_id"],
+          "properties": {
+            "icon": {"type": "string", "description": "Icon identifier for the project."},
+            "name": {"type": "string", "description": "New name for the project."},
+            "color": {"type": "string", "description": "Color for the project (hex color code)."},
+            "state": {"type": "string", "description": "The state of the project. Standard values: 'backlog', 'planned', 'started', 'completed'..."},
+            "lead_id": {"type": "string", "description": "The UUID of the user who will lead this project. Must be a valid Linear user UUID. Use the..."},
+            "priority": {"type": "integer", "description": "Priority level of the project. 0 = No priority, 1 = Urgent, 2 = High, 3 = Normal, 4 = Low."},
+            "status_id": {"type": "string", "description": "The UUID of the project status to set. Must be a valid Linear project status UUID."},
+            "project_id": {"type": "string", "description": "The unique identifier (UUID) of the project to update. This is the internal Linear ID, not the..."},
+            "start_date": {"type": "string", "description": "New planned start date. Accepts various formats including YYYY-MM-DD, ISO datetime strings..."},
+            "description": {"type": "string", "description": "New description for the project. Supports plain text."},
+            "target_date": {"type": "string", "description": "New planned completion date. Accepts various formats including YYYY-MM-DD, ISO datetime strings..."}
+          }
+        }
+      },
+      {
+        "slug": "LINEAR_ARCHIVE_PROJECT",
+        "description": "Archives an existing Linear project by its UUID, removing it from active views.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["project_id"],
+          "properties": {
+            "project_id": {"type": "string", "description": "UUID of the Linear project to be archived. Must be a 36-character UUID string with hyphens..."}
+          }
+        }
+      }
+    ],
+    "list": {
+      "tool": "LINEAR_LIST_LINEAR_ISSUES",
+      "args": {"first": 20, "assignee_id": "me"},
+      "data": {
+        "issues": [
+          {
+            "id": "3f1c9a2e-7b4d-4e8a-9c21-5d6e7f8a9b01",
+            "identifier": "ENG-142",
+            "title": "Retry webhook delivery on 5xx responses",
+            "url": "https://linear.app/acme/issue/ENG-142/retry-webhook-delivery-on-5xx-responses",
+            "description": "Webhooks to customer endpoints are dropped when they return 502/503. Add exponential backoff with 5 attempts.",
+            "priority": 2,
+            "createdAt": "2026-09-22T09:14:03.511Z",
+            "updatedAt": "2026-10-02T16:41:27.090Z",
+            "startedAt": "2026-09-29T08:02:11.000Z",
+            "team": {"id": "9cfb482a-81e3-4154-b5b9-2c805e70a02d", "name": "Engineering"},
+            "state": {"name": "In Progress"},
+            "labels": {
+              "nodes": [
+                {"id": "c1f6e2b0-1a2b-3c4d-5e6f-7a8b9c0d1e2f", "name": "Bug"}
+              ]
+            },
+            "project": {"id": "ef19b35e-ce4f-4132-9705-811d4d6c8c08", "name": "Webhooks v2"},
+            "assignee": {"id": "4c7e9a1b-2d3f-4e5a-8b6c-7d8e9f0a1b2c", "name": "Dana Miller", "email": "dana.miller@example.com"}
+          },
+          {
+            "id": "a7d2e4f6-1b3c-4d5e-8f90-12ab34cd56ef",
+            "identifier": "ENG-157",
+            "title": "Add audit log export to CSV",
+            "url": "https://linear.app/acme/issue/ENG-157/add-audit-log-export-to-csv",
+            "description": "Admins need to export the last 90 days of audit events as CSV from Settings > Security.",
+            "priority": 3,
+            "createdAt": "2026-09-30T13:27:45.002Z",
+            "updatedAt": "2026-10-01T10:05:12.384Z",
+            "team": {"id": "9cfb482a-81e3-4154-b5b9-2c805e70a02d", "name": "Engineering"},
+            "state": {"name": "Todo"},
+            "labels": {
+              "nodes": [
+                {"id": "d4e8f0a0-2b3c-4d5e-6f7a-8b9c0d1e2f3a", "name": "Feature"}
+              ]
+            },
+            "project": {"id": "5b2a9c7e-3d1f-4a6b-8e0c-2f4d6a8b0c1e", "name": "Enterprise Readiness"},
+            "assignee": {"id": "4c7e9a1b-2d3f-4e5a-8b6c-7d8e9f0a1b2c", "name": "Dana Miller", "email": "dana.miller@example.com"}
+          }
+        ],
+        "page_info": {"endCursor": "YTdkMmU0ZjYtMWIzYy00ZDVlLThmOTAtMTJhYjM0Y2Q1NmVm", "hasNextPage": true}
+      }
+    }
+  },
+  "slack": {
+    "tools": [
+      {
+        "slug": "SLACK_FETCH_CONVERSATION_HISTORY",
+        "description": "Fetches a chronological list of messages and events from a specified Slack conversation, accessible by the authenticated user/bot, with options for...",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["channel"],
+          "properties": {
+            "limit": {"type": "integer", "description": "Maximum number of messages to request in this single Slack API call (1-1000). Defaults to 100...."},
+            "cursor": {"type": "string", "description": "Pagination cursor from `response_metadata.next_cursor` of a previous response. Omit this for the..."},
+            "latest": {"type": "string", "description": "End of the time range of messages to include in results. Accepts a Unix timestamp or a Slack..."},
+            "oldest": {"type": "string", "description": "Start of the time range of messages to include in results. Accepts a Unix timestamp or a Slack..."},
+            "channel": {"type": "string", "description": "The ID of the public channel, private channel, direct message, or multi-person direct message to..."},
+            "inclusive": {"type": "boolean", "description": "When true, includes messages at the exact 'oldest' or 'latest' boundary timestamps in results...."},
+            "include_all_metadata": {"type": "boolean", "description": "Return all metadata associated with messages in the conversation history. When true, includes..."}
+          }
+        }
+      },
+      {
+        "slug": "SLACK_FETCH_MESSAGE_THREAD_FROM_A_CONVERSATION",
+        "description": "Retrieves replies to a specific parent message in a Slack conversation, using the channel ID and the parent message's timestamp (`ts`).",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": [],
+          "properties": {
+            "ts": {"type": "string", "description": "Timestamp of the parent message in the thread. Must be an existing message. If no replies, only..."},
+            "limit": {"type": "integer", "description": "Maximum number of messages to return. Fewer may be returned even if more are available."},
+            "cursor": {"type": "string", "description": "Pagination cursor from `response_metadata.next_cursor` of a previous response to get subsequent..."},
+            "latest": {"type": "string", "description": "Latest message timestamp in the time range to include results."},
+            "oldest": {"type": "string", "description": "Oldest message timestamp in the time range to include results. Must be a UTC-based Slack ts..."},
+            "channel": {"type": "string", "description": "ID of the conversation (channel, direct message, etc.) to fetch the thread from. Must be a..."},
+            "inclusive": {"type": "boolean", "description": "Whether to include messages with `latest` or `oldest` timestamps in results. Effective only if..."},
+            "include_all_metadata": {"type": "boolean", "description": "Return all metadata associated with messages in the thread. When true, includes additional..."}
+          }
+        }
+      },
+      {
+        "slug": "SLACK_SEARCH_MESSAGES",
+        "description": "Workspace‑wide Slack message search with date ranges and filters.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["query"],
+          "properties": {
+            "page": {"type": "integer", "description": "Page number for manual pagination control. Cannot be used with auto_paginate - choose either..."},
+            "sort": {"type": "string", "description": "Sort results by `score` (relevance) or `timestamp` (chronological)."},
+            "count": {"type": "integer", "description": "Without auto_paginate: Number of messages per page (max 100). With auto_paginate: Total messages..."},
+            "query": {"type": "string", "description": "Search query supporting various modifiers for precise filtering: **Location Modifiers:** -..."},
+            "cursor": {"type": "string", "description": "Cursor for cursor-mark pagination. Use `*` for the first call, then use `next_cursor` from the..."},
+            "team_id": {"type": "string", "description": "ID of the Slack workspace (team) to operate on, e.g. T0123456789. Use only with org-level..."},
+            "sort_dir": {"type": "string", "description": "Sort direction: `asc` (ascending) or `desc` (descending)."},
+            "highlight": {"type": "boolean", "description": "Enable highlighting of search terms in results."},
+            "auto_paginate": {"type": "boolean", "description": "When enabled, 'count' becomes the total messages desired instead of per-page limit. System..."}
+          }
+        }
+      },
+      {
+        "slug": "SLACK_FIND_CHANNELS",
+        "description": "Find channels in a Slack workspace by any criteria - name, topic, purpose, or description.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["query"],
+          "properties": {
+            "limit": {"type": "integer", "description": "Maximum number of conversations to request from Slack in this single API page before local..."},
+            "query": {"type": "string", "description": "Search query to find channels. Searches across channel name, topic, purpose, and description..."},
+            "types": {"type": "string", "description": "Comma-separated list of channel types to include: `public_channel`, `private_channel`, `mpim`..."},
+            "cursor": {"type": "string", "description": "Pagination cursor from response_metadata.next_cursor of a previous response. Omit for the first..."},
+            "team_id": {"type": "string", "description": "ID of the Slack workspace (team) to operate on, e.g. T0123456789. Use only with org-level..."},
+            "exact_match": {"type": "boolean", "description": "When true, only return channels whose name exactly matches the query (case-insensitive). Also..."},
+            "member_only": {"type": "boolean", "description": "Only return channels the user is a member of. Defaults to false."},
+            "exclude_archived": {"type": "boolean", "description": "Exclude archived channels from search results. Defaults to true."}
+          }
+        }
+      },
+      {
+        "slug": "SLACK_LIST_CONVERSATIONS",
+        "description": "List conversations (channels/DMs) accessible to a specified user (or the authenticated user if no user ID is provided), respecting shared membership for...",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": [],
+          "properties": {
+            "user": {"type": "string", "description": "The ID of the user whose conversations will be listed. If not provided, conversations for the..."},
+            "limit": {"type": "integer", "description": "The maximum number of items to return per page. Must be an integer, typically between 1 and 1000..."},
+            "types": {"type": "string", "description": "Comma-separated list of conversation types to include: `public_channel` (regular #channels..."},
+            "cursor": {"type": "string", "description": "Pagination cursor for retrieving the next set of results. Obtain this from the `next_cursor`..."},
+            "team_id": {"type": "string", "description": "ID of the Slack workspace (team) to operate on, e.g. T0123456789. Use only with org-level..."},
+            "exclude_archived": {"type": "boolean", "description": "Set to `true` to exclude archived channels from the list. If `false` or omitted, archived..."}
+          }
+        }
+      },
+      {
+        "slug": "SLACK_RETRIEVE_MESSAGE_PERMALINK_URL",
+        "description": "Retrieves a permalink URL for a specific message in a Slack channel or conversation; the permalink respects Slack's privacy settings.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["channel", "message_ts"],
+          "properties": {
+            "channel": {"type": "string", "description": "The ID of the conversation or channel containing the message. This can be a public channel ID, a..."},
+            "message_ts": {"type": "string", "description": "A message's `ts` value (timestamp), uniquely identifying it within a channel. Example..."}
+          }
+        }
+      },
+      {
+        "slug": "SLACK_FETCH_ITEM_REACTIONS",
+        "description": "Fetches reactions for a Slack message, file, or file comment.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": [],
+          "properties": {
+            "file": {"type": "string", "description": "File ID. Use instead of channel/timestamp or file comment ID."},
+            "full": {"type": "boolean", "description": "If true, returns the complete list of users for each reaction."},
+            "channel": {"type": "string", "description": "Channel ID. Required if `timestamp` is provided and no file or file comment ID is given."},
+            "timestamp": {"type": "string", "description": "Message timestamp (e.g., '1234567890.123456'). Required if `channel` is provided and no file or..."},
+            "file_comment": {"type": "string", "description": "File comment ID. Use instead of channel/timestamp or file ID."}
+          }
+        }
+      },
+      {
+        "slug": "SLACK_SEND_MESSAGE",
+        "description": "Posts a message to a Slack channel, DM, or private group.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["channel"],
+          "properties": {
+            "blocks": {"type": "array", "description": "Use this instead of `markdown_text` only when you need Slack Block Kit capabilities that..."},
+            "channel": {"type": "string", "description": "ID or name of the channel, private group, or IM channel to send the message to. Can be specified..."},
+            "thread_ts": {"type": "string", "description": "Timestamp (`ts`) of an existing message to make this a threaded reply. Use `ts` of the parent..."},
+            "unfurl_links": {"type": "boolean", "description": "Enable unfurling of text-based URLs. Defaults `false` for bots, `true` if `as_user` is `true`."},
+            "unfurl_media": {"type": "boolean", "description": "Enable media previews (images, videos) from URLs. Set to `true` (default) to show media..."},
+            "fallback_text": {"type": "string", "description": "Optional only when using `blocks`. Maps to Slack's top-level `text` field for notifications..."},
+            "markdown_text": {"type": "string", "description": "Use this for normal LLM-written message content. Pass standard Markdown exactly as written; this..."},
+            "reply_broadcast": {"type": "boolean", "description": "If `true` for a threaded reply, also posts to main channel. Defaults to `false`."}
+          }
+        }
+      },
+      {
+        "slug": "SLACK_SEND_EPHEMERAL_MESSAGE",
+        "description": "Sends an ephemeral message visible only to the specified `user` in a channel; other channel members cannot see it.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["channel", "user"],
+          "properties": {
+            "text": {"type": "string", "description": "The message text to display. Required unless 'blocks' or 'attachments' is provided. When using..."},
+            "user": {"type": "string", "description": "User ID of the user to send the ephemeral message to."},
+            "parse": {"type": "string", "description": "Controls text parsing behavior. Use 'full' to enable automatic linking of @mentions, #channels..."},
+            "blocks": {"type": "string", "description": "A JSON-based array of structured blocks, presented as a URL-encoded string."},
+            "as_user": {"type": "boolean", "description": "Legacy parameter for authenticated user authorship. Defaults to true without chat:write:bot..."},
+            "channel": {"type": "string", "description": "Channel, private group, or DM channel to send message to. Can be an encoded ID, or a name...."},
+            "icon_url": {"type": "string", "description": "URL to an image to use as the icon for this message. Must be used in conjunction with as_user..."},
+            "username": {"type": "string", "description": "Set your bot's user name. Must be used in conjunction with as_user set to false, otherwise..."},
+            "thread_ts": {"type": "string", "description": "Provide another message's ts value to make this message a reply. Avoid using a reply's ts value..."},
+            "icon_emoji": {"type": "string", "description": "Emoji to use as the icon for this message. Overrides icon_url. Must be used in conjunction with..."},
+            "link_names": {"type": "boolean", "description": "Find and link channel names and usernames."},
+            "attachments": {"type": "string", "description": "This is Slack's legacy 'secondary attachments' field for adding rich formatting elements like..."},
+            "markdown_text": {"type": "string", "description": "PREFERRED: Write your ephemeral message in markdown for nicely formatted display. Supports..."}
+          }
+        }
+      },
+      {
+        "slug": "SLACK_UPDATES_A_SLACK_MESSAGE",
+        "description": "Updates a Slack message by timestamp.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["channel", "ts"],
+          "properties": {
+            "ts": {"type": "string", "description": "Timestamp of the message to update (string, Unix time with microseconds, e.g...."},
+            "blocks": {"type": "array", "description": "Use this instead of `markdown_text` only when updating to Slack Block Kit capabilities that..."},
+            "as_user": {"type": "boolean", "description": "Pass `true` to update the message as the authenticated user; applicable to bot users as well."},
+            "channel": {"type": "string", "description": "ID or name of the channel, private group, or IM channel containing the message to update. Can be..."},
+            "file_ids": {"type": "array", "description": "Array of file IDs to attach to the updated message. Files must already be uploaded to Slack."},
+            "metadata": {"type": "object", "description": "JSON object containing `event_type` (string) and `event_payload` (dict) fields for adding custom..."},
+            "fallback_text": {"type": "string", "description": "Optional only when using `blocks`. Maps to Slack's top-level `text` field for notifications..."},
+            "markdown_text": {"type": "string", "description": "Use this for normal LLM-written updated message content. Pass standard Markdown exactly as..."},
+            "reply_broadcast": {"type": "boolean", "description": "If `true` and the message is a thread reply, broadcast the updated message to the channel...."}
+          }
+        }
+      },
+      {
+        "slug": "SLACK_ADD_REACTION_TO_AN_ITEM",
+        "description": "Adds a specified emoji reaction to an existing message in a Slack channel, identified by its timestamp; does not remove or retrieve reactions.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["channel", "name", "timestamp"],
+          "properties": {
+            "name": {"type": "string", "description": "Name of the emoji to add as a reaction (e.g., 'thumbsup'). This is the emoji name without..."},
+            "channel": {"type": "string", "description": "ID of the channel where the message to add the reaction to was posted."},
+            "timestamp": {"type": "string", "description": "Timestamp of the message to which the reaction will be added. This is a unique identifier for..."}
+          }
+        }
+      },
+      {
+        "slug": "SLACK_DELETES_A_MESSAGE_FROM_A_CHAT",
+        "description": "Deletes a message, identified by its channel ID and timestamp, from a Slack channel, private group, or direct message conversation; the authenticated user...",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": [],
+          "properties": {
+            "ts": {"type": "string", "description": "Timestamp of the message to be deleted. Must be the exact Slack message timestamp string with..."},
+            "as_user": {"type": "boolean", "description": "Legacy parameter for classic Slack apps. Pass true to delete the message as the authed user. Bot..."},
+            "channel": {"type": "string", "description": "The ID of the channel, private group, or direct message conversation containing the message to..."}
+          }
+        }
+      },
+      {
+        "slug": "SLACK_UPLOAD_OR_CREATE_A_FILE_IN_SLACK",
+        "description": "Upload files, images, screenshots, documents, or any media to Slack channels or threads.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": [],
+          "properties": {
+            "file": {"type": "any", "description": "File(s) to upload. Accepts a single file or a list of files. At least one of 'content' or 'file'..."},
+            "title": {"type": "string", "description": "Title of the file, displayed in Slack."},
+            "token": {"type": "string", "description": "Authentication token; requires 'files:write' scope."},
+            "content": {"type": "string", "description": "Text content of the file; use for text-based files. At least one of 'content' or 'file' must be..."},
+            "channels": {"type": "string", "description": "Channel ID where the file will be shared; if omitted, file is private to the uploader. Accepts..."},
+            "filename": {"type": "string", "description": "Filename to be displayed in Slack. Required when using 'content' parameter."},
+            "filetype": {"type": "string", "description": "Deprecated: File type detection is now automatic. This parameter is preserved for backward..."},
+            "thread_ts": {"type": "string", "description": "Timestamp of a parent message to upload this file as a reply; use the original message's 'ts'..."},
+            "initial_comment": {"type": "string", "description": "Optional message to introduce the file in specified 'channels'."}
+          }
+        }
+      },
+      {
+        "slug": "SLACK_OPEN_DM",
+        "description": "Opens or resumes a Slack direct message (DM) or multi-person direct message (MPIM) by providing either user IDs or an existing channel ID.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": [],
+          "properties": {
+            "users": {"type": "string", "description": "Comma-separated string of user IDs (1 for a DM, or 2-8 for an MPIM) to open/resume a..."},
+            "channel": {"type": "string", "description": "ID or name of an existing DM or MPIM channel to open/resume. Either `channel` or `users` must be..."},
+            "return_im": {"type": "boolean", "description": "If `true`, returns the full DM channel object. Applies only when opening a DM via a single user..."},
+            "prevent_creation": {"type": "boolean", "description": "Do not create a direct message or multi-person direct message. This is used to see if there is..."}
+          }
+        }
+      }
+    ],
+    "list": {
+      "tool": "SLACK_FETCH_CONVERSATION_HISTORY",
+      "args": {"channel": "C07QX2M4B1F", "limit": 20},
+      "data": {
+        "ok": true,
+        "messages": [
+          {
+            "type": "message",
+            "user": "U05AB12CD3E",
+            "text": "Heads up: the staging deploy for v2.14 is blocked on the payments migration. Can someone from billing take a look?",
+            "ts": "1791031502.418929",
+            "thread_ts": "1791031502.418929",
+            "reply_count": 3,
+            "reply_users": ["U06FG45HI6J", "U05AB12CD3E"],
+            "reply_users_count": 2,
+            "latest_reply": "1791034410.553209",
+            "reactions": [
+              {
+                "name": "eyes",
+                "users": ["U06FG45HI6J"],
+                "count": 1
+              }
+            ],
+            "blocks": [
+              {"type": "rich_text", "block_id": "Xq9Lm"}
+            ]
+          },
+          {
+            "type": "message",
+            "user": "U06FG45HI6J",
+            "text": "Release notes draft for Thursday is in the doc, please add your team's items by EOD.",
+            "ts": "1791038877.209119",
+            "edited": {"user": "U06FG45HI6J", "ts": "1791038912.000000"},
+            "blocks": [
+              {"type": "rich_text", "block_id": "k2Pzv"}
+            ]
+          }
+        ],
+        "has_more": true,
+        "pin_count": 2,
+        "response_metadata": {"next_cursor": "bmV4dF90czoxNzkxMDI4NzcxNDM5ODEy"}
+      }
+    }
+  },
+  "jira": {
+    "tools": [
+      {
+        "slug": "JIRA_SEARCH_FOR_ISSUES_USING_JQL_GET",
+        "description": "Searches for Jira issues using JQL with pagination and field selection.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": [],
+          "properties": {
+            "jql": {"type": "string", "description": "Jira Query Language (JQL) string for searching issues. REQUIRED if `next_page_token` is not..."},
+            "expand": {"type": "string", "description": "Comma-separated list of entities to expand within issues (e.g., `renderedFields`, `changelog`)."},
+            "fields": {"type": "array", "description": "Specific issue fields to retrieve (e.g., `summary`, `customfield_10010`, `*all`, `*navigable`)...."},
+            "fail_fast": {"type": "boolean", "description": "Fail early on certain errors during search."},
+            "properties": {"type": "array", "description": "List of issue property keys (key-value metadata) to retrieve."},
+            "max_results": {"type": "integer", "description": "Maximum issues to retrieve per page. Must be at least 1. Note: Jira Cloud typically limits..."},
+            "fields_by_keys": {"type": "boolean", "description": "Set to `True` to identify fields by keys (e.g., 'customfield_10000') instead of IDs."},
+            "next_page_token": {"type": "string", "description": "Pagination token from a previous enhanced search response. Use the token returned by this action..."},
+            "reconcile_issues": {"type": "array", "description": "List of issue IDs to enable read-after-write reconciliation during search."}
+          }
+        }
+      },
+      {
+        "slug": "JIRA_SEARCH_ISSUES",
+        "description": "Advanced Jira issue search supporting structured filters and raw JQL.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": [],
+          "properties": {
+            "jql": {"type": "string", "description": "Raw JQL (Jira Query Language) query for advanced users. Takes precedence over filters. Can be a..."},
+            "fields": {"type": "array", "description": "List of fields to return for each issue (for example: summary, status, assignee). If omitted, a..."},
+            "labels": {"type": "array", "description": "Filter by labels (all labels must match)."},
+            "assignee": {"type": "string", "description": "Filter by assignee. Can be account ID (e.g., '712020:abc...'), email (e.g., 'john@company.com')..."},
+            "max_results": {"type": "integer", "description": "Maximum number of issues to return per page. Capped at 100 per page; total results per JQL query..."},
+            "project_key": {"type": "string", "description": "Filter by project key (e.g., 'PROJ')."},
+            "text_search": {"type": "string", "description": "Search in summary and description text."},
+            "created_after": {"type": "string", "description": "Filter issues created after this date. Supports YYYY-MM-DD format or relative dates like '-30m'..."},
+            "updated_after": {"type": "string", "description": "Filter issues updated after this date. Supports YYYY-MM-DD format or relative dates like '-30m'..."},
+            "created_before": {"type": "string", "description": "Filter issues created before this date (YYYY-MM-DD format)."},
+            "updated_before": {"type": "string", "description": "Filter issues updated before this date (YYYY-MM-DD format)."},
+            "next_page_token": {"type": "string", "description": "Cursor token used to fetch the next page when using enhanced search. Tokens returned by this..."},
+            "sprint_id_or_name": {"type": "string", "description": "Filter by sprint. Can be sprint ID (e.g., '123') or name (e.g., 'Sprint 1', 'Release Sprint')."},
+            "status_id_or_name": {"type": "string", "description": "Filter by status. Can be either a status ID (e.g., '10001') or name (e.g., 'To Do', 'In..."},
+            "preserved_order_by": {"type": "string", "description": "Internal: preserved ORDER BY clause from ORDER-BY-only JQL input"},
+            "priority_id_or_name": {"type": "string", "description": "Filter by priority. Can be either a priority ID (e.g., '1', '2') or name (e.g., 'High'..."},
+            "issue_type_id_or_name": {"type": "string", "description": "Filter by issue type. Can be either an issue type ID (e.g., '10001') or name (e.g., 'Bug'..."}
+          }
+        }
+      },
+      {
+        "slug": "JIRA_GET_ISSUE",
+        "description": "Retrieves a Jira issue by ID or key with customizable fields and expansions.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["issue_id_or_key"],
+          "properties": {
+            "expand": {"type": "string", "description": "A comma-separated list of entities to include with the issue. To retrieve update history..."},
+            "fields": {"type": "array", "description": "A list of field names or IDs to return for the issue. If omitted or empty, a default set of..."},
+            "fail_fast": {"type": "boolean", "description": "Whether Jira should return immediately after the first issue-related error. Defaults to false."},
+            "properties": {"type": "array", "description": "A list of issue property keys to include in the response. Issue properties are extra key-value..."},
+            "fields_by_keys": {"type": "boolean", "description": "If true, the strings in the `fields` parameter are interpreted as field keys (e.g., 'summary')..."},
+            "update_history": {"type": "boolean", "description": "Controls whether viewing the issue adds it to the user's 'Recently viewed' list. This does not..."},
+            "issue_id_or_key": {"type": "string", "description": "The ID (e.g., '10000') or key (e.g., 'PROJ-123') of the Jira issue to retrieve."}
+          }
+        }
+      },
+      {
+        "slug": "JIRA_LIST_ISSUE_COMMENTS",
+        "description": "Retrieves paginated comments from a Jira issue with optional ordering.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["issue_id_or_key"],
+          "properties": {
+            "expand": {"type": "string", "description": "Use 'renderedBody' to include the HTML-rendered version of the comment body in the response."},
+            "order_by": {"type": "string", "description": "Specifies the field to sort comments by; use 'created' for ascending by creation date (currently..."},
+            "start_at": {"type": "integer", "description": "The 0-based index of the first comment to return."},
+            "max_results": {"type": "integer", "description": "The maximum number of comments to return per page. Note: Jira Cloud enforces a maximum of ~100..."},
+            "issue_id_or_key": {"type": "string", "description": "The ID (e.g., '10000') or key (e.g., 'PROJ-123') of the Jira issue from which to retrieve comments."}
+          }
+        }
+      },
+      {
+        "slug": "JIRA_GET_TRANSITIONS",
+        "description": "Retrieves available workflow transitions for a Jira issue.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["issue_id_or_key"],
+          "properties": {
+            "expand": {"type": "string", "description": "A comma-separated list of properties to expand in the response. Use 'transitions.fields' to..."},
+            "transition_id": {"type": "string", "description": "The ID of a specific transition to retrieve. If provided, only details for this transition are..."},
+            "issue_id_or_key": {"type": "string", "description": "The ID (e.g., '10000') or key (e.g., 'PROJ-123') of the Jira issue for which to retrieve..."},
+            "skip_remote_only_condition": {"type": "boolean", "description": "If true, conditions defined by remote apps that only run remotely will be skipped during evaluation."},
+            "sort_by_ops_bar_and_status": {"type": "boolean", "description": "If true, sorts the returned transitions by their order in the operations bar and then by status..."},
+            "include_unavailable_transitions": {"type": "boolean", "description": "If true, transitions that are not currently available for the issue (e.g., due to unmet..."}
+          }
+        }
+      },
+      {
+        "slug": "JIRA_GET_FIELDS",
+        "description": "Tool to retrieve Jira issue fields metadata.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": [],
+          "properties": {
+            "issue_type": {"type": "string", "description": "Filter fields by issue type. Can be issue type ID (e.g., '10001') or name (e.g., 'Bug', 'Task'..."},
+            "project_id": {"type": "string", "description": "Filter fields by project ID (e.g., '10000')."},
+            "custom_only": {"type": "boolean", "description": "If true, returns only custom fields; otherwise returns all fields."}
+          }
+        }
+      },
+      {
+        "slug": "JIRA_EDIT_ISSUE",
+        "description": "Updates an existing Jira issue with field values and operations.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["issue_id_or_key"],
+          "properties": {
+            "fields": {"type": "string", "description": "JSON string of fields for direct updates (e.g., summary, description). When including assignee..."},
+            "labels": {"type": "array", "description": "List of labels to set for the issue (replaces existing labels). New labels are created if they..."},
+            "update": {"type": "string", "description": "JSON string for granular field operations (e.g., adding/removing labels, modifying list items)...."},
+            "summary": {"type": "string", "description": "Brief, descriptive title for the issue."},
+            "assignee": {"type": "string", "description": "User to assign the issue to. Can be either an account ID (e.g., '5b10a2844c20165700ede21g') or..."},
+            "due_date": {"type": "string", "description": "Expected resolution date in YYYY-MM-DD format. Use null to remove due date."},
+            "description": {"type": "string", "description": "Detailed description of the issue. Supports Markdown formatting including **bold**, *italic*..."},
+            "notify_users": {"type": "boolean", "description": "If true, sends notification email to watchers. Setting to `False` requires admin or project..."},
+            "return_issue": {"type": "boolean", "description": "If true, response includes full updated issue details; if false, response is minimal."},
+            "issue_id_or_key": {"type": "string", "description": "ID or key of the Jira issue to be edited."},
+            "sprint_id_or_name": {"type": "string", "description": "Sprint to assign this issue to. Can be either a sprint ID (e.g., '123', '456') or sprint name..."},
+            "priority_id_or_name": {"type": "string", "description": "Priority level for the issue. Can be either a priority ID (e.g., '1', '2') or priority name..."},
+            "additional_properties": {"type": "object", "description": "Additional properties to include in the request body. This can be used to pass extra fields..."},
+            "override_editable_flag": {"type": "boolean", "description": "If true, bypasses editable flag restrictions. Requires admin permissions."},
+            "override_screen_security": {"type": "boolean", "description": "If true, bypasses screen security restrictions. Requires admin permissions."}
+          }
+        }
+      },
+      {
+        "slug": "JIRA_ADD_COMMENT",
+        "description": "Adds a comment using Atlassian Document Format (ADF) for rich text to an existing Jira issue.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["issue_id_or_key", "comment"],
+          "properties": {
+            "comment": {"type": "string", "description": "The comment text. Supports Markdown formatting including **bold**, *italic*, `code`, links..."},
+            "issue_id_or_key": {"type": "string", "description": "The ID or key of the issue to add the comment to."},
+            "visibility_type": {"type": "string", "description": "Specifies the type of visibility restriction for the comment. Valid values are 'group' or..."},
+            "visibility_value": {"type": "string", "description": "Name of the group or role that can view the comment (required if visibility_type is set)...."},
+            "additional_properties": {"type": "object", "description": "Additional properties to include in the comment request body. This can be used to pass extra..."}
+          }
+        }
+      },
+      {
+        "slug": "JIRA_UPDATE_COMMENT",
+        "description": "Updates text content or visibility of an existing Jira comment.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["issue_id_or_key", "comment_id", "comment_text"],
+          "properties": {
+            "comment_id": {"type": "string", "description": "The unique ID of the comment to be updated."},
+            "comment_text": {"type": "string", "description": "The new text content for the comment. This will replace the existing comment body. Supports..."},
+            "notify_users": {"type": "boolean", "description": "A boolean flag indicating whether to send notifications to users about the comment update...."},
+            "issue_id_or_key": {"type": "string", "description": "The ID or key of the Jira issue where the comment is located. This can be the numerical ID or..."},
+            "visibility_type": {"type": "string", "description": "Optional. The type of visibility restriction to apply to the comment. If provided..."},
+            "visibility_value": {"type": "string", "description": "Optional. The name of the group or role to restrict comment visibility to. Required if..."},
+            "additional_properties": {"type": "string", "description": "JSON string of comment properties as key-value pairs. Values can be any JSON type (strings..."}
+          }
+        }
+      },
+      {
+        "slug": "JIRA_TRANSITION_ISSUE",
+        "description": "Transitions a Jira issue to a different workflow state, with support for transition name lookup and user assignment by email.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["issue_id_or_key", "transition_id_or_name"],
+          "properties": {
+            "comment": {"type": "string", "description": "Optional comment to add during the transition. Supports Markdown-style formatting that is..."},
+            "assignee": {"type": "string", "description": "Account ID of the user to assign the issue to during transition. Takes precedence over..."},
+            "resolution": {"type": "string", "description": "Resolution to set when CLOSING an issue (e.g., 'Done', 'Fixed', 'Won't Do'). IMPORTANT: Only use..."},
+            "assignee_name": {"type": "string", "description": "Name of the user to assign the issue to during transition. Can be either an email address (e.g...."},
+            "issue_id_or_key": {"type": "string", "description": "The ID or key of the issue to transition."},
+            "transition_fields": {"type": "object", "description": "Fields to include in the transition payload. Use this for fields that appear on the transition..."},
+            "additional_properties": {"type": "object", "description": "Additional properties to include at the top level of the transition request body. This can be..."},
+            "transition_id_or_name": {"type": "string", "description": "The ID or name of the transition to apply. IMPORTANT: Transition names are workflow-specific and..."}
+          }
+        }
+      },
+      {
+        "slug": "JIRA_ASSIGN_ISSUE",
+        "description": "Assigns a Jira issue to a user, default assignee, or unassigns; supports email/name lookup.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["issue_id_or_key"],
+          "properties": {
+            "account_id": {"type": "string", "description": "The Atlassian Account ID of the user to assign the issue to. Use `'-1'` (as a string) to assign..."},
+            "assignee_name": {"type": "string", "description": "Name of the user to assign the issue to. Can be either an email address (e.g...."},
+            "issue_id_or_key": {"type": "string", "description": "The ID or key of the issue to be assigned."}
+          }
+        }
+      },
+      {
+        "slug": "JIRA_DELETE_ISSUE",
+        "description": "Permanently and irreversibly deletes a Jira issue by its ID or key.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["issue_id_or_key"],
+          "properties": {
+            "delete_subtasks": {"type": "boolean", "description": "If true, the issue's subtasks are also deleted. If false and the issue has subtasks, the..."},
+            "issue_id_or_key": {"type": "string", "description": "The ID or key of the issue to delete."}
+          }
+        }
+      },
+      {
+        "slug": "JIRA_CREATE_ISSUE",
+        "description": "Creates a new Jira issue (e.g., bug, task, story) in a specified project.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["project_key", "summary", "issue_type"],
+          "properties": {
+            "labels": {"type": "array", "description": "List of labels to categorize the issue; new labels are created if they don't exist."},
+            "parent": {"type": "string", "description": "Parent issue key (e.g., 'PROJ-123') or issue ID. IMPORTANT: This field should ONLY be used when..."},
+            "summary": {"type": "string", "description": "REQUIRED. Brief, descriptive title for the issue. This is the main headline that will appear in..."},
+            "assignee": {"type": "string", "description": "Account ID of the user to assign the issue to. Must be a valid Jira account ID in one of these..."},
+            "due_date": {"type": "string", "description": "Expected resolution date in YYYY-MM-DD format."},
+            "priority": {"type": "string", "description": "Priority level for the issue. Can be either a priority name or a valid priority ID from the Jira..."},
+            "reporter": {"type": "string", "description": "Account ID of the user reporting the issue. Defaults to the API request user if unspecified."},
+            "versions": {"type": "array", "description": "List of IDs for versions affected by this issue; versions must exist in the project."},
+            "sprint_id": {"type": "integer", "description": "ID of the sprint to assign this issue to. The issue will be added to the specified sprint if..."},
+            "components": {"type": "array", "description": "List of component IDs (e.g., '10000'); components must already exist in the project."},
+            "issue_type": {"type": "string", "description": "REQUIRED. Type of the issue - must be valid for the target project as available types vary by..."},
+            "description": {"type": "any", "description": "Detailed description of the issue. Accepts either: (1) A plain text or Markdown string..."},
+            "environment": {"type": "any", "description": "Environment details. Accepts either: (1) A plain text or Markdown string (converted to ADF..."},
+            "project_key": {"type": "string", "description": "REQUIRED. Key of the Jira project where the issue will be created (e.g., 'KAN', 'DEV', 'PROJ')...."},
+            "fix_versions": {"type": "array", "description": "List of IDs for versions where the issue is/will be fixed; versions must exist in the project."},
+            "assignee_name": {"type": "string", "description": "Name or email of the user to assign the issue to. Can be either an email address (e.g...."},
+            "additional_properties": {"type": "string", "description": "JSON string of additional fields to set on the issue. Use this for custom fields or any fields..."}
+          }
+        }
+      },
+      {
+        "slug": "JIRA_BULK_CREATE_ISSUE",
+        "description": "Creates multiple Jira issues (up to 50 per call) with full feature support including markdown, assignee resolution, and priority handling.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["issues"],
+          "properties": {
+            "issues": {"type": "array", "description": "List of issues to be created (1 to 50 per request). Each issue definition follows the same..."}
+          }
+        }
+      }
+    ],
+    "list": {
+      "tool": "JIRA_SEARCH_FOR_ISSUES_USING_JQL_GET",
+      "args": {
+        "jql": "project = PLAT AND statusCategory != Done ORDER BY updated DESC",
+        "max_results": 25,
+        "fields": ["summary", "status", "assignee", "priority", "labels", "updated"]
+      },
+      "data": {
+        "issues": [
+          {
+            "id": "10482",
+            "key": "PLAT-231",
+            "summary": "Rate limiter returns 500 instead of 429 under burst load",
+            "project": {"id": "10004", "key": "PLAT", "name": "Platform", "project_type": "software"},
+            "status": {"id": "3", "name": "In Progress", "category": "In Progress"},
+            "issue_type": {"id": "10007", "name": "Bug", "subtask": false},
+            "priority": {"id": "2", "name": "High"},
+            "labels": ["api", "reliability"],
+            "assignee": {
+              "account_id": "712020:3b6f9c1e-4d2a-4f8b-9e7c-1a2b3c4d5e6f",
+              "display_name": "Priya Raman",
+              "email_address": "priya.raman@example.com",
+              "time_zone": "Europe/Berlin"
+            },
+            "reporter": {"account_id": "5f8a1c2d3e4b5a6978c0d1e2", "display_name": "Tom Becker"},
+            "created": "2026-09-24T08:31:12.000+0000",
+            "updated": "2026-10-02T15:04:47.000+0000",
+            "browser_url": "https://acme.atlassian.net/browse/PLAT-231"
+          },
+          {
+            "id": "10497",
+            "key": "PLAT-238",
+            "summary": "Rotate service account credentials for the ingestion workers",
+            "project": {"id": "10004", "key": "PLAT", "name": "Platform", "project_type": "software"},
+            "status": {"id": "10001", "name": "To Do", "category": "To Do"},
+            "issue_type": {"id": "10006", "name": "Task", "subtask": false},
+            "priority": {"id": "3", "name": "Medium"},
+            "labels": ["security"],
+            "assignee": {
+              "account_id": "5f8a1c2d3e4b5a6978c0d1e2",
+              "display_name": "Tom Becker",
+              "email_address": "tom.becker@example.com",
+              "time_zone": "Europe/London"
+            },
+            "reporter": {"account_id": "712020:3b6f9c1e-4d2a-4f8b-9e7c-1a2b3c4d5e6f", "display_name": "Priya Raman"},
+            "created": "2026-09-30T11:18:40.000+0000",
+            "updated": "2026-10-01T09:52:03.000+0000",
+            "browser_url": "https://acme.atlassian.net/browse/PLAT-238"
+          }
+        ],
+        "isLast": false,
+        "nextPageToken": "Ch0jU3RyaW5nJlVFeEJWQT09JUludCZNVEEwT1RjPRAZGLyE"
+      }
+    }
+  },
+  "trello": {
+    "tools": [
+      {
+        "slug": "TRELLO_GET_LISTS_CARDS_BY_ID_LIST",
+        "description": "Fetches cards from a Trello list by its ID, with options to filter and customize the returned card data.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["idList"],
+          "properties": {
+            "limit": {"type": "string", "description": "The maximum number of cards to return. Must be a number from 1 to 1000, provided as a string."},
+            "since": {"type": "string", "description": "Filter cards to include only those created or updated after this date. Provide a date string..."},
+            "before": {"type": "string", "description": "Filter cards to include only those created or updated before this date. Provide a date string..."},
+            "fields": {"type": "string", "description": "Fields to include for cards. Defaults to a minimal set: 'id,name,desc,idList,labels,idMembers,due..."},
+            "filter": {"type": "string", "description": "Filter cards by their state. Valid values are 'all', 'closed', 'none', or 'open'. Defaults to..."},
+            "idList": {"type": "string", "description": "The ID of the list from which to retrieve cards."},
+            "actions": {"type": "string", "description": "Determines what actions are returned. Use 'all' to return all actions, or provide a..."},
+            "members": {"type": "string", "description": "Specify whether to include members. Accepted string values are 'true' or 'false'."},
+            "stickers": {"type": "string", "description": "Specify whether to include stickers. Accepted string values are 'true' or 'false'."},
+            "checklists": {"type": "string", "description": "Specify whether to include checklists. Valid values are 'all' or 'none'. Defaults to 'none'."},
+            "attachments": {"type": "string", "description": "Specify whether to include attachments. Accepted string values are 'true', 'false', or 'cover'..."},
+            "member_fields": {"type": "string", "description": "Fields to include for members. Use 'all' or a comma-separated list of specific fields. Valid..."},
+            "checkItemStates": {"type": "string", "description": "Specify whether to include check item states. Accepted string values are 'true' or 'false'."},
+            "attachment_fields": {"type": "string", "description": "Fields to include for attachments. Use 'all' or a comma-separated list of specific fields. Valid..."}
+          }
+        }
+      },
+      {
+        "slug": "TRELLO_GET_BOARDS_CARDS_BY_ID_BOARD",
+        "description": "Retrieves cards from an existing Trello board, allowing filtering and customization of fields for cards, attachments, and members.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["idBoard"],
+          "properties": {
+            "limit": {"type": "string", "description": "The maximum number of cards to return. Must be a number between 1 and 1000, inclusive."},
+            "since": {"type": "string", "description": "A date in ISO 8601 format. Only cards updated after this date will be returned. Use 'null' for..."},
+            "before": {"type": "string", "description": "A date in ISO 8601 format. Only cards updated before this date will be returned. Use 'null' for..."},
+            "fields": {"type": "string", "description": "A comma-separated list of card fields to be returned. Use 'all' to include all fields. Valid..."},
+            "filter": {"type": "string", "description": "Filters the cards to return. Valid values are 'all', 'closed', 'none', 'open', or 'visible'. If..."},
+            "actions": {"type": "string", "description": "A comma-separated list of action types to be returned. Use 'all' to include all action types...."},
+            "idBoard": {"type": "string", "description": "The ID of the Trello board. Valid formats: 24-character hexadecimal ID (e.g...."},
+            "members": {"type": "string", "description": "Determines whether members should be returned. Valid values are 'true' or 'false'."},
+            "stickers": {"type": "string", "description": "Determines whether stickers should be returned. Valid values are 'true' or 'false'."},
+            "checklists": {"type": "string", "description": "Determines which checklists to return. Valid values are 'all' or 'none'. If not specified..."},
+            "attachments": {"type": "string", "description": "Determines whether attachments should be returned. Can be 'true', 'false', or 'cover' (to return..."},
+            "member_fields": {"type": "string", "description": "A comma-separated list of member fields to be returned. Use 'all' to include all fields. Valid..."},
+            "checkItemStates": {"type": "string", "description": "Determines whether check item states should be returned. Valid values are 'true' or 'false'."},
+            "attachment_fields": {"type": "string", "description": "A comma-separated list of attachment fields to be returned. Use 'all' to include all fields...."}
+          }
+        }
+      },
+      {
+        "slug": "TRELLO_GET_CARDS_BY_ID_CARD",
+        "description": "Retrieves a Trello card by its ID or shortlink, with options to include related data like actions, attachments, members, and checklists.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["idCard"],
+          "properties": {
+            "list": {"type": "string", "description": "Include data for the card's list. Use 'true' or 'false'."},
+            "board": {"type": "string", "description": "Include data for the card's board. Use 'true' or 'false'."},
+            "fields": {"type": "string", "description": "Fields for the card: 'all' or comma-separated (e.g., 'name,desc'). Valid: badges..."},
+            "idCard": {"type": "string", "description": "The unique identifier or shortlink of the Trello card. Must be either a 24-character hexadecimal..."},
+            "actions": {"type": "string", "description": "Actions to return: 'all' or a comma-separated list of types (e.g., 'addAttachmentToCard'..."},
+            "members": {"type": "string", "description": "Include member data. Use 'true' or 'false'."},
+            "stickers": {"type": "string", "description": "Include sticker data. Use 'true' or 'false'."},
+            "checklists": {"type": "string", "description": "Include checklists: 'all' or 'none'."},
+            "attachments": {"type": "string", "description": "Include attachments: 'true' (all), 'false' (none), or 'cover' (card cover only)."},
+            "list_fields": {"type": "string", "description": "Fields for the list: 'all' or comma-separated (e.g., 'name,pos'). Valid: closed, idBoard, name..."},
+            "board_fields": {"type": "string", "description": "Fields for the board: 'all' or comma-separated (e.g., 'name,desc'). Valid: closed..."},
+            "membersVoted": {"type": "string", "description": "Include data for members who voted. Use 'true' or 'false'."},
+            "action_fields": {"type": "string", "description": "Fields for actions: 'all' or comma-separated (e.g., 'data,date'). Valid: data, date..."},
+            "actions_limit": {"type": "string", "description": "Maximum actions to return (0-1000)."},
+            "member_fields": {"type": "string", "description": "Fields for members: 'all' or comma-separated (e.g., 'avatarHash,fullName'). Valid: avatarHash..."},
+            "sticker_fields": {"type": "string", "description": "Fields for stickers: 'all' or comma-separated (e.g., 'image,left'). Valid: image, imageScaled..."},
+            "actions_display": {"type": "string", "description": "Return display-friendly action data. Use 'true' or 'false'."},
+            "checkItemStates": {"type": "string", "description": "Include check item states. Use 'true' or 'false'."},
+            "actions_entities": {"type": "string", "description": "Include entities (e.g., card, board, member) for actions. Use 'true' or 'false'."},
+            "checklist_fields": {"type": "string", "description": "Fields for checklists: 'all' or comma-separated (e.g., 'idBoard,name'). Valid: idBoard, idCard..."},
+            "attachment_fields": {"type": "string", "description": "Fields for attachments: 'all' or comma-separated (e.g., 'bytes,date'). Valid: bytes, date..."},
+            "memberVoted_fields": {"type": "string", "description": "Fields for members who voted: 'all' or comma-separated (e.g., 'avatarHash,fullName'). Valid..."},
+            "checkItemState_fields": {"type": "string", "description": "Fields for check item states: 'all' or comma-separated (e.g., 'idCheckItem,state'). Valid..."},
+            "action_memberCreator_fields": {"type": "string", "description": "Fields for the action creator: 'all' or comma-separated (e.g., 'avatarHash,fullName'). Valid..."}
+          }
+        }
+      },
+      {
+        "slug": "TRELLO_GET_BOARDS_LISTS_BY_ID_BOARD",
+        "description": "Retrieves lists from a specified Trello board, with options to filter lists and include card details.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["idBoard"],
+          "properties": {
+            "cards": {"type": "string", "description": "Determines which cards should be returned within the lists. Valid values are 'all', 'closed'..."},
+            "fields": {"type": "string", "description": "Specifies the fields of the lists to be returned. Use 'all' for all fields, or provide a..."},
+            "filter": {"type": "string", "description": "Filters the lists to be returned based on their status. Valid values are 'all', 'closed'..."},
+            "idBoard": {"type": "string", "description": "The ID of the Trello board. Valid formats: 24-character hexadecimal ID (e.g...."},
+            "card_fields": {"type": "string", "description": "Specifies the fields of cards to be returned if the 'cards' parameter is not 'none'. Use 'all'..."}
+          }
+        }
+      },
+      {
+        "slug": "TRELLO_GET_CARDS_ACTIONS_BY_ID_CARD",
+        "description": "Retrieves the history of actions (e.g., comments, updates, moves) for a Trello card specified by `idCard`; the card must exist and very old actions might...",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["idCard"],
+          "properties": {
+            "page": {"type": "string", "description": "The page number of results to retrieve, starting from 0. Used for pagination. Note: `page *..."},
+            "limit": {"type": "string", "description": "The maximum number of actions to return. Must be a number between 0 and 1000."},
+            "since": {"type": "string", "description": "A date in ISO 8601 format (e.g., '2023-01-15T10:00:00Z'), 'null', or 'lastView'. Returns actions..."},
+            "before": {"type": "string", "description": "A date in ISO 8601 format (e.g., '2023-12-31T23:59:59Z'), or 'null'. Returns actions that..."},
+            "fields": {"type": "string", "description": "A comma-separated list of fields to include for each action, or 'all'. Valid fields: data, date..."},
+            "filter": {"type": "string", "description": "A comma-separated list of action types to filter by (e.g., 'commentCard,updateCard:idList'), or..."},
+            "format": {"type": "string", "description": "The format of the response. 'list' returns a list of actions, 'minimal' returns a minimal list..."},
+            "idCard": {"type": "string", "description": "The ID or shortLink of the card for which to retrieve actions."},
+            "member": {"type": "string", "description": "Determines whether to include details of the member who performed the action. Provide as a..."},
+            "display": {"type": "string", "description": "Determines whether to return display-related information for the actions. Provide as a string..."},
+            "entities": {"type": "string", "description": "Determines whether to return information about entities (e.g., comments, checklists) associated..."},
+            "idModels": {"type": "string", "description": "A comma-separated list of model IDs. If provided, only actions related to these specific model..."},
+            "memberCreator": {"type": "string", "description": "Determines whether to include details of the member who created the action (the action's..."},
+            "member_fields": {"type": "string", "description": "A comma-separated list of fields to return for the member object, if 'member' is 'true'. Valid..."},
+            "memberCreator_fields": {"type": "string", "description": "A comma-separated list of fields to return for the memberCreator object, if 'memberCreator' is..."}
+          }
+        }
+      },
+      {
+        "slug": "TRELLO_UPDATE_CARDS_BY_ID_CARD",
+        "description": "Updates an existing Trello card's attributes like name, description, due date, members, labels, position, or archives/unarchives it, attaches files, or...",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["idCard"],
+          "properties": {
+            "due": {"type": "string", "description": "The new due date for the card, in ISO 8601 format, or 'null' to remove the due date."},
+            "pos": {"type": "string", "description": "The new position of the card within its list. Can be 'top', 'bottom', or a positive..."},
+            "desc": {"type": "string", "description": "The new description for the card. String length must be from 0 to 16384 characters."},
+            "name": {"type": "string", "description": "The new name for the card. Required if not copying the name from `idCardSource`, `fileSource`..."},
+            "closed": {"type": "string", "description": "Determines whether the card should be archived (closed). Accepts boolean (true/false) or string..."},
+            "idCard": {"type": "string", "description": "The ID or shortLink of the card to update."},
+            "idList": {"type": "string", "description": "The ID of the list to move the card to."},
+            "labels": {"type": "string", "description": "Comma-separated list of label colors (e.g., 'green,yellow,red') to apply, overwriting existing..."},
+            "idBoard": {"type": "string", "description": "The ID of the board to move the card to. If `idList` is also provided, the card will be moved to..."},
+            "idLabels": {"type": "string", "description": "Comma-separated list of label IDs to apply, replacing existing labels. To preserve existing..."},
+            "idMembers": {"type": "string", "description": "Comma-separated list of member IDs to assign, replacing existing members. To preserve existing..."},
+            "urlSource": {"type": "string", "description": "A URL to be attached to the card (e.g., a link to an external resource). If the card is being..."},
+            "fileSource": {"type": "string", "description": "The URL of a file to be attached to the card. Trello will fetch and attach the file from this URL."},
+            "subscribed": {"type": "string", "description": "Determines whether the user is subscribed to the card. Accepts boolean (true/false) or string..."},
+            "idCardSource": {"type": "string", "description": "The ID of a card to copy properties from. Requires `keepFromSource` to be specified."},
+            "keepFromSource": {"type": "string", "description": "If `idCardSource` is specified, this is a comma-separated list of properties to copy from the..."},
+            "idAttachmentCover": {"type": "string", "description": "The ID of an existing image attachment to be used as the card cover. Use 'null' or an empty..."}
+          }
+        }
+      },
+      {
+        "slug": "TRELLO_UPDATE_CARDS_NAME_BY_ID_CARD",
+        "description": "Updates the name of an existing Trello card, identified by its ID or shortLink; other card properties remain unchanged.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["idCard", "value"],
+          "properties": {
+            "value": {"type": "string", "description": "The new name for the card (required). Must be a non-empty string with a length from 1 to 16384..."},
+            "idCard": {"type": "string", "description": "The ID or shortLink of the Trello card whose name is to be updated."}
+          }
+        }
+      },
+      {
+        "slug": "TRELLO_UPDATE_CARDS_DESC_BY_ID_CARD",
+        "description": "Updates or clears the entire description of an existing Trello card; use an empty string for `value` to clear.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["idCard"],
+          "properties": {
+            "value": {"type": "string", "description": "The new description for the card (0-16384 characters). An empty string clears the card's current..."},
+            "idCard": {"type": "string", "description": "The ID or short link of the card whose description will be updated."}
+          }
+        }
+      },
+      {
+        "slug": "TRELLO_UPDATE_CARDS_ID_LIST_BY_ID_CARD",
+        "description": "Moves a Trello card to a different list on the same Trello board; this operation is idempotent and only updates the card's list ID.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["idCard", "value"],
+          "properties": {
+            "value": {"type": "string", "description": "The ID of the target list to move the card to. Must be a valid, existing list ID (24-character..."},
+            "idCard": {"type": "string", "description": "The ID or short link of the card to be moved. Must be a valid, existing card ID. Card IDs can be..."}
+          }
+        }
+      },
+      {
+        "slug": "TRELLO_UPDATE_CARDS_CLOSED_BY_ID_CARD",
+        "description": "Updates the 'closed' status of an existing Trello card.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["idCard", "value"],
+          "properties": {
+            "value": {"type": "string", "description": "Desired 'closed' state: 'true' to close (archive) the card, 'false' to re-open (unarchive) and..."},
+            "idCard": {"type": "string", "description": "The ID or shortLink of the Trello card to be updated. The card ID is a 24-character hexadecimal..."}
+          }
+        }
+      },
+      {
+        "slug": "TRELLO_ADD_CARDS_ACTIONS_COMMENTS_BY_ID_CARD",
+        "description": "Adds a new text comment, which can include @mentions, to a Trello card specified by its ID; file attachments are not supported via this action.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["idCard", "text"],
+          "properties": {
+            "text": {"type": "string", "description": "Comment text, between 1 and 16384 characters. Supports @mentions to notify Trello users."},
+            "idCard": {"type": "string", "description": "ID or shortLink of the Trello card to add the comment to."}
+          }
+        }
+      },
+      {
+        "slug": "TRELLO_ADD_CARDS",
+        "description": "Creates a new card in a Trello list.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["idList"],
+          "properties": {
+            "due": {"type": "string", "description": "Due date for the card (date string or 'null' to remove)."},
+            "pos": {"type": "string", "description": "Position in list: 'top', 'bottom', or a positive float."},
+            "desc": {"type": "string", "description": "Card description (0-16384 characters)."},
+            "name": {"type": "string", "description": "Name/title for the card. Highly recommended for new cards. If omitted, a blank title is created...."},
+            "closed": {"type": "string", "description": "Archive (close) the card. Valid values: 'true', 'false'."},
+            "idList": {"type": "string", "description": "ID of the list to add the card to. Must be a 24-character hexadecimal string."},
+            "idBoard": {"type": "string", "description": "ID of the board for the card. Must be a 24-character hexadecimal string. Optional - the API..."},
+            "idLabels": {"type": "string", "description": "Comma-separated list of label IDs to add. Each ID must be a 24-character hexadecimal string."},
+            "idMembers": {"type": "string", "description": "Comma-separated list of member IDs to assign. Each ID must be a 24-character hexadecimal string."},
+            "urlSource": {"type": "string", "description": "URL to attach to the card. If a Trello card URL is provided, the card is copied from that..."},
+            "fileSource": {"type": "string", "description": "Binary data of a file to attach."},
+            "subscribed": {"type": "string", "description": "Subscribe user to the card. Valid values: 'true', 'false'."},
+            "idCardSource": {"type": "string", "description": "ID of an existing card to copy. Must be a 24-character hexadecimal string. When provided, the..."},
+            "keepFromSource": {"type": "string", "description": "If using `idCardSource`, properties to copy: 'all' or comma-separated (e.g., 'attachments'..."},
+            "idAttachmentCover": {"type": "string", "description": "ID of an image attachment on this card for its cover, or 'null' for no cover. Must be a..."}
+          }
+        }
+      },
+      {
+        "slug": "TRELLO_DELETE_CARDS_BY_ID_CARD",
+        "description": "Permanently deletes an archived Trello card specified by its `idCard`.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["idCard"],
+          "properties": {
+            "idCard": {"type": "string", "description": "The ID or shortLink of the card to be deleted. The card ID is a long alphanumeric string, while..."}
+          }
+        }
+      },
+      {
+        "slug": "TRELLO_DELETE_CARD_COMMENT",
+        "description": "Deletes a specific comment action (identified by `idAction`) from a Trello card (identified by `idCard`); this operation is irreversible and only affects...",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["idCard", "idAction"],
+          "properties": {
+            "idCard": {"type": "string", "description": "The ID or shortLink of the Trello card from which the comment will be deleted."},
+            "idAction": {"type": "string", "description": "The ID of the comment action to be deleted. This identifies the specific comment within the..."}
+          }
+        }
+      },
+      {
+        "slug": "TRELLO_ARCHIVE_ALL_LIST_CARDS",
+        "description": "Archives all cards in a Trello list; while cards can be restored via the Trello interface, this action does not provide an unarchive function.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["idList"],
+          "properties": {
+            "idList": {"type": "string", "description": "The unique identifier of the Trello list from which all cards will be archived."}
+          }
+        }
+      }
+    ],
+    "list": {
+      "tool": "TRELLO_GET_LISTS_CARDS_BY_ID_LIST",
+      "args": {
+        "idList": "66f1c2a9e4b0a17d3c5e9f21",
+        "filter": "open",
+        "fields": "id,name,desc,idList,labels,idMembers,due,closed,url"
+      },
+      "data": {
+        "cards": [
+          {
+            "id": "66fd0a8c1e2b3c4d5e6f7081",
+            "idBoard": "66e8b3f05a2c4d19b7e6a013",
+            "idList": "66f1c2a9e4b0a17d3c5e9f21",
+            "name": "Fix checkout tax rounding for EU orders",
+            "desc": "VAT is rounded per line item instead of per invoice; totals are off by up to 0.02 EUR.",
+            "due": "2026-10-08T16:00:00.000Z",
+            "dueComplete": false,
+            "closed": false,
+            "pos": 16384,
+            "idShort": 42,
+            "shortLink": "aB3dE5fG",
+            "url": "https://trello.com/c/aB3dE5fG/42-fix-checkout-tax-rounding-for-eu-orders",
+            "shortUrl": "https://trello.com/c/aB3dE5fG",
+            "idLabels": ["66e8b3f05a2c4d19b7e6a0f1"],
+            "labels": [
+              {"id": "66e8b3f05a2c4d19b7e6a0f1", "idBoard": "66e8b3f05a2c4d19b7e6a013", "name": "Bug", "color": "red"}
+            ],
+            "idMembers": ["5f9c1a2b3c4d5e6f7a8b9c0d"],
+            "dateLastActivity": "2026-10-02T13:45:09.512Z",
+            "badges": {
+              "comments": 2,
+              "attachments": 0,
+              "checkItems": 3,
+              "checkItemsChecked": 1,
+              "due": "2026-10-08T16:00:00.000Z",
+              "dueComplete": false
+            }
+          },
+          {
+            "id": "66fe4b9d2f3a4b5c6d7e8f92",
+            "idBoard": "66e8b3f05a2c4d19b7e6a013",
+            "idList": "66f1c2a9e4b0a17d3c5e9f21",
+            "name": "Write onboarding email sequence (day 1/3/7)",
+            "desc": "",
+            "closed": false,
+            "pos": 32768,
+            "idShort": 47,
+            "shortLink": "Hj7kL9mN",
+            "url": "https://trello.com/c/Hj7kL9mN/47-write-onboarding-email-sequence-day-1-3-7",
+            "shortUrl": "https://trello.com/c/Hj7kL9mN",
+            "idLabels": ["66e8b3f05a2c4d19b7e6a0f4"],
+            "labels": [
+              {
+                "id": "66e8b3f05a2c4d19b7e6a0f4",
+                "idBoard": "66e8b3f05a2c4d19b7e6a013",
+                "name": "Marketing",
+                "color": "purple"
+              }
+            ],
+            "idMembers": [],
+            "dateLastActivity": "2026-09-29T10:12:33.004Z",
+            "badges": {"comments": 0, "attachments": 1, "checkItems": 0, "checkItemsChecked": 0, "dueComplete": false}
+          }
+        ]
+      }
+    }
+  },
+  "airtable": {
+    "tools": [
+      {
+        "slug": "AIRTABLE_LIST_RECORDS",
+        "description": "Tool to list records from an Airtable table with filtering, sorting, and pagination.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["baseId", "tableIdOrName"],
+          "properties": {
+            "sort": {"type": "array", "description": "Array of sort objects to apply to records. Each object specifies a field and direction. Records..."},
+            "view": {"type": "string", "description": "The name or ID of a view to use for filtering and sorting records. View names are..."},
+            "baseId": {"type": "string", "description": "The ID of the Airtable base. Must start with 'app' followed by 14 characters."},
+            "fields": {"type": "array", "description": "Array of field names or IDs to include in the response. If not specified or if ['*'] is passed..."},
+            "offset": {"type": "string", "description": "Opaque pagination cursor token returned in the 'offset' field of a previous list records..."},
+            "pageSize": {"type": "integer", "description": "Number of records to return per page. Must be between 1 and 100. Defaults to 100."},
+            "timeZone": {"type": "string", "description": "The time zone to use for formatting date and time fields. Required when cellFormat is 'string'...."},
+            "cellFormat": {"type": "string", "description": "Format for cell values. 'json' returns structured JSON values (default), 'string' returns simple..."},
+            "maxRecords": {"type": "integer", "description": "Maximum total number of records to return across all pages. If not specified, all records..."},
+            "userLocale": {"type": "string", "description": "The user locale to use for formatting cell values (e.g., 'en-US', 'fr-FR'). Required when..."},
+            "tableIdOrName": {"type": "string", "description": "The ID or name of the table within the base. Table IDs start with 'tbl' followed by 14..."},
+            "recordMetadata": {"type": "array", "description": "Array of strings specifying additional metadata to include. Currently supports 'commentCount' to..."},
+            "filterByFormula": {"type": "string", "description": "Airtable formula to filter records. SYNTAX REQUIREMENTS: (1) BALANCED PARENTHESES: Every '('..."},
+            "returnFieldsByFieldId": {"type": "boolean", "description": "If true, field keys in the response will be field IDs instead of field names. Recommended when..."}
+          }
+        }
+      },
+      {
+        "slug": "AIRTABLE_GET_RECORD",
+        "description": "Retrieves a specific record from an Airtable table by its record ID.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["baseId", "tableIdOrName", "recordId"],
+          "properties": {
+            "baseId": {"type": "string", "description": "ID of the Airtable base."},
+            "recordId": {"type": "string", "description": "ID of the record to retrieve. Must be a real record ID obtained from listing records or another..."},
+            "timeZone": {"type": "string", "description": "Time zone for formatting dates when cellFormat='string'. Required when cellFormat='string'. Uses..."},
+            "cellFormat": {"type": "string", "description": "Controls cell value formatting: 'json' for native types, 'string' for all values as strings...."},
+            "userLocale": {"type": "string", "description": "User locale for formatting dates when cellFormat='string'. Required when cellFormat='string'...."},
+            "tableIdOrName": {"type": "string", "description": "ID or name of the table."},
+            "returnFieldsByFieldId": {"type": "boolean", "description": "If true, field keys in the response are field IDs; otherwise, field names."}
+          }
+        }
+      },
+      {
+        "slug": "AIRTABLE_GET_BASE_SCHEMA",
+        "description": "Retrieves the detailed schema for a specified Airtable base, including its tables, fields, field types, and configurations, using the `baseId`.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["baseId"],
+          "properties": {
+            "baseId": {"type": "string", "description": "The unique identifier for the Airtable base. This ID typically starts with 'app' and is followed..."},
+            "include": {"type": "array", "description": "Optional list of additional fields to include in the views object response. Currently only..."}
+          }
+        }
+      },
+      {
+        "slug": "AIRTABLE_LIST_BASES",
+        "description": "Retrieves all Airtable bases accessible to the authenticated user, which may include an 'offset' for pagination.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": [],
+          "properties": {
+            "offset": {"type": "string", "description": "Pagination token for retrieving the next page of results. This is an opaque cursor returned in..."}
+          }
+        }
+      },
+      {
+        "slug": "AIRTABLE_UPDATE_RECORD",
+        "description": "Modifies specified fields of an existing record in an Airtable base and table; the base, table, and record must exist.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["baseId", "tableIdOrName", "recordId", "fields"],
+          "properties": {
+            "baseId": {"type": "string", "description": "The unique identifier of the Airtable base containing the record to be updated."},
+            "fields": {"type": "object", "description": "Fields to update. Keys are field names (case-sensitive) or IDs (fldXXXX recommended). Only..."},
+            "recordId": {"type": "string", "description": "The unique identifier (ID) of the record to be updated within the specified table. MUST be in..."},
+            "typecast": {"type": "boolean", "description": "Enables automatic data conversion and select option creation. CRITICAL FOR SELECT FIELDS: When..."},
+            "tableIdOrName": {"type": "string", "description": "The unique identifier (ID) or the name of the table within the base that contains the record to..."},
+            "returnFieldsByFieldId": {"type": "boolean", "description": "If `True`, API response keys record fields by field ID instead of name. Using field IDs is..."}
+          }
+        }
+      },
+      {
+        "slug": "AIRTABLE_UPDATE_RECORD_PUT",
+        "description": "Updates an existing record in an Airtable base using PUT method.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["baseId", "tableIdOrName", "recordId", "fields"],
+          "properties": {
+            "baseId": {"type": "string", "description": "The unique identifier of the Airtable base containing the record to be updated."},
+            "fields": {"type": "object", "description": "Specifies fields to update. Keys are field names or IDs; values are new content. PUT method..."},
+            "recordId": {"type": "string", "description": "The unique identifier (ID) of the record to be updated within the specified table."},
+            "typecast": {"type": "boolean", "description": "When set to true, enables automatic data conversion from strings to appropriate field types. For..."},
+            "tableIdOrName": {"type": "string", "description": "The unique identifier (ID) or the name of the table within the base that contains the record to..."},
+            "returnFieldsByFieldId": {"type": "boolean", "description": "If `True`, API response keys record fields by field ID instead of name. Using field IDs is..."}
+          }
+        }
+      },
+      {
+        "slug": "AIRTABLE_UPDATE_MULTIPLE_RECORDS",
+        "description": "Tool to update up to 10 records in an Airtable table with selective field modifications.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["baseId", "tableIdOrName", "records"],
+          "properties": {
+            "baseId": {"type": "string", "description": "The ID of the Airtable base containing the table."},
+            "records": {"type": "array", "description": "List of records to be updated. Airtable's API limits updates to a maximum of 10 records per..."},
+            "typecast": {"type": "boolean", "description": "If true, Airtable attempts automatic data conversion from string values on a best-effort basis..."},
+            "performUpsert": {"type": "object", "description": "Configuration for upsert behavior when updating records."},
+            "tableIdOrName": {"type": "string", "description": "The ID or name of the table within the base where records will be updated."},
+            "returnFieldsByFieldId": {"type": "boolean", "description": "If true, returns field values keyed by field ID instead of field name. Useful for integrations..."}
+          }
+        }
+      },
+      {
+        "slug": "AIRTABLE_CREATE_RECORDS",
+        "description": "Tool to create multiple records (up to 10) in a specified Airtable table.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["baseId", "tableIdOrName", "records"],
+          "properties": {
+            "baseId": {"type": "string", "description": "The unique identifier of the Airtable base. Format: 'app' followed by alphanumeric characters..."},
+            "records": {"type": "array", "description": "Array of record objects to create. Each record object must contain a 'fields' property with the..."},
+            "typecast": {"type": "boolean", "description": "If true, Airtable will perform best-effort automatic data conversion from string values to the..."},
+            "tableIdOrName": {"type": "string", "description": "The unique identifier or name of the table where records will be created. Table IDs are..."},
+            "returnFieldsByFieldId": {"type": "boolean", "description": "If true, the returned field objects will use field IDs as keys instead of field names. Defaults..."}
+          }
+        }
+      },
+      {
+        "slug": "AIRTABLE_CREATE_RECORD_FROM_NATURAL_LANGUAGE",
+        "description": "Creates a new record in an Airtable table from a natural language description.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["baseId", "tableIdOrName", "nl_query"],
+          "properties": {
+            "baseId": {"type": "string", "description": "Unique identifier of the Airtable base, typically starting with 'app'."},
+            "nl_query": {"type": "string", "description": "Natural language description of the record to create. Example: 'Add a task called Fix Login Bug..."},
+            "typecast": {"type": "boolean", "description": "If True, Airtable will automatically convert string values to their appropriate types (e.g...."},
+            "tableIdOrName": {"type": "string", "description": "Unique identifier (typically starting with 'tbl') or name of the table within the specified base."}
+          }
+        }
+      },
+      {
+        "slug": "AIRTABLE_DELETE_RECORD",
+        "description": "Permanently deletes a specific record from an existing table within an existing Airtable base.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["baseId", "tableIdOrName", "recordId"],
+          "properties": {
+            "baseId": {"type": "string", "description": "Unique identifier of the Airtable base, typically starting with 'app'."},
+            "recordId": {"type": "string", "description": "Unique identifier of the record to be deleted, typically starting with 'rec'."},
+            "tableIdOrName": {"type": "string", "description": "Unique identifier (typically starting with 'tbl') or name of the table within the specified base."}
+          }
+        }
+      },
+      {
+        "slug": "AIRTABLE_DELETE_MULTIPLE_RECORDS",
+        "description": "Tool to delete up to 10 specified records from a table within an Airtable base.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["baseId", "tableIdOrName", "recordIds"],
+          "properties": {
+            "baseId": {"type": "string", "description": "The unique identifier of the Airtable base containing the records to be deleted."},
+            "recordIds": {"type": "array", "description": "A list of unique identifiers for the records to be deleted."},
+            "tableIdOrName": {"type": "string", "description": "The unique identifier (e.g., 'tbluIzIsxPIM2V3Y4') or the name (e.g., 'Marketing Leads') of the..."}
+          }
+        }
+      },
+      {
+        "slug": "AIRTABLE_CREATE_COMMENT",
+        "description": "Tool to create a comment on a specific Airtable record.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["baseId", "tableIdOrName", "recordId", "text"],
+          "properties": {
+            "text": {"type": "string", "description": "The content of the comment. To mention a user, use the format @[userId] (e.g...."},
+            "baseId": {"type": "string", "description": "The unique identifier of the Airtable base. This typically starts with 'app'."},
+            "recordId": {"type": "string", "description": "The unique identifier of the record on which the comment will be created. This typically starts..."},
+            "tableIdOrName": {"type": "string", "description": "The unique identifier (typically starting with 'tbl') or the name of the table within the base."},
+            "parentCommentId": {"type": "string", "description": "The ID of the parent comment for creating threaded replies. If provided, this comment will be a..."}
+          }
+        }
+      }
+    ],
+    "list": {
+      "tool": "AIRTABLE_LIST_RECORDS",
+      "args": {"baseId": "appQ7rT2xY9kLm3Np", "tableIdOrName": "tblR4sV8wZ1aBc5De", "view": "Grid view", "pageSize": 20},
+      "data": {
+        "records": [
+          {
+            "id": "recA1b2C3d4E5f6G7",
+            "createdTime": "2026-09-18T07:22:41.000Z",
+            "commentCount": 1,
+            "fields": {
+              "Name": "Acme Corp renewal deck",
+              "Status": "In progress",
+              "Owner": {"id": "usrM4nP6qR8sT0uV2", "email": "lena.fischer@example.com", "name": "Lena Fischer"},
+              "Due Date": "2026-10-10",
+              "Priority": 2,
+              "Tags": ["sales", "q4"]
+            }
+          },
+          {
+            "id": "recH8i9J0k1L2m3N4",
+            "createdTime": "2026-09-27T14:05:09.000Z",
+            "commentCount": 0,
+            "fields": {
+              "Name": "Update pricing page copy",
+              "Status": "Todo",
+              "Due Date": "2026-10-15",
+              "Priority": 3,
+              "Tags": ["marketing"]
+            }
+          }
+        ],
+        "offset": "itrK3mN5pQ7rS9tU/recH8i9J0k1L2m3N4"
+      }
+    }
+  },
+  "hubspot": {
+    "tools": [
+      {
+        "slug": "HUBSPOT_LIST_DEALS",
+        "description": "Retrieves a paginated list of HubSpot deals.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": [],
+          "properties": {
+            "after": {"type": "string", "description": "Pagination token from previous response to fetch the subsequent page."},
+            "limit": {"type": "integer", "description": "Maximum number of deals to return per page (default: 10). Maximum is 100 normally, but when..."},
+            "archived": {"type": "boolean", "description": "Filter by archived status: true for archived deals, false for active deals."},
+            "properties": {"type": "array", "description": "List of deal property names to include in the response."},
+            "associations": {"type": "array", "description": "List of object types for which to retrieve associated IDs."},
+            "propertiesWithHistory": {"type": "array", "description": "List of property names for which to retrieve historical values."}
+          }
+        }
+      },
+      {
+        "slug": "HUBSPOT_SEARCH_DEALS",
+        "description": "Searches for HubSpot deals using flexible criteria and filters.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": [],
+          "properties": {
+            "after": {"type": "string", "description": "Pagination token from a previous response's `paging.next.after` to fetch the next page; omit for..."},
+            "limit": {"type": "integer", "description": "Maximum number of deal records to return."},
+            "query": {"type": "string", "description": "String to search across default text properties in deals for records containing this string."},
+            "sorts": {"type": "array", "description": "Sort order for results. If multiple sort objects are provided, they are applied in the given order."},
+            "properties": {"type": "array", "description": "HubSpot deal property internal names to include in the response. Supports both standard and..."},
+            "filterGroups": {"type": "array", "description": "Filter groups to apply to the search. Filters within a group are ANDed; groups are ORed."},
+            "custom_properties": {"type": "array", "description": "User-defined custom property internal names (not standard HubSpot properties) to include in the..."}
+          }
+        }
+      },
+      {
+        "slug": "HUBSPOT_GET_DEAL",
+        "description": "Retrieves a HubSpot deal by its ID.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["dealId"],
+          "properties": {
+            "dealId": {"type": "string", "description": "Unique HubSpot identifier for the deal to retrieve."},
+            "archived": {"type": "boolean", "description": "Set to true to include only archived deals; defaults to false (active deals)."},
+            "properties": {"type": "array", "description": "Deal property names to include in the response; if omitted, all available properties are returned."},
+            "associations": {"type": "array", "description": "Object types (e.g., 'contacts', 'companies') for which to retrieve associated IDs."},
+            "propertiesWithHistory": {"type": "array", "description": "Property names for which to include current and historical values in the response."}
+          }
+        }
+      },
+      {
+        "slug": "HUBSPOT_LIST_CONTACTS",
+        "description": "Retrieves a paginated list of HubSpot contacts.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": [],
+          "properties": {
+            "after": {"type": "string", "description": "Pagination token from `paging.next.after` of a previous response, used to fetch the subsequent..."},
+            "limit": {"type": "integer", "description": "Maximum number of contacts to return per page, controlling pagination size (default: 10)."},
+            "archived": {"type": "boolean", "description": "Boolean flag to filter contacts by archived status: `true` returns only archived contacts..."},
+            "properties": {"type": "array", "description": "List of contact property internal names to include in the response (e.g., \"email\", \"firstname\")...."},
+            "associations": {"type": "array", "description": "List of object types (e.g., \"companies\", \"deals\") for which to retrieve associated IDs with each..."},
+            "propertiesWithHistory": {"type": "array", "description": "List of property internal names for which to retrieve historical values (e.g...."}
+          }
+        }
+      },
+      {
+        "slug": "HUBSPOT_READ_CONTACT",
+        "description": "Retrieves a HubSpot contact by its ID.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["contactId"],
+          "properties": {
+            "archived": {"type": "boolean", "description": "Set to true to include only archived contacts; defaults to false (active contacts)."},
+            "contactId": {"type": "string", "description": "Unique internal HubSpot CRM object ID for the contact, which must be valid and existing."},
+            "properties": {"type": "array", "description": "Contact property names to include in the response; if omitted, all available properties are..."},
+            "associations": {"type": "array", "description": "Object types (e.g., 'companies', 'deals') to include associated object IDs in the response."},
+            "propertiesWithHistory": {"type": "array", "description": "Property names for which to include current and historical values in the response."}
+          }
+        }
+      },
+      {
+        "slug": "HUBSPOT_SEARCH_CRM_OBJECTS_BY_CRITERIA",
+        "description": "Searches HubSpot CRM objects (e.g., 'contacts', 'companies') by `objectType` using complex criteria including filters, sorting, and pagination; property...",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["objectType"],
+          "properties": {
+            "after": {"type": "string", "description": "Optional. Cursor for pagination (from previous response). Must be formatted as an integer string..."},
+            "limit": {"type": "integer", "description": "Optional. Max results per page (default 10, max 100)."},
+            "query": {"type": "string", "description": "A string for a broad search across multiple fields on the object. Use this for quick text..."},
+            "sorts": {"type": "array", "description": "Optional. List of sort rules. Accepts either simple strings (e.g., 'createdate' for ascending..."},
+            "objectType": {"type": "string", "description": "The type of CRM object to search. VALID VALUES: 'contacts', 'companies', 'deals', 'tickets'..."},
+            "properties": {"type": "array", "description": "Optional. List of property names to include in the response. Property names must be valid for..."},
+            "filterGroups": {"type": "array", "description": "Optional. List of filter groups (AND within, OR between). Can be omitted to retrieve all objects..."}
+          }
+        }
+      },
+      {
+        "slug": "HUBSPOT_UPDATE_DEAL",
+        "description": "Updates properties for an existing HubSpot deal.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["dealId", "properties"],
+          "properties": {
+            "dealId": {"type": "string", "description": "Unique HubSpot identifier for the deal to be updated."},
+            "properties": {"type": "object", "description": "Deal properties to update. Must contain at least one property. Keys are internal HubSpot..."}
+          }
+        }
+      },
+      {
+        "slug": "HUBSPOT_UPDATE_DEALS",
+        "description": "Updates multiple HubSpot deals in a single batch operation.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["inputs"],
+          "properties": {
+            "inputs": {"type": "array", "description": "List of deal update operations."}
+          }
+        }
+      },
+      {
+        "slug": "HUBSPOT_PARTIALLY_UPDATE_CRM_OBJECT_BY_ID",
+        "description": "Partially updates specified properties of a CRM object (e.g., contact, company, deal) identified by its type and ID, or optionally by a unique property...",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["objectType", "objectId", "properties"],
+          "properties": {
+            "objectId": {"type": "any", "description": "Unique identifier of the CRM object. Can be provided as a string, integer, or float. If..."},
+            "idProperty": {"type": "string", "description": "Name of a unique property (e.g., 'email' for contacts) to use for identifying the object instead..."},
+            "objectType": {"type": "string", "description": "Type of the CRM object to be updated."},
+            "properties": {"type": "object", "description": "Dictionary of properties to update. Keys are internal property names (e.g., 'firstname'..."}
+          }
+        }
+      },
+      {
+        "slug": "HUBSPOT_CREATE_NOTE",
+        "description": "Creates a new HubSpot CRM note.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["hs_timestamp"],
+          "properties": {
+            "associations": {"type": "array", "description": "List of associations to link with the note (e.g., contacts, deals, companies)."},
+            "hs_note_body": {"type": "string", "description": "Text content of the note (up to 65,536 characters)."},
+            "hs_timestamp": {"type": "any", "description": "Creation time of the note. Either an ISO-8601 UTC timestamp (e.g., '2021-11-12T15:48:22Z') or..."},
+            "hubspot_owner_id": {"type": "string", "description": "HubSpot user ID to assign as the creator/owner of this note."},
+            "custom_properties": {"type": "object", "description": "A dictionary of custom properties. Boolean-type fields accept 'Yes'/'No', 'true'/'false'..."},
+            "hs_attachment_ids": {"type": "string", "description": "Semicolon-separated list of file attachment IDs."}
+          }
+        }
+      },
+      {
+        "slug": "HUBSPOT_CREATE_ENGAGEMENT",
+        "description": "Create a legacy EMAIL, CALL, MEETING, TASK, or NOTE engagement with optional CRM associations, attachments, and type-specific metadata.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["engagement_type"],
+          "properties": {
+            "active": {"type": "boolean", "description": "Optional active state for the engagement."},
+            "deal_ids": {"type": "array", "description": "Deal IDs as digit strings to associate with the engagement."},
+            "metadata": {"type": "object", "description": "Type-specific metadata using HubSpot's exact keys for the selected EMAIL, CALL, MEETING, TASK..."},
+            "owner_id": {"type": "string", "description": "HubSpot owner ID as a digit string."},
+            "ticket_ids": {"type": "array", "description": "Ticket IDs as digit strings to associate with the engagement."},
+            "company_ids": {"type": "array", "description": "Company IDs as digit strings to associate with the engagement."},
+            "contact_ids": {"type": "array", "description": "Contact IDs as digit strings to associate with the engagement."},
+            "timestamp_ms": {"type": "integer", "description": "Engagement occurrence time as Unix milliseconds."},
+            "attachment_ids": {"type": "array", "description": "HubSpot file IDs as digit strings; each is sent as an object with an integer id field."},
+            "engagement_type": {"type": "string", "description": "Legacy engagement kind; metadata requirements vary by this value."},
+            "association_owner_ids": {"type": "array", "description": "Owner IDs as digit strings to include in the associations object."}
+          }
+        }
+      },
+      {
+        "slug": "HUBSPOT_UPDATE_CONTACT",
+        "description": "Updates properties for an existing HubSpot contact.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["contactId"],
+          "properties": {
+            "contactId": {"type": "string", "description": "Unique HubSpot identifier for the contact to be partially updated. Can also be provided as..."},
+            "properties": {"type": "object", "description": "Standard HubSpot contact properties. Use these for common contact fields."},
+            "custom_properties": {"type": "object", "description": "Custom HubSpot properties to update. Use this for any custom properties you've created in your..."}
+          }
+        }
+      },
+      {
+        "slug": "HUBSPOT_REMOVE_DEAL",
+        "description": "Removes a HubSpot deal by its ID.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["dealId"],
+          "properties": {
+            "dealId": {"type": "string", "description": "Unique HubSpot identifier for the deal to be removed."}
+          }
+        }
+      },
+      {
+        "slug": "HUBSPOT_ARCHIVE_CONTACT",
+        "description": "Archives a HubSpot contact by its ID.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["contactId"],
+          "properties": {
+            "contactId": {"type": "string", "description": "Numeric HubSpot contact ID (e.g., '386009987808'). Note: The archive endpoint does NOT support..."}
+          }
+        }
+      },
+      {
+        "slug": "HUBSPOT_ARCHIVE_CRM_OBJECT_BY_ID",
+        "description": "Archives a specific HubSpot CRM object by its type and ID, moving it to the recycling bin; this action is irreversible via the API but objects can often be...",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["objectType", "objectId"],
+          "properties": {
+            "objectId": {"type": "string", "description": "The unique identifier for the CRM object to be archived. This ID must correspond to an existing..."},
+            "objectType": {"type": "string", "description": "The type of CRM object to be archived. This value is case-sensitive, must be a valid HubSpot CRM..."}
+          }
+        }
+      }
+    ],
+    "list": {
+      "tool": "HUBSPOT_LIST_DEALS",
+      "args": {
+        "limit": 10,
+        "properties": ["dealname", "amount", "dealstage", "closedate", "pipeline", "hubspot_owner_id"],
+        "associations": ["contacts", "companies"]
+      },
+      "data": {
+        "results": [
+          {
+            "id": "18422957301",
+            "properties": {
+              "dealname": "Northwind Traders - Enterprise annual",
+              "amount": "48000",
+              "dealstage": "contractsent",
+              "pipeline": "default",
+              "closedate": "2026-10-31T00:00:00Z",
+              "hubspot_owner_id": "81234567",
+              "createdate": "2026-08-12T09:41:22.118Z",
+              "hs_lastmodifieddate": "2026-10-02T17:03:55.402Z",
+              "hs_object_id": "18422957301"
+            },
+            "createdAt": "2026-08-12T09:41:22.118Z",
+            "updatedAt": "2026-10-02T17:03:55.402Z",
+            "archived": false,
+            "associations": {
+              "contacts": {
+                "results": [
+                  {"id": "95210384417", "type": "deal_to_contact"}
+                ]
+              },
+              "companies": {
+                "results": [
+                  {"id": "22104785033", "type": "deal_to_company"}
+                ]
+              }
+            }
+          },
+          {
+            "id": "18431120598",
+            "properties": {
+              "dealname": "Globex - Pilot expansion",
+              "amount": "12500",
+              "dealstage": "qualifiedtobuy",
+              "pipeline": "default",
+              "closedate": "2026-11-15T00:00:00Z",
+              "hubspot_owner_id": "81234590",
+              "createdate": "2026-09-21T13:16:07.640Z",
+              "hs_lastmodifieddate": "2026-09-30T08:27:14.011Z",
+              "hs_object_id": "18431120598"
+            },
+            "createdAt": "2026-09-21T13:16:07.640Z",
+            "updatedAt": "2026-09-30T08:27:14.011Z",
+            "archived": false,
+            "associations": {
+              "contacts": {
+                "results": [
+                  {"id": "95233019852", "type": "deal_to_contact"}
+                ]
+              }
+            }
+          }
+        ],
+        "paging": {
+          "next": {"after": "18431120599", "link": "https://api.hubapi.com/crm/v3/objects/deals?after=18431120599"}
+        }
+      }
+    }
+  },
+  "notion": {
+    "tools": [
+      {
+        "slug": "NOTION_QUERY_DATABASE",
+        "description": "Queries a Notion database to retrieve pages (rows).",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["database_id"],
+          "properties": {
+            "sorts": {"type": "array", "description": "List of sort rules to order the database query results. Each sort rule must specify..."},
+            "page_size": {"type": "integer", "description": "Number of items (database rows/pages) to return per request. Valid range: 1-100. Default is 100...."},
+            "database_id": {"type": "string", "description": "The UUID of the Notion DATABASE to query (32-character hex string, optionally with hyphens)...."},
+            "start_cursor": {"type": "string", "description": "An opaque pagination cursor for fetching the next page of results. Use the exact 'next_cursor'..."}
+          }
+        }
+      },
+      {
+        "slug": "NOTION_SEARCH_NOTION_PAGE",
+        "description": "Searches Notion pages and databases by title.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": [],
+          "properties": {
+            "query": {"type": "string", "description": "Text to search for in page and database titles. Use specific search terms to find items by title..."},
+            "direction": {"type": "string", "description": "Specifies the sort direction for the results. Required if `timestamp` is provided. Valid values..."},
+            "page_size": {"type": "integer", "description": "The number of items to include in the response. Must be an integer between 1 and 100, inclusive...."},
+            "timestamp": {"type": "string", "description": "The timestamp field to sort the results by. Currently, the only supported value is..."},
+            "filter_value": {"type": "string", "description": "Filters results by object type: 'page' or 'database'. Note: When searching databases, Notion's..."},
+            "start_cursor": {"type": "string", "description": "An opaque cursor value from a previous response's `next_cursor` field. Must be exactly as..."},
+            "filter_property": {"type": "string", "description": "The property to filter the search results by. Currently, the only supported value is `object`..."},
+            "filter_properties": {"type": "array", "description": "List of property names to include in the response for page results. When specified, only these..."}
+          }
+        }
+      },
+      {
+        "slug": "NOTION_GET_PAGE_MARKDOWN",
+        "description": "Retrieve a Notion page's full content rendered as Notion-flavored Markdown in a single API call.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["page_id"],
+          "properties": {
+            "page_id": {"type": "string", "description": "The UUID of the Notion page to retrieve as markdown. Accepts both hyphenated (8-4-4-4-12) and..."},
+            "include_transcript": {"type": "boolean", "description": "Set to true to include meeting note transcripts in the markdown response. Defaults to false if..."}
+          }
+        }
+      },
+      {
+        "slug": "NOTION_RETRIEVE_PAGE",
+        "description": "Retrieve a Notion page's properties/metadata (not block content) by page_id.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["page_id"],
+          "properties": {
+            "page_id": {"type": "string", "description": "The UUID of the Notion page to retrieve. Accepts both hyphenated (8-4-4-4-12) and unhyphenated..."}
+          }
+        }
+      },
+      {
+        "slug": "NOTION_FETCH_COMMENTS",
+        "description": "Fetches unresolved comments for a specified Notion block or page ID.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": [],
+          "properties": {
+            "page_id": {"type": "string", "description": "Identifier for a Notion page from which to fetch comments. This is an alias for block_id since..."},
+            "block_id": {"type": "string", "description": "Identifier for a Notion block from which to fetch comments. In Notion, pages are technically..."},
+            "page_size": {"type": "integer", "description": "The number of comments to return in a single response page. Must be between 1 and 100..."},
+            "start_cursor": {"type": "string", "description": "A pagination cursor. If provided, the response will contain the page of results starting after..."}
+          }
+        }
+      },
+      {
+        "slug": "NOTION_ADD_MULTIPLE_PAGE_CONTENT",
+        "description": "Bulk-add content blocks to Notion.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["parent_block_id", "content_blocks"],
+          "properties": {
+            "after": {"type": "string", "description": "Block ID to insert content AFTER (as siblings). Use this to add content after a heading: set..."},
+            "content_blocks": {"type": "array", "description": "⚠️ CRITICAL: Notion API enforces 2000 char limit per text.content field. Content >2000 chars..."},
+            "parent_block_id": {"type": "string", "description": "The UUID of the parent page or block where content will be added AS CHILDREN (nested inside). ⚠️..."}
+          }
+        }
+      },
+      {
+        "slug": "NOTION_APPEND_TEXT_BLOCKS",
+        "description": "Append text blocks (paragraphs, headings, lists) to a Notion page.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["block_id", "children"],
+          "properties": {
+            "after": {"type": "string", "description": "Optional UUID of an existing child block. New blocks will be inserted after this block."},
+            "block_id": {"type": "string", "description": "The UUID of the parent block or page to append children to."},
+            "children": {"type": "array", "description": "Array of text block objects to append (also accepts 'blocks' as parameter name). Supported..."}
+          }
+        }
+      },
+      {
+        "slug": "NOTION_REPLACE_PAGE_CONTENT",
+        "description": "Safely replaces a page's child blocks by optionally backing up current content, deleting existing children, then appending new children in batches.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["page_id", "new_children"],
+          "properties": {
+            "dry_run": {"type": "boolean", "description": "If True, returns what would be deleted and appended without making any changes. Use to preview..."},
+            "page_id": {"type": "string", "description": "The unique identifier (UUID) of the page whose content will be replaced. Must be a valid Notion..."},
+            "new_children": {"type": "array", "description": "Array of block objects to append to the page after clearing existing content. Supported types..."},
+            "backup_parent": {"type": "object", "description": "Parent specification for backup page creation."},
+            "create_backup": {"type": "boolean", "description": "Whether to create a backup page with the current content before replacing it. Strongly..."},
+            "backup_title_suffix": {"type": "string", "description": "Suffix to append to the original page title when creating a backup page."},
+            "archive_existing_children": {"type": "boolean", "description": "Whether to delete (archive) existing child blocks before appending new content. Set to False to..."}
+          }
+        }
+      },
+      {
+        "slug": "NOTION_UPDATE_PAGE",
+        "description": "Update page properties, icon, cover, or archive status.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["page_id"],
+          "properties": {
+            "icon": {"type": "object", "description": "Page icon object. At least one of properties, archived, icon, or cover is required."},
+            "cover": {"type": "object", "description": "Page cover image. Must contain either 'external' (with url) or 'file_upload' key. Empty dicts..."},
+            "page_id": {"type": "string", "description": "Identifier for the Notion page to be updated. Use 'page_id' as the parameter name (not 'id')."},
+            "archived": {"type": "boolean", "description": "Set to true to archive (trash) the page, false to restore. Note: Workspace-level pages (pages in..."},
+            "properties": {"type": "object", "description": "Dictionary mapping property names to property value objects. IMPORTANT: Property names are..."}
+          }
+        }
+      },
+      {
+        "slug": "NOTION_UPDATE_ROW_DATABASE",
+        "description": "Updates a specific row/page within a Notion database by its page UUID (row_id).",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["row_id"],
+          "properties": {
+            "icon": {"type": "string", "description": "The emoji to be used as the icon for the page. Must be a single emoji character (e.g., '😻'..."},
+            "cover": {"type": "string", "description": "URL of an external image to be used as the cover for the page (e.g...."},
+            "row_id": {"type": "string", "description": "REQUIRED: The page UUID of the database row to update. This is a PAGE ID (not a database ID). A..."},
+            "delete_row": {"type": "boolean", "description": "If true, the row (page) will be archived, effectively deleting it from the active view. If the..."},
+            "properties": {"type": "array", "description": "List of properties to update. Each property requires: (1) 'name' - exact property name as shown..."}
+          }
+        }
+      },
+      {
+        "slug": "NOTION_CREATE_NOTION_PAGE",
+        "description": "Creates a new page in a Notion workspace under a specified parent page or database.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["parent_id", "title"],
+          "properties": {
+            "icon": {"type": "string", "description": "An emoji to be used as the icon for the new page. Must be a single emoji character. If the title..."},
+            "cover": {"type": "string", "description": "The URL of an image to be used as the cover for the new page. The URL must be publicly accessible."},
+            "title": {"type": "string", "description": "The title of the new page to be created. If an icon emoji is provided and the title starts with..."},
+            "markdown": {"type": "string", "description": "Page content as Notion-flavored Markdown. When provided, the page will be created from this..."},
+            "parent_id": {"type": "string", "description": "CRITICAL: Must be either: 1) A valid Notion UUID in dashed format (8-4-4-4-12 hex characters..."}
+          }
+        }
+      },
+      {
+        "slug": "NOTION_INSERT_ROW_DATABASE",
+        "description": "Creates a new page (row) in a specified Notion database.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["database_id"],
+          "properties": {
+            "icon": {"type": "string", "description": "Emoji to be used as the page icon. Must be a single emoji character."},
+            "cover": {"type": "string", "description": "URL of an external image to set as the page cover. The URL must point to a publicly accessible..."},
+            "properties": {"type": "array", "description": "Property values for the new page. Accepts a LIST of objects or a JSON-encoded string. Each..."},
+            "database_id": {"type": "string", "description": "Identifier (UUID) of the Notion database where the new page (row) will be inserted. Can be..."},
+            "child_blocks": {"type": "array", "description": "A list of `NotionRichText` objects defining content blocks (e.g., paragraphs, headings, media)..."}
+          }
+        }
+      },
+      {
+        "slug": "NOTION_ARCHIVE_NOTION_PAGE",
+        "description": "Archives (moves to trash) or unarchives (restores from trash) a specified Notion page.",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["page_id"],
+          "properties": {
+            "archive": {"type": "boolean", "description": "Set to `true` to move the page to trash (archive), or `false` to restore it from trash..."},
+            "page_id": {"type": "string", "description": "The unique identifier (UUID) of the Notion page to be archived or unarchived. Must be a page ID..."}
+          }
+        }
+      },
+      {
+        "slug": "NOTION_CREATE_COMMENT",
+        "description": "Adds a comment to a Notion page (via `parent_page_id`) OR to an existing discussion thread (via `discussion_id`); cannot create new discussion threads on...",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["comment"],
+          "properties": {
+            "comment": {"type": "object", "description": "Content of the comment as a NotionRichText object or a JSON string. Simplest form: {'content'..."},
+            "discussion_id": {"type": "string", "description": "The ID of an existing discussion thread to which the comment will be added. This is required if..."},
+            "parent_page_id": {"type": "string", "description": "The ID of the Notion page where the comment will be added. This is required if `discussion_id`..."}
+          }
+        }
+      },
+      {
+        "slug": "NOTION_DELETE_BLOCK",
+        "description": "Archives a Notion block, page, or database using its ID, which sets its 'archived' property to true (like moving to \"Trash\" in the UI) and allows it to be...",
+        "tags": [],
+        "inputParameters": {
+          "type": "object",
+          "required": ["block_id"],
+          "properties": {
+            "block_id": {"type": "string", "description": "Identifier of the block, page, or database to be deleted (archived). Must be a valid Notion..."}
+          }
+        }
+      }
+    ],
+    "list": {
+      "tool": "NOTION_QUERY_DATABASE",
+      "args": {"database_id": "1bc5287f-a43f-80d1-bfc8-f0b428eedb89", "page_size": 25},
+      "data": {
+        "object": "list",
+        "type": "page_or_database",
+        "results": [
+          {
+            "object": "page",
+            "id": "1c05287f-a43f-8012-a3b4-c5d6e7f80912",
+            "created_time": "2026-09-25T08:14:00.000Z",
+            "last_edited_time": "2026-10-02T16:22:00.000Z",
+            "created_by": {"object": "user", "id": "7a1d4e2b-9c3f-4b8a-a6d5-2e1f0c9b8a73"},
+            "last_edited_by": {"object": "user", "id": "7a1d4e2b-9c3f-4b8a-a6d5-2e1f0c9b8a73"},
+            "icon": {"type": "emoji", "emoji": "🚀"},
+            "parent": {"type": "database_id", "database_id": "1bc5287f-a43f-80d1-bfc8-f0b428eedb89"},
+            "archived": false,
+            "in_trash": false,
+            "properties": {
+              "Name": {
+                "id": "title",
+                "type": "title",
+                "title": [
+                  {
+                    "type": "text",
+                    "text": {"content": "Q4 launch checklist", "link": null},
+                    "annotations": {
+                      "bold": false,
+                      "italic": false,
+                      "strikethrough": false,
+                      "underline": false,
+                      "code": false,
+                      "color": "default"
+                    },
+                    "plain_text": "Q4 launch checklist",
+                    "href": null
+                  }
+                ]
+              },
+              "Status": {
+                "id": "%3FbRt",
+                "type": "status",
+                "status": {"id": "in-progress", "name": "In progress", "color": "blue"}
+              },
+              "Assignee": {
+                "id": "nP%5Ew",
+                "type": "people",
+                "people": [
+                  {"object": "user", "id": "7a1d4e2b-9c3f-4b8a-a6d5-2e1f0c9b8a73"}
+                ]
+              },
+              "Due": {
+                "id": "Zx%3Aq",
+                "type": "date",
+                "date": {"start": "2026-10-20"}
+              }
+            },
+            "url": "https://www.notion.so/Q4-launch-checklist-1c05287fa43f8012a3b4c5d6e7f80912",
+            "public_url": null
+          },
+          {
+            "object": "page",
+            "id": "1c05287f-a43f-80a7-9e21-0b3c4d5e6f78",
+            "created_time": "2026-09-29T11:40:00.000Z",
+            "last_edited_time": "2026-09-30T09:05:00.000Z",
+            "created_by": {"object": "user", "id": "7a1d4e2b-9c3f-4b8a-a6d5-2e1f0c9b8a73"},
+            "last_edited_by": {"object": "user", "id": "7a1d4e2b-9c3f-4b8a-a6d5-2e1f0c9b8a73"},
+            "parent": {"type": "database_id", "database_id": "1bc5287f-a43f-80d1-bfc8-f0b428eedb89"},
+            "archived": false,
+            "in_trash": false,
+            "properties": {
+              "Name": {
+                "id": "title",
+                "type": "title",
+                "title": [
+                  {
+                    "type": "text",
+                    "text": {"content": "Customer interview notes - Globex", "link": null},
+                    "annotations": {
+                      "bold": false,
+                      "italic": false,
+                      "strikethrough": false,
+                      "underline": false,
+                      "code": false,
+                      "color": "default"
+                    },
+                    "plain_text": "Customer interview notes - Globex",
+                    "href": null
+                  }
+                ]
+              },
+              "Status": {
+                "id": "%3FbRt",
+                "type": "status",
+                "status": {"id": "not-started", "name": "Not started", "color": "default"}
+              },
+              "Assignee": {
+                "id": "nP%5Ew",
+                "type": "people",
+                "people": []
+              },
+              "Due": {"id": "Zx%3Aq", "type": "date", "date": null}
+            },
+            "url": "https://www.notion.so/Customer-interview-notes-Globex-1c05287fa43f80a79e210b3c4d5e6f78",
+            "public_url": null
+          }
+        ],
+        "has_more": false,
+        "next_cursor": null,
+        "request_id": "3e9b7c1a-5d2f-4a8e-b6c0-9f1e2d3c4b5a"
+      }
+    }
+  }
+}

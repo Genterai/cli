@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { cipher, namedApps } from "./genter.js";
 import { createBuilder } from "./builder.js";
+import { appOf, citedRefs, needsCatalogue, refFromUrl, refLabel, refsOfResult, shapeRef, writeHints } from "./refs.js";
+import { locatorArgs } from "./sync.js";
 
 // The task agent: an LLM loop over genter (search -> execute -> save), tuned for speed.
 // Before the first LLM call it already has, in parallel: the saved recipes matching the task (found by
@@ -12,6 +14,9 @@ import { createBuilder } from "./builder.js";
 //
 // mode "run": do the task. mode "find": read-only, only tools that read data run.
 // canExecute false: no tool runs at all (dashboard viewers); the agent answers from recipes and plans.
+// References: every knowledge chunk, recipe, call result and item of a list the model sees gets a number, the answer
+// cites them as [n], and a result lists the cited ones (refs.js): what each is, where it is (path, link, ids) and which
+// write tools work there. write() writes at one of them (or at a link).
 export function createAgent({
   genter,
   openrouterApiKey,
@@ -92,8 +97,10 @@ export function createAgent({
         }
         const found = await genter.search({ query: input.query, limit: 6, apps: run.apps, toolkits: run.named });
         run.seen = new Set([...(run.seen ?? []), ...found.filter((f) => f.tool).slice(0, 4).map((f) => f.tool)]);
+        for (const f of found) if (f.id && f.args) run.recipeArgs[f.id] = f.args;
+        const shown = found.map((f) => compactFound(f, recipeRef(run, f)));
         const hint = run.searches >= 2 ? "Pick the closest tool above and execute it now; do not search again." : undefined;
-        return { content: JSON.stringify(hint ? { tools: found.map(compactFound), hint } : found.map(compactFound)) };
+        return { content: JSON.stringify(hint ? { tools: shown, hint } : shown) };
       }
       case "get_tool_schema": {
         const schemas = await Promise.all((input.tools ?? []).slice(0, 5).map((slug) => genter.schema(slug).catch((e) => ({ tool: slug, error: e.message }))));
@@ -139,7 +146,13 @@ export function createAgent({
         const empty = ok && isEmpty(data);
         run.steps.push({ tool: tool ?? input.id, recipe: input.id ?? null, ok, summary: out.summary ?? null, saved: out.id ?? null });
         onEvent({ type: "tool", tool: tool ?? input.id, recipe: input.id ?? null, ok, empty, summary: out.summary ?? (empty ? "nothing found" : null) });
-        if (out.id) run.recipes[out.id] = tool;
+        const args = { ...(input.id ? run.recipeArgs[input.id] : {}), ...(input.args ?? {}) };
+        if (out.id) {
+          run.recipes[out.id] = tool;
+          run.recipeArgs[out.id] = args;
+        }
+        // What the model can cite: the call's one result, or each item of a list (`_ref` on the item).
+        const cited = ok && !empty && data != null && tool ? refsOfResult({ app: appOf(tool, run.apps), tool, args, data }, (r) => register(run, r)) : { data, ref: null, items: [] };
         // An empty search is not an answer yet: the words may be in another language than the data, or too narrow.
         const retry =
           empty && !run.retried
@@ -151,16 +164,18 @@ export function createAgent({
         const missing = !ok && /not found|404|does not exist/i.test(String(JSON.stringify(out.result?.error ?? "")))
           ? "What these args point to does not exist (wrong owner, repo, path or id?). Do not guess again: find the real name with a list or search tool first, or answer without it."
           : undefined;
-        const short = { id: out.id, successful: ok, summary: out.summary ?? undefined, error: ok ? undefined : out.result?.error, hint: retry ?? missing ?? out.hint };
-        const text = ok ? JSON.stringify(data) : "";
+        const short = { ref: cited.ref ?? undefined, id: out.id, successful: ok, summary: out.summary ?? undefined, error: ok ? undefined : out.result?.error, hint: retry ?? missing ?? out.hint };
+        const text = ok ? JSON.stringify(cited.data) : "";
+        // Stored without the data: the items it listed stay citable by their numbers.
+        const items = run.refs.filter((r) => cited.items.includes(r.n)).map((r) => [r.n, String(r.title).slice(0, 80)]);
         return {
           content: JSON.stringify({ ...short, data: text.length > 10000 ? `${text.slice(0, 10000)}… (truncated)` : text || undefined }),
-          keep: JSON.stringify({ ...short, note: "raw data not stored; execute this id again for details" }),
+          keep: JSON.stringify({ ...short, ...(items.length && { items }), note: "raw data not stored; execute this id again for details" }),
         };
       }
       case "search_knowledge": {
         const hits = await genter.knowledge({ query: input.query, limit: 8, source: input.source });
-        return { content: JSON.stringify(hits.map(compactHit)) };
+        return { content: JSON.stringify(hits.map((h) => compactHit(h, register(run, hitRef(h))))) };
       }
       case "add_source": {
         if (!genter.sources) return { content: "Sources are not available here." };
@@ -230,6 +245,8 @@ export function createAgent({
     run.timing = { search_ms: run.timing?.search_ms ?? 0, tool_ms: 0 };
     lastNote = null;
     currentRun = run;
+    run.refs ??= [];
+    run.recipeArgs ??= {};
     run.sourced = false;
     run.nudged = false;
     run.searches = 0;
@@ -289,6 +306,8 @@ export function createAgent({
     } catch (error) {
       result = { status: "failed", answer: error.message };
     }
+    // The references the answer used, with how to write at each.
+    if (result.status === "done") result.references = await withWrites(citedRefs(result.answer, run.refs, { round: run.round }));
     usage.cost_usd += run.usage_extra ?? 0; // the live sync builder's model: its steps are credits too
     usage.llm_calls += run.calls_extra ?? 0;
     run.usage_extra = 0;
@@ -308,9 +327,10 @@ export function createAgent({
     return out;
   }
 
-  return {
+  const api = {
     // Start a task. Recipes, candidate tools and connections are fetched in parallel before the first LLM call.
-    async start({ task, mode = "run", account }) {
+    // target (write): a reference to write at, with its write tools; the briefing ends with it.
+    async start({ task, mode = "run", account, target }) {
       onEvent({ type: "step", tool: "search_recipes", input: { query: task } });
       const searched = Date.now();
       const connecting = genter.login().then((l) => l.connected ?? []).catch(() => []);
@@ -332,7 +352,7 @@ export function createAgent({
         id: randomUUID(),
         task,
         mode,
-        sync: mode === "run" && canExecute && SYNC_INTENT.test(task),
+        sync: mode === "run" && canExecute && !target && SYNC_INTENT.test(task),
         account,
         status: "running",
         created_at: new Date().toISOString(),
@@ -341,23 +361,169 @@ export function createAgent({
         strong: !recipes.some((r) => r.status !== "outdated" && r.score >= STRONG_RECIPE),
         named, // apps the task is about
         recipes: Object.fromEntries(recipes.map((r) => [r.id, r.tool])),
+        recipeArgs: Object.fromEntries(recipes.filter((r) => r.args).map((r) => [r.id, r.args])),
         steps: [],
+        refs: [],
+        round: 1, // each send or write is the next round; an answer with no marks falls back to its round's references
         timing: { search_ms },
-        messages: [{ role: "user", content: briefing({ task, mode, account, found, connected, canExecute, english, sources, knowledge, named }) }],
       };
+      const refer = (r) => register(run, r);
+      const brief = briefing({ task, mode, account, found, connected, canExecute, english, sources, knowledge, named, recipeRef: (r) => recipeRef(run, r), hitRef: (h) => refer(hitRef(h)) });
+      const write = target && writeNote({ ...target, n: refer(target) }, task);
+      run.messages = [{ role: "user", content: write ? `${brief}\n\n${write}` : brief }];
       return loop(run);
     },
 
     // Continue a run: answer its question, say an app is connected, correct it, or give the next instruction.
     async send({ run_id, message }) {
-      const row = await runs.get(run_id);
-      if (!row) throw new Error(`Unknown run_id: ${run_id}`);
-      const run = open(row.blob);
+      const run = await load(run_id);
       run.steps = [];
       run.messages.push({ role: "user", content: message });
       return loop(run);
     },
+
+    // Write at a place a result referenced: ref is a reference number of run_id's result ([n]) or a link to the place.
+    // With change: the agent writes it (continuing the run, so it knows what was found), with the place and its write
+    // tools in front of it. With tool + args: that exact call, the reference's args under the given ones, no model step.
+    async write({ run_id, ref, change, tool, args, account }) {
+      const run = run_id ? await load(run_id) : null;
+      const target = targetOf(run, ref);
+      if (!target && !tool) throw new Error("Pass ref: a reference number [n] from run_id's result, or a link to the place");
+      if (!tool && !String(change ?? "").trim()) throw new Error("Pass change (what to write there), or tool + args for an exact call");
+      const [place] = target ? await withWrites([target], 8000) : [null];
+      if (tool) return writeNow({ run, place, tool, args, account });
+      if (!run) return api.start({ task: change, account, target: place });
+      run.steps = [];
+      run.mode = "run"; // a find goes on as a run: writing is what was asked
+      run.sync = false;
+      if (account) run.account = account;
+      run.messages.push({ role: "user", content: writeNote({ ...place, n: register(run, place) }, change) });
+      return loop(run);
+    },
   };
+  return api;
+
+  // A stored run, for its next round.
+  async function load(run_id) {
+    const row = await runs.get(run_id);
+    if (!row) throw new Error(`Unknown run_id: ${run_id}`);
+    const run = open(row.blob);
+    run.refs ??= [];
+    run.recipeArgs ??= {};
+    run.round = (run.round ?? 1) + 1;
+    return run;
+  }
+
+  // The references with write hints: known ones right away, other apps from their tool catalogue (cached for an hour;
+  // a catalogue not loaded within `wait` ms leaves that reference without hints, write() finds them later).
+  async function withWrites(refs, wait = 1500) {
+    const apps = [...new Set(refs.filter(needsCatalogue).map((r) => r.app))];
+    const catalogues = new Map(
+      await Promise.all(
+        apps.map(async (app) => {
+          if (!genter.catalog) return [app, null];
+          let timer;
+          const late = new Promise((resolve) => {
+            timer = setTimeout(resolve, wait, null);
+            timer.unref?.();
+          });
+          const list = await Promise.race([genter.catalog({ toolkit: app }).catch(() => null), late]);
+          clearTimeout(timer);
+          return [app, list];
+        }),
+      ),
+    );
+    return refs.map(({ round, score, ...r }) => ({ ...r, write: writeHints(r, catalogues.get(r.app)) }));
+  }
+
+  // One exact write: the tool the caller picked, with the reference's args under theirs.
+  async function writeNow({ run, place, tool, args = {}, account }) {
+    if (!canExecute) throw new Error("This user can search but not run tools");
+    if (place && appOf(tool, [place.app]) !== place.app) throw new Error(`${tool} is not a ${place.app} tool; the reference is in ${place.app}`);
+    const hint = place?.write?.find((h) => h.tool === tool);
+    const started = Date.now();
+    onEvent({ type: "step", tool: "execute", input: { tool } });
+    const out = await genter.execute({ tool, args: { ...hint?.args, ...args }, account: account ?? run?.account });
+    const ok = out.result?.successful !== false;
+    const data = ok ? out.result?.data : null;
+    onEvent({ type: "tool", tool, ok, summary: ok ? null : String(JSON.stringify(out.result?.error ?? "failed")).slice(0, 200) });
+    const text = JSON.stringify(data ?? null);
+    const at = place ? ` at ${refLabel(place)}${place.url ? ` (${place.url})` : ""}` : "";
+    const ms = Date.now() - started;
+    return {
+      run_id: run?.id ?? null,
+      status: ok ? "done" : "failed",
+      answer: ok
+        ? `Done: ${tool}${at}.${data != null ? `\n\n${text.length > 2000 ? `${text.slice(0, 2000)}… (truncated)` : text}` : ""}`
+        : `${tool} failed${at}: ${typeof out.result?.error === "string" ? out.result.error : JSON.stringify(out.result?.error ?? "unknown error")}`,
+      steps: [{ tool, recipe: null, ok, summary: null, saved: out.id ?? null }],
+      references: place ? [place] : [],
+      usage: { llm_calls: 0, tokens_in: 0, tokens_out: 0, cost_usd: 0, llm_ms: 0, search_ms: 0, tool_ms: ms, model: null, ms },
+    };
+  }
+}
+
+// A reference the model sees: numbered once per run (the same place keeps its number, and what is learned about it
+// later is added). null once a run has MAX_REFS.
+function register(run, { write, ...ref }) {
+  run.refs ??= [];
+  const key = refKey(ref);
+  const known = run.refs.find((r) => refKey(r) === key);
+  if (known) {
+    Object.assign(known, { ...ref, n: known.n, where: { ...known.where, ...ref.where }, round: run.round });
+    return known.n;
+  }
+  if (run.refs.length >= MAX_REFS) return null;
+  const n = (run.refs.at(-1)?.n ?? 0) + 1;
+  run.refs.push({ ...ref, n, round: run.round });
+  return n;
+}
+const refKey = (r) => `${r.app}:${r.kind}:${r.url ?? JSON.stringify(Object.entries(r.where ?? {}).sort())}`;
+const MAX_REFS = 300;
+
+// A saved recipe as a reference: the call it makes points somewhere (its args). Not sync recipes: their chunks are.
+const recipeRef = (run, r) =>
+  r.id && r.kind !== "sync" && r.tool
+    ? register(run, shapeRef({ app: appOf(r.tool, run.apps), via: "recipe", tool: r.tool, title: r.short ?? r.description?.split("\n")[0]?.replace(/^#+\s*/, ""), where: locatorArgs(r.args ?? {}) }))
+    : undefined;
+
+// A synced knowledge chunk as a reference: its item, where it is, and the source it was synced from.
+const hitRef = (h) =>
+  shapeRef({ app: h.toolkit, via: "knowledge", source: h.source, title: h.title, url: h.url, item: h.item, part: h.part, tool: h.tool, where: h.where, text: h.text, score: h.score });
+
+// The place a write is for: a reference number of the run ("3", "[3]"), or a link (one of the run's, or any link
+// refs.js knows). null without ref.
+function targetOf(run, ref) {
+  if (ref == null || ref === "") return null;
+  const text = String(ref).trim();
+  const number = text.match(/^\[?#?(\d+)\]?$/)?.[1];
+  if (number) {
+    if (!run) throw new Error(`ref ${number} is a reference number: pass the run_id of the result it is from`);
+    const found = run.refs.find((r) => r.n === Number(number));
+    if (!found) throw new Error(`run ${run.id} has no reference [${number}]; it has ${run.refs.length ? `[1]..[${run.refs.at(-1).n}]` : "none"}`);
+    return found;
+  }
+  const known = run?.refs.find((r) => r.url === text) ?? refFromUrl(text);
+  if (!known) throw new Error(`Unknown place: ${text}. Pass a reference number of run_id's result, or a link to a GitHub file, issue or pull request, a Notion page, a Gmail thread or a Calendar event`);
+  return known;
+}
+
+// The write the agent is asked for: the place, its write tools with their args, how to read what is there, the change.
+function writeNote(place, change) {
+  const hints = place.write ?? [];
+  const read = hints.find((h) => h.read)?.read;
+  return [
+    `Write at [${place.n}]: ${place.app} ${place.kind} ${refLabel(place)}${place.url ? ` (${place.url})` : ""}`,
+    `It is at: ${JSON.stringify(place.where ?? {})}`,
+    hints.length
+      ? `Write tools for it, args already filled (pass them as they are, add only the rest):\n${hints.map((h) => `- ${h.tool} ${JSON.stringify(h.args)}${h.needs.length ? ` + ${h.needs.join(", ")}` : ""} — ${h.does}`).join("\n")}`
+      : `No write tool is known for it yet: search_tools "${place.app} ${place.kind} update" (or "comment", "add"), then execute with the args above.`,
+    read && `What is there now: ${read.tool} ${JSON.stringify(read.args)}. A file is written whole: read it first, change only what is asked, keep the rest exactly as it is.`,
+    `Change: ${change}`,
+    "Write only there, in as few steps as possible. Then answer with what was written and its link.",
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 // Tools that only read: by Composio's hint, or by the verb in the slug.
@@ -385,8 +551,9 @@ export function isEmpty(data) {
   return lists > 0 && items === 0;
 }
 
-// Search results as the model sees them: recipes in full, Composio tools with a compact arg schema.
-function compactFound(r) {
+// Search results as the model sees them: recipes in full (with their reference number), Composio tools with a compact
+// arg schema.
+function compactFound(r, ref) {
   if (r.kind === "sync") {
     // A sync recipe's result is kept as embeddings: read it with search_knowledge, or sync it first.
     return {
@@ -400,7 +567,7 @@ function compactFound(r) {
     };
   }
   if (r.id) {
-    return { id: r.id, tool: r.tool, args: r.args, description: r.description, result_summary: r.summary, when: r.when, status: r.status, score: r.score };
+    return { ref, id: r.id, tool: r.tool, args: r.args, description: r.description, result_summary: r.summary, when: r.when, status: r.status, score: r.score };
   }
   return { tool: r.tool, description: (r.description ?? "").slice(0, 300), args: compactSchema(r.args) };
 }
@@ -416,8 +583,8 @@ function compactSchema(schema) {
   );
 }
 
-// A knowledge chunk as the model sees it.
-const compactHit = (h) => ({ source: h.source_title, title: h.title, url: h.url, score: h.score, text: h.text.slice(0, 1200) });
+// A knowledge chunk as the model sees it, with its reference number.
+const compactHit = (h, ref) => ({ ref: ref ?? undefined, source: h.source_title, title: h.title, url: h.url, score: h.score, text: h.text.slice(0, 1200) });
 
 const syncText = (s) =>
   s.status === "failed"
@@ -445,9 +612,9 @@ const TEMPLATE_HELP =
   "Pass pick (the repo or page name as the user said it) or scope. It is kept up to date on every change unless watch is false. " +
   'depth: "titles" (names and links only, fast), "summary" (a short summary per item), "full" (whole text, default).';
 
-function briefing({ task, mode, account, found, connected, canExecute, english, sources = [], knowledge = [], named = [] }) {
-  const recipes = found.filter((r) => r.id).map(compactFound);
-  const tools = found.filter((r) => !r.id).map(compactFound);
+function briefing({ task, mode, account, found, connected, canExecute, english, sources = [], knowledge = [], named = [], recipeRef = () => undefined, hitRef = () => undefined }) {
+  const recipes = found.filter((r) => r.id).map((r) => compactFound(r, recipeRef(r)));
+  const tools = found.filter((r) => !r.id).map((r) => compactFound(r));
   const apps = connected.map((c) => `${c.toolkit}${c.alias ? ` (${c.alias}${c.default ? ", default" : ""})` : ""}${c.status && c.status !== "ACTIVE" ? ` [${c.status}]` : ""}`);
   return [
     `Task: ${task}`,
@@ -463,7 +630,7 @@ function briefing({ task, mode, account, found, connected, canExecute, english, 
     `Saved recipes matching the task (best first):\n${recipes.length ? JSON.stringify(recipes) : "none"}`,
     tools.length && `Candidate Composio tools:\n${JSON.stringify(tools)}`,
     sources.length && `Synced sources: ${JSON.stringify(sources.map((s) => ({ id: s.id, title: s.title, toolkit: s.toolkit, depth: s.depth, status: s.status, items: s.stats.items, synced_at: s.synced_at })))}`,
-    knowledge.length && `Knowledge from synced sources matching the task (best first):\n${JSON.stringify(knowledge.map(compactHit))}`,
+    knowledge.length && `Knowledge from synced sources matching the task (best first):\n${JSON.stringify(knowledge.map((h) => compactHit(h, hitRef(h))))}`,
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -472,7 +639,7 @@ function briefing({ task, mode, account, found, connected, canExecute, english, 
 const SYSTEM = `You are Genter's task agent. You act in the user's connected apps through Composio tools, and you are judged on speed: the fewest steps that give a correct, complete result.
 
 The first message already holds everything for a fast start: saved recipes that match the task (proven past calls with their args and a summary of what they returned), candidate Composio tools with their args, and the connected apps.
-- If a recipe's result_summary or the knowledge from synced sources already answers the question, answer right away without calling anything; cite the titles and links.
+- If a recipe's result_summary or the knowledge from synced sources already answers the question, answer right away without calling anything.
 - Synced sources are an app's content kept searchable (a GitHub repo, Notion pages). Use search_knowledge for more of it. When the user asks to remember, index or keep an app's content up to date, call add_source; to refresh one, sync_source. Filters in the user's words ("only docs/", "no tests", "only the last 200") go to add_source filter.
 - Built-in live sync recipes cover only: github = the FILES of a repository; notion = pages. A saved one (live_sync in the first message) fits too: add_source with its id. Anything else (issues, pull requests, commits, emails, tickets, messages, rows, any other app) needs a new live sync recipe: call build_live_sync with the whole goal in the user's words; it builds, tests, saves and adds the source. Never use a built-in one for something it does not cover, and never answer a remember/sync request with a one-off execute.
 - If a recipe fits, execute it by id and override only the args that differ. This is the fastest path.
@@ -485,6 +652,7 @@ The first message already holds everything for a fast start: saved recipes that 
 - A name you do not know (an org, a project, a repo, a person): look it up in the connected apps first (e.g. the user's GitHub repositories and orgs) and answer about what you found. "Projects" in GitHub usually means repositories: list them (and Projects only if asked).
 - "What's new in <app>" / "что нового в <app>" for a connected app means the user's own latest items there (recently created or updated tasks, issues, emails, files), read with that app's tools, not news about the product.
 - Every fact in the answer comes from a tool result, a recipe summary or synced knowledge of this run. Never answer from general knowledge about a product or company; if nothing was found, say what was checked.
+- Cite where each fact comes from: right after it, the ref number of the knowledge chunk, recipe, tool result or list item (its _ref) in square brackets, e.g. "Paging stops at a short page [3]." or "[2, 5]". Cite only what you used; never invent numbers. The user gets the cited places (paths, links, ids) with the answer.
 - An empty result is not an answer: retry once with translated or broader terms before saying nothing was found.
 - Every successful call is saved as a recipe: the exact call, named by its result, with no parameters. When you execute a tool that did not come from a recipe, pass description, short and tags so the next run finds its result:
   description is Markdown named by what this exact call returns: "### <the result>" (e.g. "### Open pull requests of Genterai/genter-cli"), then what the result holds and how it is filtered, "- pitfall: ..." bullets if any; short is that name in one line under 100 characters; tags in English and Russian. Leave them out for a step whose result is only a means (an id lookup): it is named automatically.
