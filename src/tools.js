@@ -91,6 +91,38 @@ export const tools = {
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
+  sources: {
+    description: "List synced sources (an app's content kept as searchable knowledge) with their status and size.",
+    input: z.object({}),
+    annotations: { readOnlyHint: true },
+  },
+  add_source: {
+    description:
+      "Remember an app's content as searchable knowledge: github {owner, repo, branch?, path?}, notion {query?}. " +
+      "depth: titles (names and links only), summary (a short summary per item) or full (whole text, default). Run sync_source next.",
+    input: z.object({
+      template: z.enum(["github", "notion"]),
+      scope: z.record(z.string(), z.string()).optional(),
+      depth: z.enum(["titles", "summary", "full"]).optional(),
+      account: z.string().optional().describe("Connection (account id) when the app is connected several times"),
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  },
+  sync_source: {
+    description: "Bring a source up to date: lists everything, reads only new and changed items, drops removed ones.",
+    input: z.object({ id: z.string(), budget_ms: z.number().int().positive().optional() }),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  },
+  remove_source: {
+    description: "Delete a source and everything synced from it.",
+    input: z.object({ id: z.string() }),
+    annotations: { readOnlyHint: false, destructiveHint: true },
+  },
+  knowledge: {
+    description: "Search synced sources by meaning: the closest text chunks with titles and links.",
+    input: z.object({ query: z.string(), limit: z.number().int().min(1).max(20).optional(), source: z.string().optional() }),
+    annotations: { readOnlyHint: true },
+  },
 };
 
 // MCP surface: only agent tools. Each one starts or continues a fast server-side agent that works from recipes first.

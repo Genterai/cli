@@ -1,5 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
 import { Composio } from "@composio/core";
+import { createSources } from "./sync.js";
 
 // Genter = Composio + recipes of past calls.
 // A call record is { id, tool, args, created_at, summary, digest, memory }: memory is the recipe description,
@@ -9,7 +10,8 @@ import { Composio } from "@composio/core";
 // call is kept as an alias of it, so every id execute returned stays valid.
 // Records are encrypted before they reach the store, so the store only sees rows { id, remembered, blob }
 // and needs: get(id), put(row), all() (remembered rows).
-export function createGenter({ composioApiKey, openrouterApiKey, userId, secret, store, defer, minScore = 0.25, strongScore = 0.45 }) {
+// knowledge (optional) stores sources, see sync.js; without it there are no sources.
+export function createGenter({ composioApiKey, openrouterApiKey, userId, secret, store, knowledge, defer, minScore = 0.25, strongScore = 0.45 }) {
   if (!secret) throw new Error("secret is required to encrypt stored calls");
   const composio = new Composio({ apiKey: composioApiKey });
   const { seal, open: decrypt } = cipher(`${secret}:${userId}`);
@@ -100,6 +102,54 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     if (!res.ok) throw new Error(`Embeddings failed: ${res.status} ${await res.text()}`);
     return (await res.json()).data[0].embedding;
   }
+
+  // A connection alias from login -> its account id. Unknown aliases stay as they are (strict) or mean the default.
+  async function accountId(account, { strict = true } = {}) {
+    if (!account || account.startsWith("ca_")) return account || undefined;
+    const { items } = await composio.connectedAccounts.list({ userIds: [userId], limit: 100 });
+    return items.find((a) => a.alias === account)?.id ?? (strict ? account : undefined);
+  }
+
+  // Several texts at once, for source chunks.
+  async function embedMany(input) {
+    if (!openrouterApiKey) throw new Error("Sources need an OpenRouter key for embeddings (OPENROUTER_API_KEY)");
+    const res = await fetch("https://openrouter.ai/api/v1/embeddings", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${openrouterApiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: process.env.EMBEDDING_MODEL || "openai/text-embedding-3-small", input }),
+      signal: AbortSignal.timeout(60000),
+    });
+    if (!res.ok) throw new Error(`Embeddings failed: ${res.status} ${await res.text()}`);
+    return (await res.json()).data.sort((a, b) => a.index - b.index).map((d) => d.embedding);
+  }
+
+  // Sources: an app's content synced as knowledge (sync.js). Tools run directly, they are not saved as recipes.
+  const sources =
+    knowledge &&
+    createSources({
+      run: async (tool, args, account) => {
+        const id = await accountId(account, { strict: false });
+        return composio.tools.execute(tool, { userId, arguments: args, ...(id && { connectedAccountId: id }), dangerouslySkipVersionCheck: true });
+      },
+      embedMany,
+      summarize: (title, text) =>
+        chat({
+          model: process.env.SUMMARY_MODEL || "openai/gpt-oss-20b",
+          reasoning: { effort: "low" },
+          messages: [
+            {
+              role: "user",
+              content:
+                `Summarize "${title}" in 2-4 sentences so it can be found later: what it is about, key names, terms and decisions. ` +
+                `Write in the language of the text. No passwords, tokens or keys.\n\n${text.slice(0, 20000)}`,
+            },
+          ],
+        }).catch(() => null),
+      seal: (value) => seal(value),
+      open: (blob) => decrypt(blob),
+      store: knowledge,
+      namespace: userId,
+    });
 
   // A short retelling of a result, so it can be found later by its topic. Skipped without an OpenRouter key.
   async function summarize(tool, data) {
@@ -236,11 +286,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
         args = { ...previous.args, ...args };
       }
       if (!tool) throw new Error("Pass `tool` or `id`");
-      if (account && !account.startsWith("ca_")) {
-        // an alias from login
-        const { items } = await composio.connectedAccounts.list({ userIds: [userId], limit: 100 });
-        account = items.find((a) => a.alias === account)?.id ?? account;
-      }
+      account = await accountId(account); // an alias from login
       const result = await composio.tools.execute(tool, {
         userId,
         arguments: args,
@@ -278,6 +324,17 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
             "(the user's intent in plain words, what it returns, pitfalls, tags in English and Russian).",
         }),
       };
+    },
+
+    // Sources: templates(), list(), get(id), create({template, scope, depth?, account?}), sync({id, budgetMs?}), remove({id}).
+    sources,
+
+    // Chunks of synced sources closest to a question: [{ source, source_title, title, url, text, score }].
+    async knowledge({ query, limit = 6, source }) {
+      if (!sources) return [];
+      const english = await translate(query);
+      const vector = await embed(english?.en ? `${query}\n${english.en}` : query).catch(() => null);
+      return sources.search({ vector, limit, source });
     },
 
     // Waits for recipes still being saved (the CLI calls it before exiting).

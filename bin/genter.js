@@ -21,6 +21,25 @@ const store = {
   put: async (row) => write("calls.json", { ...read("calls.json"), [row.id]: row }),
   all: async () => Object.values(read("calls.json")).filter((r) => r.remembered),
 };
+// Sources: ~/.genter/sources.json (one encrypted row per source) and ~/.genter/knowledge.json (per item).
+const knowledge = {
+  getSource: async (id) => read("sources.json")[id],
+  putSource: async (row) => write("sources.json", { ...read("sources.json"), [row.id]: row }),
+  deleteSource: async (id) => {
+    const all = read("sources.json");
+    delete all[id];
+    write("sources.json", all);
+  },
+  sources: async () => Object.values(read("sources.json")),
+  items: async (sourceId) => Object.values(read("knowledge.json")).filter((r) => r.source_id === sourceId),
+  putItems: async (rows) => write("knowledge.json", { ...read("knowledge.json"), ...Object.fromEntries(rows.map((r) => [`${r.source_id}:${r.key}`, r])) }),
+  deleteItems: async (sourceId, keys) => {
+    const all = read("knowledge.json");
+    for (const key of keys) delete all[`${sourceId}:${key}`];
+    write("knowledge.json", all);
+  },
+  allItems: async () => Object.values(read("knowledge.json")),
+};
 const runs = {
   get: async (id) => read("runs.json")[id],
   put: async (row) => write("runs.json", { ...read("runs.json"), [row.id]: row }),
@@ -61,7 +80,14 @@ try {
     userId: process.env.GENTER_USER_ID || config.user_id || "default",
     secret: config.secret,
     store,
+    knowledge,
   });
+  const sourceCommands = {
+    sources: () => genter.sources.list(),
+    add_source: (input) => genter.sources.create(input),
+    sync_source: ({ id, budget_ms }) => genter.sources.sync({ id, budgetMs: budget_ms }),
+    remove_source: (input) => genter.sources.remove(input),
+  };
   if (agentCommands[name]) {
     const { tool, start } = agentCommands[name];
     const input = agentTools()[tool].input.parse(args);
@@ -76,7 +102,8 @@ try {
     console.log(agentResultText(await start(agent, input)));
   } else {
     const input = tools[name].input.parse(args);
-    const { pending, ...out } = await genter[name](input);
+    const res = await (sourceCommands[name] ?? genter[name])(input);
+    const out = Array.isArray(res) ? res : (({ pending, ...rest }) => rest)(res);
     console.log(JSON.stringify(out, null, 2));
   }
   await genter.flush(); // recipes are saved after the result is shown
