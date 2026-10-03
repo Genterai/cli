@@ -1,7 +1,8 @@
 # genter
 
 Composio tools with saved call recipes. An AI agent finds a tool and runs it; every successful call is saved as a recipe: what it does and with which args.
-Next time `search` finds that ready-made call (tool + args), not just a raw tool.
+Each recipe also keeps a short summary of what the call returned (topics, names, ids to open it again),
+so `search` finds a past result by its topic, e.g. an email subject, and the agent knows where to dig.
 
 ```
 search       → saved recipes first, Composio tools if none is valid
@@ -35,8 +36,8 @@ Without it, `search` uses Composio only.
 | --- | --- | --- |
 | `register_tool` | `{toolkit}` | `{toolkit, connect_url, connection_id}` — open the URL to connect the app |
 | `login` | `{}` | `{user_id, connected: [{toolkit, status}]}` |
-| `search` | `{query, limit?}` | `[{id, tool, args, tags, description, status}]` |
-| `execute` | `{tool, args}` or `{id, args?}`, optional `{description, tags}` | `{id, result, saved?, note?}` |
+| `search` | `{query, limit?}` | `[{id, tool, args, description, summary, when, tags, status}]` |
+| `execute` | `{tool, args}` or `{id, args?}`, optional `{description, tags}` | `{id, result, summary, saved?, note?}` |
 | `save_recipes` | `{recipes: [{id, description, tags?, status?}]}` | `[{id, created_at, tags, description, status}]` |
 
 ```bash
@@ -49,8 +50,9 @@ genter execute '{"tool":"GMAIL_FETCH_EMAILS","args":{"query":"is:unread newer_th
 
 ## Data
 
-- Tool results are never stored. The recipe the agent writes is the result.
-- Every record (tool, args, description, embedding) is encrypted with AES-256-GCM before it is stored.
+- Raw tool results are never stored, only a 1-3 sentence summary written by an LLM through OpenRouter
+  (`SUMMARY_MODEL`, default `openai/gpt-4o-mini`). The same call with the same result is not saved twice.
+- Every record (tool, args, description, summary, embedding) is encrypted with AES-256-GCM before it is stored.
   The store only sees `{id, remembered, blob}`. The CLI keeps its key in `~/.genter/config.json` and data in `~/.genter/calls.json`.
 
 ## Hosted MCP

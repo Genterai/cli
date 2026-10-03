@@ -4,7 +4,9 @@ import { z } from "zod";
 export const instructions = `Genter runs Composio tools and keeps reusable call recipes.
 1. search first: a saved recipe (id + args) is faster than finding a tool again.
 2. execute with tool + args, or with id to repeat a recipe (override args as needed).
-3. Every successful call is saved as a recipe automatically, with Composio's generic description.
+3. Every successful call is saved as a recipe automatically, with a short summary of its result
+   (topics, names, ids to open it again). Search by topic, e.g. an email subject, finds the call that returned it;
+   then execute with the ids from its summary to dig deeper.
    Make recipes easier to find: pass description + tags to execute, or improve several at once with save_recipes.
 Write the description as a general recipe, not this one case:
   "<Verb> <object> — TOOL_SLUG, args: {a, b?}. Returns <what, format, size limits>. For another target override <args>."
@@ -32,7 +34,8 @@ export const tools = {
   },
   search: {
     description:
-      "Find a tool for a task. Returns saved recipes first ({id, tool, args, tags, description, status}); " +
+      "Find a tool for a task, or a past result by its topic (e.g. an email subject). " +
+      "Returns saved recipes first ({id, tool, args, description, summary of the result, when, tags, status}); " +
       "if none is valid, returns Composio tools (id: null, args = JSON schema).",
     input: z.object({
       query: z.string().describe("What you want to do, in plain words"),

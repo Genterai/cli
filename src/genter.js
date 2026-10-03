@@ -2,7 +2,8 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID }
 import { Composio } from "@composio/core";
 
 // Genter = Composio + recipes of past calls.
-// A call record is { id, tool, args, created_at, memory? }; memory is the recipe description. Results are never stored.
+// A call record is { id, tool, args, created_at, summary, digest, memory }: memory is the recipe description,
+// summary is a short retelling of the result (topics, names, ids to open it again). The raw result is never stored.
 // Every successful call is saved as a recipe right away; the agent can improve its description later.
 // Records are encrypted before they reach the store, so the store only sees rows { id, remembered, blob }
 // and needs: get(id), put(row), all() (remembered rows).
@@ -27,6 +28,32 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     });
     if (!res.ok) throw new Error(`Embeddings failed: ${res.status} ${await res.text()}`);
     return (await res.json()).data[0].embedding;
+  }
+
+  // A short retelling of a result, so it can be found later by its topic. Skipped without an OpenRouter key.
+  async function summarize(tool, data) {
+    if (!openrouterApiKey) return null;
+    try {
+      const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${openrouterApiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: process.env.SUMMARY_MODEL || "openai/gpt-4o-mini",
+          messages: [
+            {
+              role: "user",
+              content:
+                `Retell in 1-3 sentences what this ${tool} result contains, so it can be found later by topic: ` +
+                "subjects, people, dates, and the ids or URLs needed to open it again. Write in the language of the content. " +
+                `No passwords, tokens or keys.\n\n${JSON.stringify(data).slice(0, 20000)}`,
+            },
+          ],
+        }),
+      });
+      return (await res.json()).choices[0].message.content.trim();
+    } catch {
+      return null; // a recipe without a summary is still useful
+    }
   }
 
   const api = {
@@ -64,6 +91,8 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
               args: r.args,
               tags: r.memory.tags,
               description: r.memory.description,
+              summary: r.summary,
+              when: r.created_at,
               status: r.memory.status,
             }))
         : [];
@@ -96,16 +125,18 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       };
       if (!result.successful) return { result, ...outdated }; // failed calls are not recipes
 
-      // Same tool and args already saved: reuse that recipe instead of a duplicate.
+      // Same tool, args and result already saved: reuse that recipe instead of a duplicate.
+      const digest = createHash("sha256").update(JSON.stringify(result.data)).digest("hex");
       const same = (await store.all())
         .map((row) => open(row.blob))
-        .find((r) => r.tool === tool && JSON.stringify(r.args) === JSON.stringify(args));
-      const record = same ?? { id: randomUUID(), tool, args, created_at: new Date().toISOString() };
+        .find((r) => r.tool === tool && JSON.stringify(r.args) === JSON.stringify(args) && r.digest === digest);
+      const summary = same ? same.summary : await summarize(tool, result.data);
+      const record = same ?? { id: randomUUID(), tool, args, created_at: new Date().toISOString(), summary, digest };
       if (!same) await save(record);
 
       if (description) {
         const [saved] = await api.save_recipes({ recipes: [{ id: record.id, description, tags }] });
-        return { id: record.id, result, saved, ...outdated };
+        return { id: record.id, result, summary, saved, ...outdated };
       }
       if (!same) {
         const info = await composio.tools.getRawComposioToolBySlug(tool);
@@ -117,6 +148,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       return {
         id: record.id,
         result,
+        summary,
         ...outdated,
         ...((!same || same.memory?.auto) && {
           note:
@@ -133,7 +165,9 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
         recipes.map(async ({ id, description, tags = [], status = "valid", auto }) => {
           const record = await load(id);
           const created_at = new Date().toISOString();
-          const embedding = await embed(`${description}\ntags: ${tags.join(", ")}\ntool: ${record.tool}\nargs: ${JSON.stringify(record.args)}`);
+          const embedding = await embed(
+            `${description}\nresult: ${record.summary ?? ""}\ntags: ${tags.join(", ")}\ntool: ${record.tool}\nargs: ${JSON.stringify(record.args)}`,
+          );
           await save({ ...record, memory: { created_at, tags, description, status, embedding, ...(auto && { auto }) } });
           return { id, created_at, tags, description, status };
         }),
