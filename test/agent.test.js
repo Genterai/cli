@@ -265,6 +265,26 @@ describe("Writes that are refused", () => {
   });
 });
 
+describe("A person's instructions from their workspace", () => {
+  it("P1 they follow the fixed system prompt in every call of every round; without them there is only the system prompt", async () => {
+    const genter = fakeGenter({ connected: ["gmail"], results: { GMAIL_FETCH_EMAILS: { messages: [{ messageId: "1", subject: "Hi" }] } } });
+    const agent = agentWith(genter, { instructions: "  Answer in Russian.\nSign emails as Anna.  " });
+    model = fakeModel([call("execute", { tool: "GMAIL_FETCH_EMAILS", args: {} }), answer("Одно письмо."), answer("Готово.")]);
+    const found = await agent.start({ task: "today's emails", mode: "find" });
+    await agent.send({ run_id: found.run_id, message: "and yesterday?" });
+    for (const body of model.requests) {
+      const system = body.messages.filter((m) => m.role === "system");
+      assert.equal(system.length, 2);
+      assert.match(system[0].content, /Cite where each fact comes from/);
+      assert.match(system[1].content, /<instructions>\nAnswer in Russian\.\nSign emails as Anna\.\n<\/instructions>/);
+    }
+    model.restore();
+    model = fakeModel([answer("Nothing.")]);
+    await agentWith(genter, { instructions: "   " }).start({ task: "today's emails", mode: "find" });
+    assert.equal(model.requests[0].messages.filter((m) => m.role === "system").length, 1);
+  });
+});
+
 describe("An app connected several times", () => {
   // Two GitHub accounts: Docsbook-io/docs is only visible to the second one.
   const twoAccounts = () => {
