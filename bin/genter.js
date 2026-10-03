@@ -90,6 +90,7 @@ try {
     choices: (input) => genter.sources.choices(input),
     watch_source: (input) => genter.sources.watch(input),
     test_live_sync: (input) => genter.sources.test(input),
+    live_sync: ({ id, once, budget_ms }) => genter.live_sync({ id, once, budgetMs: budget_ms }),
   };
   if (agentCommands[name]) {
     const { tool, start } = agentCommands[name];

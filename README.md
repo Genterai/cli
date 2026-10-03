@@ -18,18 +18,20 @@ execute      → runs a tool (or repeats a recipe by id) and saves it as a recip
 save_recipes → improves descriptions of several recipes at once; each description is embedded for search
 ```
 
-Without a description, `execute` saves the recipe with Composio's generic tool description, so every step,
-intermediate ones too, is found next time. The same tool + args is not saved twice. Failed calls are not recorded.
+A recipe is one exact call with no parameters, named by its result: "Open pull requests of Genterai/genter-cli",
+then what the result holds. Without a description, `execute` names it from the result itself (the same model call that
+writes the summary), so every step, intermediate ones too, is found next time. The same tool + args is not saved twice.
+Failed calls are not recorded. Dates in args can stay placeholders filled at each run: `{{today}}`, `{{tomorrow}}`,
+`{{now}}`, `{{ago.7d}}`, `{{ahead.30d}}`.
 If a recipe stops matching its description, the agent saves it with `status: "outdated"` and says why.
 Search then falls back to Composio again.
 
-Recipes are Markdown, written as general recipes, not one case:
+Recipes are Markdown, named by the result of their call:
 
 ```md
-### Fetch unread emails
-`GMAIL_FETCH_EMAILS` · args: `{query, max_results?}`
-Returns a list of messages. For other filters override `query`.
-- pitfall: bodies are truncated, open one with `GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID`
+### Unread emails in the inbox
+Unread emails in the inbox, newest first: subject, sender, date and text.
+`GMAIL_FETCH_EMAILS`
 ```
 
 plus `short`, one line for compact lists (the Markdown is shown when a recipe is opened), and tags in English and Russian.
@@ -87,6 +89,26 @@ const out = await agent.start({ task: "my meetings tomorrow", mode: "find" });
 await agent.send({ run_id: out.run_id, message: "only the work calendar" });
 ```
 
+## Ready recipes
+
+Popular apps get their recipes the moment an account is connected, with no model and no sample calls (`src/ready.js`,
+`setup_recipes`): GitHub lists the account's repositories once and makes a **sync recipe per repository** (the whole
+project: its description, every file on the default branch, every issue and pull request) plus reads such as
+"Issues and pull requests assigned to me" and "Recent commits of <repo>"; Gmail, Google Calendar, Google Tasks and Notion
+get a sync recipe for the account and everyday reads ("Unread emails in the inbox", "Today's events"). Each read runs
+once, so its result is known. Making them again updates the same recipes. Other apps get reads planned by a model from
+the app's read tools in one call (`builder.intents`), run once each.
+
+```bash
+genter setup_recipes '{"toolkit":"github"}'
+genter live_sync '{"id":"sync_...","once":true}'   # Run now: keep the whole project as embeddings
+genter knowledge '{"query":"how are recipes deduplicated?"}'
+```
+
+A first sync of a repository downloads its archive once (`bulk`) instead of reading files one by one, and embeds chunks
+in batches; later syncs read only changed files and list issues `{{since}}` the last one. A sync cut short continues
+on the next call or the scheduler a minute later.
+
 ## Sources
 
 A source keeps an app's content as searchable knowledge: the files of a GitHub repo, the pages shared with Genter in Notion.
@@ -110,6 +132,10 @@ tools with real sample calls, writes the recipe, tests it on real data (`test_li
 ```bash
 genter run '{"task":"remember all pull requests of Genterai/genter-backend and keep them up to date"}'
 ```
+
+A recipe can have `parts` (several lists: files, issues, description), fixed `vars` instead of scope fields (so it has
+no parameters), `fields` (an item as plain text of these paths) and a list given only as a call: its items, ids,
+versions and pages are found in the first real response.
 
 Each source has its own filters for any app: `include` / `exclude` regexes over id and title, `maxItems`.
 Triggers need a webhook receiver, so they are on only where `createGenter` gets `triggers: true` (the hosted backend).

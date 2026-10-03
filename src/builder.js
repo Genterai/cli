@@ -338,6 +338,39 @@ export function createBuilder({ genter, openrouterApiKey, model = process.env.BU
       return { kinds, made, cost, left: run.left };
     },
 
+    // Everyday reads of an app without ready recipes, planned by a model from the app's read tools in one call:
+    // [{ name, about, tool, args, tags }], fixed calls over the person's own data that need no id, each named by its
+    // result ("Open issues assigned to me"). Run once, each becomes a recipe with its result; any can be live-synced.
+    // The plan is about the app, not the person: cached for a day.
+    async intents({ toolkit }) {
+      const hit = intentPlans.get(toolkit);
+      if (hit && Date.now() - hit.at < 86_400_000) return hit.plan;
+      const plan = (async () => {
+        const tools = await genter.app_tools({ toolkit });
+        if (!tools.length) return { intents: [], cost: 0 };
+        const { json, cost } = await ask(
+          `These are the read tools of ${toolkit}, called as the connected person. Plan up to 8 calls they would want ready ` +
+            "to see their own data, each with a different intent: what is new or recent, what is assigned to or waits for them, " +
+            "what is unread or open, what is coming up, the lists of their projects, channels, boards or files. " +
+            "Each call runs as it is, with fixed args: never an id, a name or an email you do not know, never a global or public " +
+            "search. Ask for 20-50 items. Dates are placeholders filled when it runs: {{now}}, {{today}}, {{tomorrow}}, " +
+            "{{ago.7d}}, {{ahead.7d}} (any number of days). name says what the result is, up to 8 words, e.g. \"Open issues assigned to me\"; " +
+            "about says in one sentence what each item has. tags: 3-5 words in English and Russian.\n" +
+            'Reply with JSON only: {"intents": [{"name": "...", "about": "...", "tool": "...", "args": {...}, "tags": ["..."]}]}\n\n' +
+            JSON.stringify(tools),
+        );
+        const known = new Set(tools.map((t) => t.tool));
+        const intents = (json.intents ?? [])
+          .filter((x) => x?.name && known.has(x.tool) && x.args && typeof x.args === "object" && !Array.isArray(x.args))
+          .slice(0, 8)
+          .map((x) => ({ name: String(x.name).slice(0, 100), about: String(x.about ?? "").slice(0, 400), tool: x.tool, args: x.args, tags: (x.tags ?? []).map(String).slice(0, 6) }));
+        return { intents, cost };
+      })();
+      intentPlans.set(toolkit, { at: Date.now(), plan });
+      plan.catch(() => intentPlans.delete(toolkit));
+      return plan;
+    },
+
     // goal: what to sync in the user's words; toolkit, account: optional hints.
     // Returns { saved: true, id, scope, recipe, test } or { saved: false, answer }.
     async build({ goal, toolkit, account }) {
@@ -609,6 +642,7 @@ function within(ms, fn) {
 }
 
 const plans = new Map(); // toolkit -> { at, plan: Promise<{ kinds, cost }> }
+const intentPlans = new Map(); // toolkit -> { at, plan: Promise<{ intents, cost }> }
 
 async function pool(items, n, fn) {
   let next = 0;
