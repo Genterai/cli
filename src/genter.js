@@ -7,7 +7,7 @@ import { Composio } from "@composio/core";
 // Every successful call is saved as a recipe right away; the agent can improve its description later.
 // Records are encrypted before they reach the store, so the store only sees rows { id, remembered, blob }
 // and needs: get(id), put(row), all() (remembered rows).
-export function createGenter({ composioApiKey, openrouterApiKey, userId, secret, store, minScore = 0.45 }) {
+export function createGenter({ composioApiKey, openrouterApiKey, userId, secret, store, minScore = 0.25, strongScore = 0.45 }) {
   if (!secret) throw new Error("secret is required to encrypt stored calls");
   const composio = new Composio({ apiKey: composioApiKey });
   const { seal, open } = cipher(`${secret}:${userId}`);
@@ -82,7 +82,8 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
         ? (await store.all())
             .map((row) => open(row.blob))
             .filter((r) => r.memory?.embedding)
-            .map((r) => ({ ...r, score: cosine(vector, r.memory.embedding) }))
+            // Best of: how the recipe is described, and what its result was about.
+            .map((r) => ({ ...r, score: Math.max(...[r.memory.embedding, r.summaryEmbedding].filter(Boolean).map((e) => cosine(vector, e))) }))
             .filter((r) => r.score >= minScore)
             .sort((a, b) => b.score - a.score)
             .slice(0, limit)
@@ -95,9 +96,10 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
               summary: r.summary,
               when: r.created_at,
               status: r.memory.status,
+              score: Number(r.score.toFixed(2)),
             }))
         : [];
-      if (memories.some((m) => m.status === "valid")) return memories;
+      if (memories.some((m) => m.status === "valid" && m.score >= strongScore)) return memories;
 
       const tools = await composio.tools.getRawComposioTools({ search: query, limit });
       const found = tools.map((t) => ({
@@ -132,7 +134,8 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
         .map((row) => open(row.blob))
         .find((r) => r.tool === tool && JSON.stringify(r.args) === JSON.stringify(args) && r.digest === digest);
       const summary = same ? same.summary : await summarize(tool, result.data);
-      const record = same ?? { id: randomUUID(), tool, args, created_at: new Date().toISOString(), summary, digest };
+      const summaryEmbedding = summary && !same ? await embed(summary) : undefined;
+      const record = same ?? { id: randomUUID(), tool, args, created_at: new Date().toISOString(), summary, summaryEmbedding, digest };
       if (!same) await save(record);
 
       if (description) {
