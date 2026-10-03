@@ -332,12 +332,12 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
       source.status = left > 0 ? "partial" : stats.failed ? "errors" : "ready";
       source.last_run = { ...stats, left, ms: Date.now() - started, at: new Date().toISOString() };
       if (left === 0) source.synced_at = source.last_run.at;
-      // A partial sync continues soon; a done one waits for its next turn.
-      if (source.schedule) source.schedule.next = new Date(Date.now() + (left > 0 ? 60_000 : source.schedule.every * 60_000)).toISOString();
     } catch (e) {
       source.status = "failed";
       source.last_run = { ...stats, error: e.message, ms: Date.now() - started, at: new Date().toISOString() };
     }
+    // A partial sync continues soon; a done or failed one waits for its next turn.
+    if (source.schedule) source.schedule.next = new Date(Date.now() + (source.status === "partial" ? 60_000 : source.schedule.every * 60_000)).toISOString();
     await saveSource(source);
     return publicSource(source);
   }
