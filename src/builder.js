@@ -62,7 +62,9 @@ export function createBuilder({ genter, openrouterApiKey, model = process.env.BU
               "teams, lists, folders), give a containers call that lists them and an items call that lists the content of one, with " +
               '"{{container}}" where the container id goes. Prefer calls that return many items with their text and an updated time. ' +
               "Use only these tools and their argument names; ask for the largest page size; recent items first.\n" +
-              'Reply with JSON only: {"kinds": [{"name": "Emails by label", "description": "...", "containers": {"tool": "...", "args": {}}, ' +
+              "Kinds must not overlap (not both all mail and inbox). Mark recommended: true on the ones most people want kept. " +
+              "Streams (mail, chat, posts) take recent items only (the newest page).\n" +
+              'Reply with JSON only: {"kinds": [{"name": "Emails by label", "description": "...", "recommended": true, "containers": {"tool": "...", "args": {}}, ' +
               '"items": {"tool": "...", "args": {"label_ids": ["{{container}}"], "max_results": 100}}}]} (containers is optional).\n\n' +
               JSON.stringify(tools),
           },
@@ -81,7 +83,7 @@ export function createBuilder({ genter, openrouterApiKey, model = process.env.BU
     // plan, so each can be kept up to date with one click. onProgress gets { kind, container?, recipe?, error? }.
     async discover({ toolkit, account, perKind = 12, onProgress = () => {} }) {
       const { kinds, cost } = await plan(toolkit);
-      onProgress({ planned: kinds.map((k) => ({ name: k.name, description: k.description })) });
+      onProgress({ planned: kinds.map((k) => ({ name: k.name, description: k.description, recommended: Boolean(k.recommended) })) });
       const made = [];
       for (const kind of kinds) {
         let containers = [null];
