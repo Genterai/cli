@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { cipher, namedApps } from "./genter.js";
 import { createBuilder } from "./builder.js";
-import { appOf, citedRefs, needsCatalogue, refFromUrl, refLabel, refsOfResult, shapeRef, writeHints } from "./refs.js";
+import { appOf, applyEdits, citedRefs, fileEditor, needsCatalogue, refFromUrl, refLabel, refsOfResult, shapeRef, writeHints } from "./refs.js";
 import { locatorArgs } from "./sync.js";
 
 // The task agent: an LLM loop over genter (search -> execute -> save), tuned for speed.
@@ -16,7 +16,8 @@ import { locatorArgs } from "./sync.js";
 // canExecute false: no tool runs at all (dashboard viewers); the agent answers from recipes and plans.
 // References: every knowledge chunk, recipe, call result and item of a list the model sees gets a number, the answer
 // cites them as [n], and a result lists the cited ones (refs.js): what each is, where it is (path, link, ids) and which
-// write tools work there. write() writes at one of them (or at a link).
+// write tools work there. write() writes at one of them (or at a link). A file is changed by edits (exact pieces of its
+// text and what goes instead): it is read and committed here, so nobody writes the whole file out.
 export function createAgent({
   genter,
   openrouterApiKey,
@@ -172,6 +173,25 @@ export function createAgent({
           content: JSON.stringify({ ...short, data: text.length > 10000 ? `${text.slice(0, 10000)}… (truncated)` : text || undefined }),
           keep: JSON.stringify({ ...short, ...(items.length && { items }), note: "raw data not stored; execute this id again for details" }),
         };
+      }
+      case "edit_file": {
+        if (!canExecute) return { content: "Not allowed: this user can search but not change files." };
+        if (run.mode === "find") return { content: "Not allowed: editing a file changes it and this is a read-only find. Tell the user to use run_task." };
+        if ((run.failures.edit_file ?? 0) >= MAX_TOOL_FAILURES) return { content: JSON.stringify({ error: `edit_file failed ${MAX_TOOL_FAILURES} times in this run.`, hint: "Answer with what you have and say what did not work." }) };
+        const place =
+          input.ref != null
+            ? run.refs.find((r) => r.n === Number(String(input.ref).replace(/\D/g, "")))
+            : input.path && shapeRef({ app: "github", via: "call", tool: "GITHUB_GET_REPOSITORY_CONTENT", where: { owner: input.owner, repo: input.repo, path: input.path, branch: input.branch } });
+        if (!place) return { content: JSON.stringify({ error: input.ref != null ? `No reference [${input.ref}] in this run` : "Pass ref (the file's reference number) or owner, repo and path" }) };
+        const n = register(run, place);
+        const out = await editFile({ place, edits: input.edits, message: input.message, account: input.account ?? run.account }).catch((e) => ({ error: e.message }));
+        run.steps.push({ tool: "edit_file", recipe: null, ok: !out.error, summary: out.error ?? out.summary, saved: null });
+        onEvent({ type: "tool", tool: "edit_file", ok: !out.error, summary: out.error ?? out.summary });
+        if (out.error) {
+          run.failures.edit_file = (run.failures.edit_file ?? 0) + 1;
+          return { content: JSON.stringify({ ref: n, error: out.error, hint: "Make find the file's exact current text (the lines given above), or read the file first; then call edit_file again." }) };
+        }
+        return { content: JSON.stringify({ ref: n, committed: !out.unchanged, ...out }) };
       }
       case "search_knowledge": {
         const hits = await genter.knowledge({ query: input.query, limit: 8, source: input.source });
@@ -385,11 +405,13 @@ export function createAgent({
     // Write at a place a result referenced: ref is a reference number of run_id's result ([n]) or a link to the place.
     // With change: the agent writes it (continuing the run, so it knows what was found), with the place and its write
     // tools in front of it. With tool + args: that exact call, the reference's args under the given ones, no model step.
-    async write({ run_id, ref, change, tool, args, account }) {
+    // With edits (a file): the file is read, the edits applied and the result committed once, no model step.
+    async write({ run_id, ref, change, tool, args, edits, message, account }) {
       const run = run_id ? await load(run_id) : null;
       const target = targetOf(run, ref);
       if (!target && !tool) throw new Error("Pass ref: a reference number [n] from run_id's result, or a link to the place");
-      if (!tool && !String(change ?? "").trim()) throw new Error("Pass change (what to write there), or tool + args for an exact call");
+      if (edits?.length) return editNow({ run, place: target, edits, message: message ?? change, account });
+      if (!tool && !String(change ?? "").trim()) throw new Error("Pass change (what to write there), edits for a file, or tool + args for an exact call");
       const [place] = target ? await withWrites([target], 8000) : [null];
       if (tool) return writeNow({ run, place, tool, args, account });
       if (!run) return api.start({ task: change, account, target: place });
@@ -461,7 +483,46 @@ export function createAgent({
       usage: { llm_calls: 0, tokens_in: 0, tokens_out: 0, cost_usd: 0, llm_ms: 0, search_ms: 0, tool_ms: ms, model: null, ms },
     };
   }
+
+  // A file changed in one commit: read (its text and sha), the edits applied here, committed with that sha.
+  // Neither call is saved as a recipe: they are steps of the edit, and the commit carries the whole file.
+  async function editFile({ place, edits, message, account }) {
+    if (!canExecute) throw new Error("This user can search but not change files");
+    const editor = fileEditor(place);
+    if (!editor) throw new Error(`[${place.n ?? "?"}] is a ${place.app} ${place.kind}, not a file that edits work on; write there with change or tool + args`);
+    if (!String(message ?? "").trim()) throw new Error("Pass message: the commit message");
+    const read = await genter.execute({ ...editor.read, account, remember: false });
+    if (read.result?.successful === false) throw new Error(`Could not read ${refLabel(place)}: ${errorText(read.result.error)}`);
+    const file = editor.file(read.result?.data);
+    const text = applyEdits(file.text, edits);
+    if (text === file.text) return { unchanged: true, summary: "nothing changed: the edits give the same text" };
+    const out = await genter.execute({ ...editor.write({ text, sha: file.sha, message: String(message).trim() }), account, remember: false });
+    if (out.result?.successful === false) throw new Error(`Could not commit ${refLabel(place)}: ${errorText(out.result.error)}`);
+    const before = file.text.split("\n").length;
+    const after = text.split("\n").length;
+    return { summary: `${edits.length} edit${edits.length === 1 ? "" : "s"} committed to ${refLabel(place)} (${before} → ${after} lines)`, commit: editor.link(out.result?.data) ?? null };
+  }
+
+  // GENTER_WRITE with edits: one commit, no model step.
+  async function editNow({ run, place, edits, message, account }) {
+    if (!place) throw new Error("Pass ref: the file's reference number [n] from run_id's result, or a link to it");
+    const started = Date.now();
+    onEvent({ type: "step", tool: "edit_file", input: { file: refLabel(place) } });
+    const out = await editFile({ place, edits, message, account: account ?? run?.account }).catch((e) => ({ error: e.message }));
+    onEvent({ type: "tool", tool: "edit_file", ok: !out.error, summary: out.error ?? out.summary });
+    const ms = Date.now() - started;
+    return {
+      run_id: run?.id ?? null,
+      status: out.error ? "failed" : "done",
+      answer: out.error ? `Not committed: ${out.error}` : `${out.summary}.${out.commit ? ` Commit: ${out.commit}` : ""}`,
+      steps: [{ tool: "edit_file", recipe: null, ok: !out.error, summary: out.error ?? out.summary, saved: null }],
+      references: [place],
+      usage: { llm_calls: 0, tokens_in: 0, tokens_out: 0, cost_usd: 0, llm_ms: 0, search_ms: 0, tool_ms: ms, model: null, ms },
+    };
+  }
 }
+
+const errorText = (e) => (typeof e === "string" ? e : JSON.stringify(e ?? "failed")).slice(0, 300);
 
 // A reference the model sees: numbered once per run (the same place keeps its number, and what is learned about it
 // later is added). null once a run has MAX_REFS.
@@ -511,14 +572,17 @@ function targetOf(run, ref) {
 // The write the agent is asked for: the place, its write tools with their args, how to read what is there, the change.
 function writeNote(place, change) {
   const hints = place.write ?? [];
-  const read = hints.find((h) => h.read)?.read;
+  const editor = fileEditor(place);
   return [
     `Write at [${place.n}]: ${place.app} ${place.kind} ${refLabel(place)}${place.url ? ` (${place.url})` : ""}`,
     `It is at: ${JSON.stringify(place.where ?? {})}`,
+    editor &&
+      `Change this file with edit_file {ref: ${place.n}, edits: [{find: "<its exact current text>", replace: "<the new text>"}], message: "<commit message>"} ` +
+        "({append} adds at the end). It is read and committed for you in one commit and only those pieces change: never write the whole file out. " +
+        `find must be the exact text, a few whole lines; when you do not have it, read the file first: ${editor.read.tool} ${JSON.stringify(editor.read.args)}.`,
     hints.length
-      ? `Write tools for it, args already filled (pass them as they are, add only the rest):\n${hints.map((h) => `- ${h.tool} ${JSON.stringify(h.args)}${h.needs.length ? ` + ${h.needs.join(", ")}` : ""} — ${h.does}`).join("\n")}`
+      ? `${editor ? "To create a new file instead" : "Write tools for it"}, args already filled (pass them as they are, add only the rest):\n${hints.map((h) => `- ${h.tool} ${JSON.stringify(h.args)}${h.needs.length ? ` + ${h.needs.join(", ")}` : ""} — ${h.does}`).join("\n")}`
       : `No write tool is known for it yet: search_tools "${place.app} ${place.kind} update" (or "comment", "add"), then execute with the args above.`,
-    read && `What is there now: ${read.tool} ${JSON.stringify(read.args)}. A file is written whole: read it first, change only what is asked, keep the rest exactly as it is.`,
     `Change: ${change}`,
     "Write only there, in as few steps as possible. Then answer with what was written and its link.",
   ]
@@ -653,6 +717,7 @@ The first message already holds everything for a fast start: saved recipes that 
 - "What's new in <app>" / "что нового в <app>" for a connected app means the user's own latest items there (recently created or updated tasks, issues, emails, files), read with that app's tools, not news about the product.
 - Every fact in the answer comes from a tool result, a recipe summary or synced knowledge of this run. Never answer from general knowledge about a product or company; if nothing was found, say what was checked.
 - Cite where each fact comes from: right after it, the ref number of the knowledge chunk, recipe, tool result or list item (its _ref) in square brackets, e.g. "Paging stops at a short page [3]." or "[2, 5]". Cite only what you used; never invent numbers. The user gets the cited places (paths, links, ids) with the answer.
+- To change an existing file of a repository, call edit_file with exact pieces of its current text and what goes instead: it reads and commits the file for you. Never write a whole existing file out; GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS is for new files.
 - An empty result is not an answer: retry once with translated or broader terms before saying nothing was found.
 - Every successful call is saved as a recipe: the exact call, named by its result, with no parameters. When you execute a tool that did not come from a recipe, pass description, short and tags so the next run finds its result:
   description is Markdown named by what this exact call returns: "### <the result>" (e.g. "### Open pull requests of Genterai/genter-cli"), then what the result holds and how it is filtered, "- pitfall: ..." bullets if any; short is that name in one line under 100 characters; tags in English and Russian. Leave them out for a step whose result is only a means (an id lookup): it is named automatically.
@@ -683,6 +748,36 @@ const TOOLS = [
         account: { type: "string", description: "Connection alias or id when the app is connected several times" },
         ...recipeFields,
       },
+    },
+  },
+  {
+    name: "edit_file",
+    description:
+      "Change an existing file of a repository in one commit: exact pieces of its current text and what goes instead. " +
+      "The file is read and committed for you; only those pieces change. Use it for every change to an existing file instead of writing the whole file.",
+    parameters: {
+      type: "object",
+      properties: {
+        ref: { type: "integer", description: "The file's reference number" },
+        owner: { type: "string", description: "Without ref: the repository owner" },
+        repo: { type: "string" },
+        path: { type: "string" },
+        branch: { type: "string" },
+        edits: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              find: { type: "string", description: "Exact current text, a few whole lines, found once in the file" },
+              replace: { type: "string", description: "What goes instead (empty to delete it)" },
+              append: { type: "string", description: "Instead of find/replace: text to add at the end of the file" },
+            },
+          },
+        },
+        message: { type: "string", description: "Commit message" },
+        account: { type: "string" },
+      },
+      required: ["edits", "message"],
     },
   },
   {

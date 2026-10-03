@@ -197,15 +197,14 @@ export function refLabel(ref) {
 // ---------- How to write there ----------
 
 // Write tools known to work at a kind of place in a popular app. args: write tool param -> `where` key ("?": may be
-// left out); needs: what the caller adds ("?": optional); read: how to get what is there now, when a write replaces it.
+// left out); needs: what the caller adds ("?": optional). A file is better changed by edits (fileEditor).
 const KNOWN_WRITES = {
   "github:file": [
     {
       tool: "GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS",
       args: ["owner", "repo", "path", "branch?"],
       needs: ["message", "content"],
-      does: "Commit a new version of this file: content is the whole new file as plain text, message the commit message",
-      read: { tool: "GITHUB_GET_REPOSITORY_CONTENT", args: { owner: "owner", repo: "repo", path: "path", ref: "branch?" } },
+      does: "Replace the whole file (a commit); to change parts of it, edits are better: only those pieces change",
     },
   ],
   "github:folder": [
@@ -255,6 +254,83 @@ export function writeHints(ref, tools, { limit = 3 } = {}) {
   return tools?.length ? rankWrites(ref, tools, limit) : [];
 }
 
+// ---------- Editing a file: only the pieces that change ----------
+
+// An API commit always carries the whole new file (GitHub's contents and git data APIs have no patch), but nobody has
+// to write it out: the file is read (text and sha), exact edits are applied here, and the result is committed once
+// with the sha it was read at. fileEditor(ref): how to read and commit a file reference of an app, or null.
+const FILE_EDITORS = {
+  github: {
+    read: (w) => ({ tool: "GITHUB_GET_REPOSITORY_CONTENT", args: clean({ owner: w.owner, repo: w.repo, path: w.path, ref: w.branch }) }),
+    file(data) {
+      const c = data?.content ?? data;
+      if (Array.isArray(c) || Array.isArray(data)) throw new Error("this path is a folder, not a file");
+      if (typeof c?.content !== "string" || (c.encoding && c.encoding !== "base64")) throw new Error("the file's text did not come back (a file over 1 MB is not read through this API)");
+      return { text: Buffer.from(c.content, "base64").toString("utf8"), sha: c.sha };
+    },
+    // content goes as base64: the tool would take a plain text that happens to be valid base64 for base64.
+    write: (w, { text, sha, message }) => ({
+      tool: "GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS",
+      args: clean({ owner: w.owner, repo: w.repo, path: w.path, branch: w.branch, message, content: Buffer.from(text, "utf8").toString("base64"), sha }),
+    }),
+    link: (data) => data?.commit?.html_url ?? data?.content?.html_url,
+  },
+};
+export function fileEditor(ref) {
+  const editor = ref?.kind === "file" && ref.where?.path ? FILE_EDITORS[ref.app] : null;
+  if (!editor) return null;
+  return { read: editor.read(ref.where), file: editor.file, write: (change) => editor.write(ref.where, change), link: editor.link };
+}
+
+// A file's text with edits applied, one after another: { find, replace } replaces the one place `find` is at (exact
+// text; found nowhere or more than once is an error, with lines like it to fix `find`), { append } adds at the end,
+// { prepend } at the start. The file's line endings are kept.
+export function applyEdits(text, edits) {
+  if (!Array.isArray(edits) || !edits.length) throw new Error("edits is empty: pass [{find, replace}] or [{append}]");
+  if (text.includes("\u0000")) throw new Error("this is a binary file");
+  const crlf = text.includes("\r\n");
+  const eol = (v) => (crlf ? String(v ?? "").replace(/\r?\n/g, "\r\n") : String(v ?? ""));
+  const nl = crlf ? "\r\n" : "\n";
+  let out = text;
+  edits.forEach((e, i) => {
+    const at = `edit ${i + 1}`;
+    if (e?.append != null) {
+      out = !out || out.endsWith("\n") ? out + eol(e.append) : out + nl + eol(e.append);
+      return;
+    }
+    if (e?.prepend != null) {
+      out = eol(e.prepend) + out;
+      return;
+    }
+    const find = eol(e?.find);
+    if (!find) throw new Error(`${at}: find is empty (to add at the end, use append)`);
+    const first = out.indexOf(find);
+    if (first < 0) throw new Error(`${at}: find is not in the file${linesLike(out, find)}`);
+    const count = out.split(find).length - 1;
+    if (count > 1) throw new Error(`${at}: find is in the file ${count} times; add the lines around it so it is found once`);
+    out = out.slice(0, first) + eol(e.replace) + out.slice(first + find.length);
+  });
+  return out;
+}
+
+// The file's lines most like the first line of a `find` that was not found (most of its words), for the next try.
+function linesLike(text, find) {
+  const probe = find.split(/\r?\n/).map((l) => l.trim()).find((l) => l.length >= 3);
+  if (!probe) return "";
+  const words = (l) => new Set(l.toLowerCase().match(/[\p{L}\p{N}_]{2,}/gu) ?? []);
+  const want = words(probe);
+  const like = text
+    .split(/\r?\n/)
+    .map((l, i) => {
+      const have = words(l);
+      return { n: i + 1, l, score: l.includes(probe) ? Infinity : [...want].filter((w) => have.has(w)).length };
+    })
+    .filter((x) => x.score >= Math.max(1, want.size / 2))
+    .sort((a, b) => b.score - a.score || a.n - b.n)
+    .slice(0, 3);
+  return like.length ? `; lines like it: ${like.map((x) => `${x.n}: ${JSON.stringify(x.l)}`).join(", ")}` : `; nothing like "${probe.slice(0, 80)}" either: read the file first`;
+}
+
 // Whether a reference's writes need the app's catalogue (no known ones for it).
 export const needsCatalogue = (ref) => Boolean(ref?.app) && !KNOWN_WRITES[`${ref.app}:${ref.kind}`];
 
@@ -268,8 +344,7 @@ function knownHint(h, where) {
     else if (!param.endsWith("?")) missing.push(p);
   }
   if (!Object.keys(args).length) return null;
-  const read = h.read && Object.fromEntries(Object.entries(h.read.args).map(([p, k]) => [p, where[k.replace(/\?$/, "")]]).filter(([, v]) => v != null));
-  return { tool: h.tool, args, needs: [...missing, ...h.needs], does: h.does, ...(read && { read: { tool: h.read.tool, args: read } }) };
+  return { tool: h.tool, args, needs: [...missing, ...h.needs], does: h.does };
 }
 
 // Any app: its tools that change something (never delete), scored by how much of `where` their params take, by

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { refLabel } from "./refs.js";
+import { fileEditor, refLabel } from "./refs.js";
 
 // Shared by the CLI and the MCP server.
 export const instructions = `Genter runs Composio tools and keeps reusable call recipes.
@@ -187,7 +187,7 @@ Show connect links to the user as Markdown links.
 Answers cite their sources as [n]; References under the answer say what each is and where: a path, a link, the ids that point to it.`;
 
 // Temporary: writing at a reference over MCP (GENTER_WRITE), added to the instructions where it is on.
-export const writeInstructions = `- GENTER_WRITE: write where a result pointed: run_id + ref (the [n] of its References) + the change. Each reference's "write" line names the app's write tools for that exact place, args already known.`;
+export const writeInstructions = `- GENTER_WRITE: write where a result pointed: run_id + ref (the [n] of its References) + the change. Each reference's "write" line names the app's write tools for that exact place, args already known. A file: pass edits ([{find, replace}], exact pieces of its text) and message: one commit, only those pieces change.`;
 
 // connected: [{ toolkit, alias? }] — listed in descriptions so clients prefer apps the user already has.
 // write: also GENTER_WRITE (temporary: writing at a reference of a result).
@@ -251,10 +251,11 @@ export function agentTools({ connected = [], write = false } = {}) {
           "ticket, card, record or chat message in any connected app, or at a link to it (temporary).\n" +
           "Every GENTER_FIND / GENTER_RUN_TASK answer cites [n] and lists References: what each is, its link, `where` (the ids " +
           "that point to it) and `write` (the app's write tools for that exact place, their args already known).\n" +
-          "Pass run_id + ref (n) + change in plain words: a fast agent reads what is there when it needs to (a file is written whole), " +
-          "calls the right write tool with the reference's args and answers with the link. Or pass tool + args from the write line " +
-          "for an exact call with no agent step: the reference's args are filled in, give only the rest (a comment's body, a file's " +
-          "message and content).\n" +
+          "Pass run_id + ref (n) + change in plain words: a fast agent calls the right write tool with the reference's args and " +
+          "answers with the link. A file: pass edits (exact pieces of its current text and what goes instead) + message instead: it is " +
+          "read and committed in one commit with only those pieces changed, no agent step, nothing to write out whole. Or pass " +
+          "tool + args from the write line for an exact call with no agent step: the reference's args are filled in, give only the " +
+          "rest (a comment's body).\n" +
           "Use for: edit or add a file in a repo, comment on or update an issue, PR, ticket or card, add to a Notion page, reply in an " +
           "email or Slack thread, change an event or a task, update a CRM record.",
         input: z.object({
@@ -264,6 +265,17 @@ export function agentTools({ connected = [], write = false } = {}) {
             .optional()
             .describe("Which place: its reference number [n] in that result, or a link to it (GitHub file, folder, issue or PR; Notion page; Gmail thread; Calendar event)"),
           change: z.string().optional().describe("What to write there, in plain words or the exact text, e.g. \"add a Troubleshooting section about proxy errors\", \"reply: Thursday 3pm works\""),
+          edits: z
+            .array(
+              z.object({
+                find: z.string().optional().describe("Exact current text of the file, a few whole lines, found once"),
+                replace: z.string().optional().describe("What goes instead (empty deletes it)"),
+                append: z.string().optional().describe("Instead of find/replace: text added at the end"),
+              }),
+            )
+            .optional()
+            .describe("For a file: the changes, applied in order and committed once; everything else stays as it is"),
+          message: z.string().optional().describe("With edits: the commit message"),
           tool: z.string().optional().describe("For an exact call: a write tool from the reference's write line, e.g. GITHUB_CREATE_AN_ISSUE_COMMENT"),
           args: z.record(z.string(), z.any()).optional().describe("Its args besides the ones the reference fills in, e.g. {\"body\": \"Fixed in #43\"}"),
           account,
@@ -284,7 +296,7 @@ export function agentResultText(out, { write = false } = {}) {
       needs_connection: "Show the connect link to the user as a Markdown link; when they have connected, call GENTER_CONTINUE_TASK with run_id.",
     }[out.status] ??
     (write && out.run_id && refs.some((r) => r.write?.length)
-      ? "To write at a reference: GENTER_WRITE {run_id, ref: n, change}; for an exact call, tool + args from its write line (the reference's args are filled in)."
+      ? "To write at a reference: GENTER_WRITE {run_id, ref: n, change}; a file: {run_id, ref, edits: [{find, replace}], message}, one commit with only those pieces changed; an exact call: tool + args from its write line (the reference's args are filled in)."
       : undefined);
   const meta = {
     run_id: out.run_id,
@@ -301,10 +313,12 @@ export function agentResultText(out, { write = false } = {}) {
 
 // [3] github file Genterai/genter-cli/src/agent.js — https://github.com/...
 //     where {"owner":"Genterai","repo":"genter-cli","path":"src/agent.js","branch":"main"}
+//     edit  {edits: [{find, replace}], message}: one commit, only those pieces change
 //     write GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS(message, content)
 export function referenceText(r, write = false) {
   const lines = [`[${r.n}] ${[r.app, r.kind].filter(Boolean).join(" ")} ${refLabel(r)}${r.url ? ` — ${r.url}` : ""}`];
   if (r.where && Object.keys(r.where).length) lines.push(`    where ${JSON.stringify(r.where)}`);
+  if (write && fileEditor(r)) lines.push("    edit  {edits: [{find, replace}], message}: one commit, only those pieces change");
   if (write && r.write?.length) lines.push(`    write ${r.write.map((h) => `${h.tool}(${h.needs.join(", ")})`).join(" · ")}`);
   return lines.join("\n");
 }
