@@ -70,6 +70,31 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     ).then((lists) => lists.flat());
   }
 
+  // An app's tools ranked for a query: by meaning (each tool's description embedded once per app and cached),
+  // and by the query's words in the slug. Without vectors, by the words alone.
+  async function appToolsFor(toolkits, query, vector, limit) {
+    const tools = await toolsOf(toolkits);
+    const vectors = vector && (await Promise.all(toolkits.map(toolVectors)).catch(() => null));
+    const bySlug = new Map(vectors ? vectors.flat() : []);
+    return rankTools(tools, query, limit, vectors ? tools.map((t) => (bySlug.has(t.slug) ? cosine(vector, bySlug.get(t.slug)) : 0)) : null);
+  }
+
+  // [slug, embedding] of every tool of an app; one batched call per 300 tools, cached with the tools.
+  function toolVectors(toolkit) {
+    const hit = appVectors.get(toolkit);
+    if (hit && Date.now() - hit.at < 3600_000) return hit.list;
+    const list = toolsOf([toolkit]).then(async (tools) => {
+      const text = (t) => `${t.slug.toLowerCase().replace(/_/g, " ")}: ${String(t.description ?? "").slice(0, 200)}`;
+      const chunks = [];
+      for (let i = 0; i < tools.length; i += 300) chunks.push(tools.slice(i, i + 300));
+      const vectors = (await Promise.all(chunks.map((c) => embedMany(c.map(text))))).flat();
+      return tools.map((t, i) => [t.slug, vectors[i]]);
+    });
+    appVectors.set(toolkit, { at: Date.now(), list });
+    list.catch(() => appVectors.delete(toolkit));
+    return list;
+  }
+
   // A search in another language than English: the English version and the key terms in both languages.
   // Tool search (Composio) works in English, and keyword search in apps matches literal words, so data in English
   // is not found by Russian words and the other way round. Cached, and shared by concurrent callers.
@@ -390,7 +415,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
 
       const search = english?.en ?? query;
       const [own, all] = await Promise.all([
-        toolkits.length ? toolsOf(toolkits).then((tools) => rankTools(tools, search, limit)).catch(() => []) : [],
+        toolkits.length ? appToolsFor(toolkits, `${query}\n${english?.en ?? ""}`, vector, Math.max(limit, 8)).catch(() => []) : [],
         composio.tools.getRawComposioTools({ search, limit }),
       ]);
       const tools = [...own, ...all.filter((t) => !own.some((o) => o.slug === t.slug))].slice(0, limit + own.length);
@@ -618,11 +643,12 @@ const fromB64 = (s) => {
 // How people say it -> how tool slugs say it.
 const SYNONYMS = {
   create: ["insert", "add"], add: ["insert", "create"], new: ["create", "insert"], make: ["create", "insert"],
-  show: ["list", "get"], what: ["list"], which: ["list"], my: ["list"], all: ["list"], find: ["search", "list"],
+  show: ["list", "get"], what: ["list"], which: ["list"], my: ["list", "authenticated"], have: ["authenticated"], all: ["list"], find: ["search", "list"],
   edit: ["update", "patch"], change: ["update", "patch"], rename: ["update", "patch"], remove: ["delete"],
   latest: ["list"], recent: ["list"], send: ["send", "create"], write: ["create", "send"],
 };
 const appTools = new Map(); // toolkit -> { at, list: Promise<tools> }
+const appVectors = new Map(); // toolkit -> { at, list: Promise<[slug, embedding][]> }
 
 // Connected apps the text names: "Google Tasks" -> googletasks.
 export function namedApps(text, apps = []) {
@@ -633,11 +659,12 @@ export function namedApps(text, apps = []) {
 // An app's tools ranked for a query. Composio's search inside a toolkit is alphabetical, so "list my tasks"
 // in Google Tasks gave BATCH_EXECUTE, BULK_INSERT, CLEAR... and never LIST_TASKS. Words of the query in the
 // slug count most, then in the description; reading tools win ties, so a question gets a tool that reads.
-export function rankTools(tools, query, limit) {
+// `semantic`: the query's similarity to each tool, when there are vectors; the words then only break ties.
+export function rankTools(tools, query, limit, semantic = null) {
   const stem = (w) => w.replace(/(ies|es|s)$/, "");
   const said = String(query).toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2);
   const words = [...new Set([...said, ...said.flatMap((w) => SYNONYMS[w] ?? [])].map(stem))];
-  const scored = tools.map((t) => {
+  const scored = tools.map((t, i) => {
     const slug = t.slug.toLowerCase().split("_").map(stem);
     const text = String(t.description ?? "").toLowerCase();
     const score =
@@ -645,7 +672,7 @@ export function rankTools(tools, query, limit) {
       words.filter((w) => text.includes(w)).length +
       (readsOnly(t.slug, t.tags) ? 2 : 0) +
       (/_(LIST|SEARCH|FIND|FETCH)(_|$)/.test(t.slug) ? 1 : 0);
-    return { t, score };
+    return { t, score: semantic ? semantic[i] + score * 0.01 : score };
   });
   return scored.sort((a, b) => b.score - a.score).slice(0, limit).map(({ t }) => t);
 }
