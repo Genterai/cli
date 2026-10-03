@@ -264,3 +264,67 @@ describe("Writes that are refused", () => {
     assert.deepEqual(tool.input.parse({ run_id: "r", ref: 1, edits: [{ find: "a", replace: "b" }, { append: "c" }], message: "m" }).edits, [{ find: "a", replace: "b" }, { append: "c" }]);
   });
 });
+
+describe("An app connected several times", () => {
+  // Two GitHub accounts: Docsbook-io/docs is only visible to the second one.
+  const twoAccounts = () => {
+    const genter = fakeGenter({});
+    const executed = genter.executed;
+    const readme = "# Changelog\n\n## 1.0\n";
+    genter.login = async () => ({
+      connected: [
+        { toolkit: "github", account: "ca_main", alias: "Main", default: true, status: "ACTIVE" },
+        { toolkit: "github", account: "ca_two", alias: "Connection 2", status: "ACTIVE" },
+      ],
+    });
+    genter.execute = async ({ tool, args = {}, account, remember }) => {
+      executed.push({ tool, args, account, ...(remember === false && { remember }) });
+      if (args.owner === "Docsbook-io" && account !== "ca_two") return { result: { successful: false, error: "Not Found (404)" } };
+      if (tool === "GITHUB_GET_REPOSITORY_CONTENT") {
+        return { id: "rec_1", result: { successful: true, data: { content: { path: "CHANGELOG.md", sha: "s1", content: Buffer.from(readme).toString("base64"), encoding: "base64" } } } };
+      }
+      return { result: { successful: true, data: { commit: { html_url: "https://github.com/Docsbook-io/docs/commit/c1" } } } };
+    };
+    return genter;
+  };
+  const where = { owner: "Docsbook-io", repo: "docs", path: "CHANGELOG.md" };
+
+  it("M1 what the default account cannot see is read on the other one, and the edit commits there too", async () => {
+    const genter = twoAccounts();
+    model = fakeModel([
+      call("execute", { tool: "GITHUB_GET_REPOSITORY_CONTENT", args: where }),
+      (body) => {
+        const result = JSON.parse(lastOf(body, "tool"));
+        assert.equal(result.successful, true);
+        assert.equal(result.account, "Connection 2");
+        return call("edit_file", { ...where, edits: [{ find: "## 1.0", replace: "## 1.1\n\n## 1.0" }], message: "Changelog 1.1" });
+      },
+      answer("Added 1.1 to the changelog (Connection 2) [1]."),
+    ]);
+    const out = await agentWith(genter).start({ task: "add 1.1 to the changelog of Docsbook-io/docs" });
+    assert.equal(out.status, "done");
+    assert.deepEqual(
+      genter.executed.map((e) => [e.tool, e.account]),
+      [
+        ["GITHUB_GET_REPOSITORY_CONTENT", undefined],
+        ["GITHUB_GET_REPOSITORY_CONTENT", "ca_two"],
+        ["GITHUB_GET_REPOSITORY_CONTENT", "ca_two"], // edit_file reads on the account found, no default try
+        ["GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS", "ca_two"],
+      ],
+    );
+  });
+
+  it("M2 a GENTER_WRITE edit by link finds the account by itself", async () => {
+    const genter = twoAccounts();
+    const out = await agentWith(genter).write({ ref: "https://github.com/Docsbook-io/docs/blob/main/CHANGELOG.md", edits: [{ find: "## 1.0", replace: "## 1.1\n\n## 1.0" }], message: "m" });
+    assert.equal(out.status, "done");
+    assert.deepEqual(genter.executed.map((e) => e.account), [undefined, "ca_two", "ca_two"]);
+  });
+
+  it("M3 an account the user named is not second-guessed", async () => {
+    const genter = twoAccounts();
+    model = fakeModel([call("execute", { tool: "GITHUB_GET_REPOSITORY_CONTENT", args: where, account: "Main" }), answer("Not found.")]);
+    await agentWith(genter).start({ task: "read the changelog of Docsbook-io/docs" });
+    assert.deepEqual(genter.executed.map((e) => e.account), ["Main"]);
+  });
+});
