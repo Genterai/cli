@@ -98,8 +98,20 @@ genter knowledge '{"query":"how are recipes deduplicated?"}'
 genter run '{"task":"remember the Notion pages about the roadmap, summaries only"}'
 ```
 
-The sync engine knows no connector. A template (`src/sync.js`) maps an app's tools onto roles: `list` (pages of items
-with an id and a version), `read` (an item's text) and optional `setup` (fills scope fields, e.g. the default branch).
+The sync engine knows no connector. A **live sync recipe** (plain JSON, `src/sync.js`) maps an app's tools onto roles:
+`list` (pages of items with an id and a version), `read` (an item's text), and optional `choices` (what the user can pick:
+their repos, top-level pages), `setup` (fills scope fields, e.g. the default branch) and `triggers` (Composio events that
+mean "changed"; an event syncs the source). GitHub files and Notion pages are built in. For anything else the agent's
+`build_live_sync` runs a builder (`src/builder.js`, `BUILDER_MODEL`, default `openai/gpt-6-luna`) that explores the app's
+tools with real sample calls, writes the recipe, tests it on real data (`test_live_sync`) and saves it like any recipe
+(`save_live_sync`), so it is found by search and reused:
+
+```bash
+genter run '{"task":"remember all pull requests of Genterai/genter-backend and keep them up to date"}'
+```
+
+Each source has its own filters for any app: `include` / `exclude` regexes over id and title, `maxItems`.
+Triggers need a webhook receiver, so they are on only where `createGenter` gets `triggers: true` (the hosted backend).
 A sync lists everything, reads only the items whose version changed and drops the ones that are gone: the first sync
 is a full one, every next one is incremental, and a sync cut short by its time budget continues next time.
 

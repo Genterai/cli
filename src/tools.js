@@ -101,9 +101,13 @@ export const tools = {
       "Remember an app's content as searchable knowledge: github {owner, repo, branch?, path?}, notion {query?}. " +
       "depth: titles (names and links only), summary (a short summary per item) or full (whole text, default). Run sync_source next.",
     input: z.object({
-      template: z.enum(["github", "notion"]),
+      template: z.string().describe("github, notion or the id of a saved live sync recipe"),
       scope: z.record(z.string(), z.string()).optional(),
       depth: z.enum(["titles", "summary", "full"]).optional(),
+      filter: z
+        .object({ include: z.string().optional(), exclude: z.string().optional(), maxItems: z.number().int().positive().optional() })
+        .optional()
+        .describe("Regexes over '<id> <title>' (case-insensitive) and a cap on items"),
       account: z.string().optional().describe("Connection (account id) when the app is connected several times"),
     }),
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
@@ -112,6 +116,34 @@ export const tools = {
     description: "Bring a source up to date: lists everything, reads only new and changed items, drops removed ones.",
     input: z.object({ id: z.string(), budget_ms: z.number().int().positive().optional() }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  },
+  choices: {
+    description: "What a live sync recipe can sync for this connection (e.g. your repos), each with its scope and the source made from it.",
+    input: z.object({ template: z.string(), account: z.string().optional() }),
+    annotations: { readOnlyHint: true, openWorldHint: true },
+  },
+  watch_source: {
+    description: "Keep a source up to date on every change (its recipe's Composio triggers), or stop with on: false.",
+    input: z.object({ id: z.string(), on: z.boolean().optional() }),
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  },
+  test_live_sync: {
+    description: "Try a live sync recipe (JSON, see src/sync.js) on real data without saving: first page, two items read, problems, raw items.",
+    input: z.object({ recipe: z.record(z.string(), z.any()), scope: z.record(z.string(), z.string()).optional(), account: z.string().optional() }),
+    annotations: { readOnlyHint: true, openWorldHint: true },
+  },
+  save_live_sync: {
+    description: "Save a live sync recipe after its test passes; use its id as the template of add_source.",
+    input: z.object({
+      id: z.string().optional(),
+      recipe: z.record(z.string(), z.any()),
+      description: z.string(),
+      short: z.string().optional(),
+      tags: z.array(z.string()).optional(),
+      scope: z.record(z.string(), z.string()).optional(),
+      account: z.string().optional(),
+    }),
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   },
   remove_source: {
     description: "Delete a source and everything synced from it.",
