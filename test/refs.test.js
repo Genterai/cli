@@ -274,3 +274,11 @@ describe("Which references an answer used", () => {
     assert.deepEqual(citedRefs("Done.", refs, { round: 1 }).map((r) => r.n), [2, 1]);
   });
 });
+
+describe("Tool ranking", () => {
+  it("T1 'the' and other empty words do not pull ..._FOR_THE_AUTHENTICATED_USER tools up", async () => {
+    const { rankTools } = await import("../src/genter.js");
+    const tools = ["GITHUB_LIST_GISTS_FOR_THE_AUTHENTICATED_USER", "GITHUB_GET_A_COMMIT", "GITHUB_LIST_NOTIFICATIONS_FOR_THE_AUTHENTICATED_USER"].map((slug) => ({ slug, description: "" }));
+    assert.equal(rankTools(tools, "show the commits of the repo", 1)[0].slug, "GITHUB_GET_A_COMMIT");
+  });
+});

@@ -101,7 +101,7 @@ export function createAgent({
         if (run.searches > MAX_SEARCHES) {
           return { content: JSON.stringify({ error: "No more searching.", hint: `Execute now the closest tool you already have: ${[...(run.seen ?? [])].slice(0, 8).join(", ")}. Then answer.` }) };
         }
-        const found = await genter.search({ query: input.query, limit: 6, apps: run.apps, toolkits: run.named });
+        const found = await genter.search({ query: input.query, limit: 6, apps: run.apps, toolkits: run.named, tools: true });
         run.seen = new Set([...(run.seen ?? []), ...found.filter((f) => f.tool).slice(0, 4).map((f) => f.tool)]);
         for (const f of found) if (f.id && f.args) run.recipeArgs[f.id] = f.args;
         const shown = found.map((f) => compactFound(f, recipeRef(run, f)));
@@ -115,6 +115,12 @@ export function createAgent({
       case "execute": {
         if (!canExecute) return { content: "Not allowed: this user can search but not run tools. Answer from recipes, or say which tool would do it." };
         const tool = input.tool ?? run.recipes[input.id];
+        // A call with neither a slug nor a known recipe id: it counts as a failure, so the run moves to the strong model.
+        if (!tool && !input.id) {
+          run.failures.execute = (run.failures.execute ?? 0) + 1;
+          onEvent({ type: "tool", tool: "execute", ok: false, summary: "no tool or id" });
+          return { content: JSON.stringify({ error: "Pass tool (a slug from the first message or search results) and args, or id of a saved recipe." }) };
+        }
         if (run.mode === "find" && tool && !isReadOnly(tool)) {
           return { content: `Not allowed: ${tool} changes data and this is a read-only find. Only read, or tell the user to use run_task.` };
         }
@@ -142,7 +148,7 @@ export function createAgent({
         // "Not Found" is also what an app says about a repo, file or id that does not exist: only a slug Composio
         // does not know is a missing tool, otherwise the model drops a working tool or retries it forever.
         if (error && tool && /not found|does not exist|invalid tool|unknown tool|no tool/i.test(String(error)) && !(await genter.schema(tool).then(() => true, () => false))) {
-          const similar = await genter.search({ query: tool.toLowerCase().replace(/_/g, " "), limit: 5 }).catch(() => []);
+          const similar = await genter.search({ query: tool.toLowerCase().replace(/_/g, " "), limit: 5, apps: run.apps, tools: true }).catch(() => []);
           onEvent({ type: "tool", tool, ok: false, summary: "no such tool" });
           return { content: JSON.stringify({ error: `${tool} does not exist`, use_one_of: similar.map(compactFound) }) };
         }
@@ -181,17 +187,31 @@ export function createAgent({
           keep: JSON.stringify({ ...short, ...(items.length && { items }), note: "raw data not stored; execute this id again for details" }),
         };
       }
+      case "read_file": {
+        // Reading a repository file is the base of most code tasks, and tool search does not surface it
+        // ("read file" finds READMEs and gists, not GITHUB_GET_REPOSITORY_CONTENT): it is built in, like edit_file.
+        if (!canExecute) return { content: "Not allowed: this user can search but not run tools. Answer from recipes and synced knowledge." };
+        const place = fileRef(run, input);
+        if (!place) return { content: JSON.stringify({ error: input.ref != null ? `No reference [${input.ref}] in this run` : "Pass ref (the file's reference number) or owner, repo and path" }) };
+        const n = register(run, place);
+        const out = await readFile({ run, place, account: input.account || undefined }).catch((e) => ({ error: e.message }));
+        if (out.error) run.failures.read_file = (run.failures.read_file ?? 0) + 1;
+        run.steps.push({ tool: "read_file", recipe: null, ok: !out.error, summary: out.error ?? out.summary, saved: null });
+        onEvent({ type: "tool", tool: "read_file", ok: !out.error, summary: out.error ?? out.summary });
+        const { summary, ...shown } = out;
+        return {
+          content: JSON.stringify({ ref: n, ...shown, ...(out.error && { hint: "Check owner, repo and path (list the repository's files or the commit's files first)." }) }),
+          keep: JSON.stringify({ ref: n, ...(out.error ? { error: out.error } : { summary }), note: "the text is not stored; read_file again for it" }),
+        };
+      }
       case "edit_file": {
         if (!canExecute) return { content: "Not allowed: this user can search but not change files." };
         if (run.mode === "find") return { content: "Not allowed: editing a file changes it and this is a read-only find. Tell the user to use run_task." };
         if ((run.failures.edit_file ?? 0) >= MAX_TOOL_FAILURES) return { content: JSON.stringify({ error: `edit_file failed ${MAX_TOOL_FAILURES} times in this run.`, hint: "Answer with what you have and say what did not work." }) };
-        const place =
-          input.ref != null
-            ? run.refs.find((r) => r.n === Number(String(input.ref).replace(/\D/g, "")))
-            : input.path && shapeRef({ app: "github", via: "call", tool: "GITHUB_GET_REPOSITORY_CONTENT", where: { owner: input.owner, repo: input.repo, path: input.path, branch: input.branch } });
+        const place = fileRef(run, input);
         if (!place) return { content: JSON.stringify({ error: input.ref != null ? `No reference [${input.ref}] in this run` : "Pass ref (the file's reference number) or owner, repo and path" }) };
         const n = register(run, place);
-        const out = await editFile({ run, place, edits: input.edits, message: input.message, account: input.account }).catch((e) => ({ error: e.message }));
+        const out = await editFile({ run, place, edits: input.edits, message: input.message, account: input.account || undefined }).catch((e) => ({ error: e.message }));
         run.steps.push({ tool: "edit_file", recipe: null, ok: !out.error, summary: out.error ?? out.summary, saved: null });
         onEvent({ type: "tool", tool: "edit_file", ok: !out.error, summary: out.error ?? out.summary });
         if (out.error) {
@@ -277,6 +297,8 @@ export function createAgent({
     run.recipeArgs ??= {};
     run.sourced = false;
     run.nudged = false;
+    run.unstuck = false;
+    run.prompted = false;
     run.searches = 0;
     run.seen = new Set();
     run.failed = {}; // "<tool> <args>" -> error of a call that failed in this round
@@ -290,7 +312,7 @@ export function createAgent({
         // Once the source is added there is nothing left to call: only the answer.
         // A question or a one-off task never adds sources: without these the model reads the data instead.
         // Stuck on the fast model (failed calls, searching again and again): the rest of the run goes to the strong one.
-        if (!run.strong && (Object.keys(run.failures).length || run.searches >= 2 || run.nudged || run.retried)) run.strong = true;
+        if (!run.strong && (Object.keys(run.failures).length || run.searches >= 2 || run.nudged || run.unstuck || run.prompted || run.retried)) run.strong = true;
         const message = await llm(run.messages, usage, run.sync && builder ? SYNC_TOOLS : run.sync ? TOOLS : TASK_TOOLS, run.sourced ? "none" : undefined, run.strong ? strongModel : model);
         run.messages.push({ role: "assistant", content: message.content ?? null, ...(message.tool_calls?.length && { tool_calls: message.tool_calls }) });
         if (!message.tool_calls?.length) {
@@ -298,6 +320,13 @@ export function createAgent({
           if (ASKS.test(message.content ?? "") && !run.nudged && step < maxSteps - 2 && !run.sourced) {
             run.nudged = true;
             run.messages.push({ role: "user", content: NO_QUESTIONS });
+            continue;
+          }
+          // An answer that gives up on a part ("there is no tool to read files"): once, it is sent back to find the
+          // tool and do it, on the strong model.
+          if (GIVES_UP.test(message.content ?? "") && !run.unstuck && step < maxSteps - 2 && !run.sourced) {
+            run.unstuck = true;
+            run.messages.push({ role: "user", content: NO_GIVING_UP });
             continue;
           }
           // A write that ends without writing anything (no commit, no write call that worked): sent back once to write,
@@ -311,9 +340,19 @@ export function createAgent({
             result = { status: "failed", answer: `Nothing was written.${message.content?.trim() ? ` ${message.content.trim()}` : ""}` };
             break;
           }
-          // A model that ends without text: the last tool note is the answer; with nothing done at all it is not "done".
+          // A model that ends without text after reading something: once, it is asked for the answer.
+          if (!message.content?.trim() && !lastNote && run.steps.length && !run.prompted && step < maxSteps - 1) {
+            run.prompted = true;
+            run.messages.push({ role: "user", content: ANSWER_NOW });
+            continue;
+          }
+          // A model that ends without text: the last tool note is the answer; without one it is not "done" (a bare "Done."
+          // came with references picked for no answer).
           const text = message.content?.trim() || lastNote;
-          result = text || run.steps.length ? { status: "done", answer: text || "Done." } : { status: "failed", answer: "The agent stopped without doing anything or answering." };
+          const did = run.steps.filter((s) => s.ok).map((s) => s.tool);
+          result = text
+            ? { status: "done", answer: text }
+            : { status: "failed", answer: did.length ? `The agent ran ${[...new Set(did)].join(", ")} but gave no answer. Run it again.` : "The agent stopped without doing anything or answering." };
           break;
         }
         // Independent calls run in parallel, like the model asked.
@@ -518,6 +557,8 @@ export function createAgent({
   // account (its alias) and accountId when another connection answered, and tried: how many connections were tried.
   async function executeOn(run, input, account) {
     const app = appOf(input.tool ?? run.recipes?.[input.id], run.apps);
+    // "" or the app's own name ("github") is no connection: models send them for account.
+    if (!account || account === app || run.apps?.includes(account)) account = undefined;
     const chosen = account ?? run.account ?? run.accounts?.[app];
     const first = await genter.execute({ ...input, account: chosen });
     if (chosen || !notHere(first)) return chosen ? { ...first, accountId: chosen } : first;
@@ -537,6 +578,30 @@ export function createAgent({
       }
     }
     return { ...first, tried: own.length };
+  }
+
+  // A file's text for the model (cut at MAX_FILE_TEXT), or a folder's entries. Not saved as a recipe: a file's
+  // content is not a call to repeat, and the reference it gets says where it is.
+  async function readFile({ run, place, account }) {
+    const editor = fileEditor(place);
+    if (!editor) throw new Error(`[${place.n ?? "?"}] is a ${place.app} ${place.kind}, not a file`);
+    const read = await executeOn(run ?? {}, { ...editor.read, remember: false }, account);
+    if (read.result?.successful === false) throw new Error(`Could not read ${refLabel(place)}: ${errorText(read.result.error)}`);
+    const data = read.result?.data;
+    const entries = [data?.content, data?.items, data].find(Array.isArray);
+    if (entries) {
+      const names = entries.map((e) => `${e.path ?? e.name}${e.type === "dir" ? "/" : ""}`);
+      return { folder: names.slice(0, 300), summary: `${refLabel(place)}: a folder of ${names.length}`, ...(read.account && { account: read.account }) };
+    }
+    const { text } = editor.file(data);
+    const lines = text.split("\n").length;
+    return {
+      path: place.where?.path,
+      lines,
+      text: text.length > MAX_FILE_TEXT ? `${text.slice(0, MAX_FILE_TEXT)}\n… (truncated: ${lines} lines in all)` : text,
+      summary: `read ${refLabel(place)} (${lines} lines)`,
+      ...(read.account && { account: read.account }),
+    };
   }
 
   // A file changed in one commit: read (its text and sha), the edits applied here, committed with that sha.
@@ -582,6 +647,22 @@ export function createAgent({
 // A failure that may be this account's view, not the call: what it points to is missing or not visible to it.
 const notHere = (out) =>
   out?.result?.successful === false && /not found|\b40[134]\b|forbidden|not accessible|permission|denied|push access|unauthori[sz]ed|bad credentials/i.test(errorText(out.result.error));
+
+// The file a read_file / edit_file call means: its reference number, or owner + repo + path of a GitHub repository.
+// A ref that is not a file (the commit or repository it is in) with a path: that path there.
+// Empty strings are left out: models send branch: "" and account: "".
+function fileRef(run, input) {
+  const given = (v) => (v == null || v === "" ? undefined : v);
+  const ref = given(input.ref) != null ? run.refs.find((r) => r.n === Number(String(input.ref).replace(/\D/g, ""))) : undefined;
+  if (ref && (ref.kind === "file" || !given(input.path))) return ref;
+  if (!given(input.path)) return undefined;
+  const where = ref?.app === "github" ? ref.where ?? {} : {};
+  const owner = given(input.owner) ?? where.owner;
+  const repo = given(input.repo) ?? where.repo;
+  return shapeRef({ app: "github", via: "call", tool: "GITHUB_GET_REPOSITORY_CONTENT", where: { owner, repo, path: String(input.path).replace(/^\/+/, ""), branch: given(input.branch) } });
+}
+
+const MAX_FILE_TEXT = 20000;
 
 const errorText = (e) => (typeof e === "string" ? e : JSON.stringify(e ?? "failed")).slice(0, 300);
 
@@ -724,6 +805,17 @@ const NO_QUESTIONS =
   "Do not ask the user. Do the task now with the most likely reading: find the tool (search_tools with the app name and the action), " +
   "run it, and answer from the result; say in one line what you assumed.";
 
+// An answer that says a part cannot be done for want of a tool, without the tool having been tried.
+const GIVES_UP =
+  /нет (подходящ\S* |нужн\S* |такого |такой )?(инструмент|команд|функци)|не (могу|можем|удалось|получилось|смог\S*) (напрямую )?(прочитать|получить|показать|открыть|достать)|no (suitable |such |available )?(tool|command)|(cannot|can't|can not|unable to|could not|couldn't|not able to) (directly )?(read|retrieve|access|get|fetch|open|show)/i;
+const NO_GIVING_UP =
+  "Do not give up on a part of the task: a connected app always has tools. A file of a repository is read with read_file " +
+  "(ref, or owner + repo + path + branch; a folder gives its entries). For anything else search_tools with the app name and the action, " +
+  "run the closest tool, then answer the whole task. Say it cannot be done only after a call for it failed, with that error.";
+
+const ANSWER_NOW =
+  "You ended without an answer. If a part of the task is not done yet, do it now; otherwise answer the whole task from the results above, with their ref numbers.";
+
 const NOTHING_WRITTEN =
   "Nothing has been written yet: no commit and no write call worked in this round. Do the change now (edit_file for a file, " +
   "the write tool otherwise), then answer with what was written and its link. If it cannot be done, say exactly why.";
@@ -772,7 +864,8 @@ const personalNote = (text) =>
 const SYSTEM = `You are Genter's task agent. You act in the user's connected apps through Composio tools, and you are judged on speed: the fewest steps that give a correct, complete result.
 
 The first message already holds everything for a fast start: saved recipes that match the task (proven past calls with their args and a summary of what they returned), candidate Composio tools with their args, and the connected apps.
-- If a recipe's result_summary or the knowledge from synced sources already answers the question, answer right away without calling anything.
+- If a recipe's result_summary or the knowledge from synced sources already answers the question, answer right away without calling anything. Not for what changes over time (latest, recent, new, today, current state): execute the recipe by id for fresh data.
+- A task with several parts (find the recent commits, read their files, write a note) is done part by part; a recipe that answers one part does not end the run.
 - Synced sources are an app's content kept searchable (a GitHub repo, Notion pages). Use search_knowledge for more of it. When the user asks to remember, index or keep an app's content up to date, call add_source; to refresh one, sync_source. Filters in the user's words ("only docs/", "no tests", "only the last 200") go to add_source filter.
 - Built-in live sync recipes cover only: github = the FILES of a repository; notion = pages. A saved one (live_sync in the first message) fits too: add_source with its id. Anything else (issues, pull requests, commits, emails, tickets, messages, rows, any other app) needs a new live sync recipe: call build_live_sync with the whole goal in the user's words; it builds, tests, saves and adds the source. Never use a built-in one for something it does not cover, and never answer a remember/sync request with a one-off execute.
 - If a recipe fits, execute it by id and override only the args that differ. This is the fastest path.
@@ -786,6 +879,9 @@ The first message already holds everything for a fast start: saved recipes that 
 - "What's new in <app>" / "что нового в <app>" for a connected app means the user's own latest items there (recently created or updated tasks, issues, emails, files), read with that app's tools, not news about the product.
 - Every fact in the answer comes from a tool result, a recipe summary or synced knowledge of this run. Never answer from general knowledge about a product or company; if nothing was found, say what was checked.
 - Cite where each fact comes from: right after it, the ref number of the knowledge chunk, recipe, tool result or list item (its _ref) in square brackets, e.g. "Paging stops at a short page [3]." or "[2, 5]". Cite only what you used; never invent numbers. The user gets the cited places (paths, links, ids) with the answer.
+- To read a file of a repository (its text) or a folder (its entries), call read_file with owner, repo, path (and branch), or the file's ref; several files: several read_file calls in one step. Never answer that a file cannot be read before read_file failed on it.
+- The files a GitHub commit changed: GITHUB_GET_A_COMMIT {owner, repo, ref: <sha>} (its files[].filename), then read_file for each.
+- Never show a file's text, a commit's files or any other content that no call of this run returned: read it first.
 - To change an existing file of a repository, call edit_file with exact pieces of its current text and what goes instead: it reads and commits the file for you. Never write a whole existing file out; GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS is for new files.
 - An empty result is not an answer: retry once with translated or broader terms before saying nothing was found.
 - Every successful call is saved as a recipe: the exact call, named by its result, with no parameters. When you execute a tool that did not come from a recipe, pass description, short and tags so the next run finds its result:
@@ -816,6 +912,21 @@ const TOOLS = [
         args: { type: "object", additionalProperties: true },
         account: { type: "string", description: "Connection alias or id when the app is connected several times" },
         ...recipeFields,
+      },
+    },
+  },
+  {
+    name: "read_file",
+    description: "Read a file of a GitHub repository (its text) or a folder (its entries). Use it for every file read; it gets a reference number to cite and to edit.",
+    parameters: {
+      type: "object",
+      properties: {
+        ref: { type: "integer", description: "The file's reference number" },
+        owner: { type: "string", description: "Without ref: the repository owner" },
+        repo: { type: "string" },
+        path: { type: "string", description: "Path in the repository, e.g. src/agent.js" },
+        branch: { type: "string", description: "Branch, tag or commit sha; the default branch when left out" },
+        account: { type: "string" },
       },
     },
   },
