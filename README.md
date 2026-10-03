@@ -32,7 +32,8 @@ Returns a list of messages. For other filters override `query`.
 - pitfall: bodies are truncated, open one with `GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID`
 ```
 
-plus tags in English and Russian. The MCP server sends these rules to clients as `instructions`.
+plus `short`, one line for compact lists (the Markdown is shown when a recipe is opened), and tags in English and Russian.
+The MCP server sends these rules to clients as `instructions`.
 
 ## Install
 
@@ -51,15 +52,16 @@ Without it, `search` uses Composio only.
 | --- | --- | --- |
 | `register_tool` | `{toolkit, alias?}` | `{toolkit, connect_url, connection_id}` — open the URL to connect the app; an app can be connected several times |
 | `login` | `{}` | `{user_id, connected: [{toolkit, account, alias, status}]}` |
-| `search` | `{query, limit?}` | `[{id, tool, args, description, summary, when, tags, status}]` |
-| `execute` | `{tool, args}` or `{id, args?}`, optional `{account, description, tags}` | `{id, result, summary, saved?, note?}` |
-| `save_recipes` | `{recipes: [{id, description, tags?, status?}]}` | `[{id, created_at, tags, description, status}]` |
+| `search` | `{query, limit?}` | `[{id, tool, args, description, short, summary, when, tags, status}]` |
+| `execute` | `{tool, args}` or `{id, args?}`, optional `{account, description, short, tags}` | `{id, result, summary, saved?, note?}` |
+| `save_recipes` | `{recipes: [{id, description, short?, tags?, status?}]}` | `[{id, created_at, tags, description, short, status}]` |
 
 ```bash
 genter register_tool '{"toolkit":"gmail"}'
 genter search '{"query":"unread emails from today"}'
 genter execute '{"tool":"GMAIL_FETCH_EMAILS","args":{"query":"is:unread newer_than:1d"},
   "description":"### Fetch unread emails\n`GMAIL_FETCH_EMAILS` · args: `{query, max_results?}`\nReturns a list of messages. For other filters override `query`.",
+  "short":"Fetch unread emails from the inbox",
   "tags":["gmail","inbox","почта","письма"]}'
 ```
 

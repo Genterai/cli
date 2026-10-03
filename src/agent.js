@@ -188,7 +188,7 @@ export function createAgent({
       ]);
       const search_ms = Date.now() - searched;
       const recipes = found.filter((r) => r.id);
-      onEvent({ type: "recipes", recipes: recipes.map(({ id, tool, description, summary, score, status, tags, when, args }) => ({ id, tool, description, summary, score, status, tags, when, args })) });
+      onEvent({ type: "recipes", recipes: recipes.map(({ id, tool, description, short, summary, score, status, tags, when, args }) => ({ id, tool, description, short, summary, score, status, tags, when, args })) });
       const run = {
         id: randomUUID(),
         task,
@@ -289,8 +289,8 @@ The first message already holds everything for a fast start: saved recipes that 
 - Never invent tool slugs or argument names: use only slugs from the first message, search results or error hints.
 - Keyword search in apps (Gmail q, Slack, Drive, Notion, GitHub search) matches literal words, and the data is often in another language than the request (English emails, Russian request). Put the key terms in both languages in one query, joined with OR, e.g. Gmail: ("объединенные знания" OR "unified knowledge" OR "merged knowledge"). The first message lists the terms.
 - An empty result is not an answer: retry once with translated or broader terms before saying nothing was found.
-- When you execute a tool that did not come from a recipe and it is a reusable step, pass description and tags so the next run finds it:
-  description is a general Markdown recipe: "### <Verb> <object>", a line "\`TOOL_SLUG\` · args: \`{a, b?}\`", what it returns, how to reuse it, "- pitfall: ..." bullets; tags in English and Russian.
+- When you execute a tool that did not come from a recipe and it is a reusable step, pass description, short and tags so the next run finds it:
+  description is a general Markdown recipe: "### <Verb> <object>", a line "\`TOOL_SLUG\` · args: \`{a, b?}\`", what it returns, how to reuse it, "- pitfall: ..." bullets; short is one line under 100 characters for lists; tags in English and Russian.
 - If a recipe returned something different from its description, save it again with status "outdated" (save_recipes) and say why.
 - An app the task needs is not connected: call connect_app and stop.
 - The task is ambiguous in a way that matters (which person, which account, an irreversible action on an unclear target): call ask_user with one short question. Otherwise do not ask; pick the sensible default.
@@ -299,6 +299,7 @@ Final answer: short and concrete, in the user's language. Include the names, ids
 
 const recipeFields = {
   description: { type: "string", description: "General Markdown recipe for this call (see instructions)" },
+  short: { type: "string", description: "One line under 100 characters for compact lists, e.g. 'Fetch unread emails from the inbox'" },
   tags: { type: "array", items: { type: "string" }, description: "Tags in English and Russian" },
 };
 

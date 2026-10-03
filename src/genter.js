@@ -121,7 +121,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
   }
 
   // Slow part of a call, after its result went back: summary, embedding, dedupe against the same call, recipe.
-  async function remember(record, data, { description, tags }) {
+  async function remember(record, data, { description, short, tags }) {
     const sameCall = (await store.all())
       .map((row) => open(row.blob))
       .filter((r) => r.id !== record.id && !r.alias && r.tool === record.tool && JSON.stringify(r.args) === JSON.stringify(record.args));
@@ -146,7 +146,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       await save(target, false);
     }
     if (description) {
-      await api.save_recipes({ recipes: [{ id: target.id, description, tags }] });
+      await api.save_recipes({ recipes: [{ id: target.id, description, short, tags }] });
     } else if (!target.memory) {
       const info = await composio.tools.getRawComposioToolBySlug(record.tool).catch(() => ({}));
       await api.save_recipes({
@@ -205,6 +205,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
               args: r.args,
               tags: r.memory.tags,
               description: r.memory.description,
+              short: r.memory.short,
               summary: r.summary,
               when: r.created_at,
               status: r.memory.status,
@@ -228,7 +229,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     // Run a tool. Pass `id` to repeat a saved recipe (args are merged on top).
     // `account` picks a connection (from login) when an app is connected several times.
     // Every successful call becomes a recipe: with the agent's description if given, otherwise Composio's.
-    async execute({ id, tool, args = {}, account, description, tags }) {
+    async execute({ id, tool, args = {}, account, description, short, tags }) {
       const previous = id && (await load(id));
       if (previous) {
         tool ??= previous.tool;
@@ -263,7 +264,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       }
       if (repeat) record.id = randomUUID(); // a new result of a known call: a new recipe, merged later if it is the same
       await save(record, false);
-      const summary = remember(record, result.data, { description, tags });
+      const summary = remember(record, result.data, { description, short, tags });
       later(summary);
       return {
         id: record.id,
@@ -291,17 +292,18 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     },
 
     // Save reusable recipes for calls: each description is embedded for search.
+    // `short` is a one-line description for lists and cards; the Markdown description is the full one.
     // Use status "outdated" when a saved recipe no longer does what its description says.
     async save_recipes({ recipes }) {
       return Promise.all(
-        recipes.map(async ({ id, description, tags = [], status = "valid", auto }) => {
+        recipes.map(async ({ id, description, short, tags = [], status = "valid", auto }) => {
           const record = await load(id); // an alias resolves to the recipe it was merged into
           const created_at = new Date().toISOString();
           const embedding = await embed(
             `${description}\nresult: ${record.summary ?? ""}\ntags: ${tags.join(", ")}\ntool: ${record.tool}\nargs: ${JSON.stringify(record.args)}`,
           );
-          await save({ ...record, memory: { created_at, tags, description, status, embedding, ...(auto && { auto }) } });
-          return { id: record.id, created_at, tags, description, status };
+          await save({ ...record, memory: { created_at, tags, description, ...(short && { short }), status, embedding, ...(auto && { auto }) } });
+          return { id: record.id, created_at, tags, description, short, status };
         }),
       );
     },
