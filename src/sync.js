@@ -168,20 +168,39 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
     return `src_${createHash("sha256").update(`${namespace}:${key}:${JSON.stringify(keyed)}`).digest("hex").slice(0, 16)}`;
   };
 
-  // Lists every item of a source, page by page. raw (optional) collects the first raw items, for a test.
-  async function list(source, template, { pages = LIMITS.maxPages, raw } = {}) {
-    const role = template.list;
+  // The containers a recipe's list runs over: [{ id, label }], the newest/first `max` (default 20).
+  async function containers(each, source, depth, max) {
+    if (depth > 3) throw new Error("Containers nest deeper than 3 levels");
+    const limit = max ?? each.max ?? 20;
+    const parents = each.each ? await containers(each.each, source, depth + 1, max) : [null];
     const out = [];
+    for (const p of parents) {
+      const ctx = { ...source.scope, ...(p && { container: p.id, container_label: p.label }) };
+      const res = await run(each.tool, fill(each.args ?? {}, ctx), source.account);
+      if (res?.successful === false) throw new Error(`${each.tool}: ${errorText(res.error)}`);
+      for (const raw of [pick(res, each.items)].flat().filter(Boolean)) {
+        if (!matches(raw, each)) continue;
+        const id = pick(raw, each.id);
+        if (id == null) continue;
+        out.push({ id: String(id), label: `${p ? `${p.label} / ` : ""}${pick(raw, each.label ?? each.id) ?? id}` });
+      }
+      if (out.length >= limit) break;
+    }
+    return out.slice(0, limit);
+  }
+
+  // One run of the list role (all its pages) with extra placeholders, items appended to out.
+  async function listFrom(source, role, extra, { pages, raw }, out) {
     let page;
     for (let n = 0; n < pages; n++) {
       // nextPage: numbered pages (1, 2, ...) until one comes back empty; otherwise the cursor from list.next.
       if (role.nextPage) page = n + 1;
-      const res = await run(role.tool, fill(role.args, { ...source.scope, page }), source.account);
+      const res = await run(role.tool, fill(role.args, { ...source.scope, ...extra, page }), source.account);
       if (res?.successful === false) throw new Error(`${role.tool}: ${errorText(res.error)}`);
       if (role.single) {
         // The whole response is the item, versioned by its content.
         const data = res?.data ?? res;
-        out.push({ id: "all", version: createHash("sha256").update(JSON.stringify(data)).digest("hex").slice(0, 16), title: source.title, text: jsonToMarkdown(data) });
+        out.push({ id: extra.container ?? "all", version: createHash("sha256").update(JSON.stringify(data)).digest("hex").slice(0, 16), title: extra.container_label ?? source.title, text: jsonToMarkdown(data) });
         break;
       }
       const found = [pick(res, role.items)].flat().filter(Boolean);
@@ -193,7 +212,7 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
         if (!matches(raw, role)) continue;
         const id = pick(raw, role.id);
         if (id == null) continue;
-        const ctx = { ...source.scope, item: raw };
+        const ctx = { ...source.scope, ...extra, item: raw };
         out.push({
           id: String(id),
           version: String(pick(raw, role.version) ?? ""),
@@ -214,6 +233,26 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
       const next = role.next && pick(res, role.next);
       if (!next) break;
       page = next;
+    }
+  }
+
+  // Lists every item of a source, page by page. raw (optional) collects the first raw items, for a test.
+  async function list(source, template, { pages = LIMITS.maxPages, raw, containersMax } = {}) {
+    const role = template.list;
+    const out = [];
+    // each: the list runs once per container (a label, a channel...), found by its own call, nested up to 3 levels.
+    if (role.each) {
+      const found = await containers(role.each, source, 0, containersMax);
+      for (const c of found) {
+        const before = out.length;
+        await listFrom(source, role, { container: c.id, container_label: c.label }, { pages, raw }, out);
+        for (const item of out.slice(before)) {
+          item.id = `${c.id}/${item.id}`;
+          item.title = `${c.label} · ${item.title}`;
+        }
+      }
+    } else {
+      await listFrom(source, role, {}, { pages, raw }, out);
     }
     const prefix = template.prefix ? String(fill(template.prefix, source.scope) ?? "").replace(/^\/+/, "") : "";
     // A root: only it and the items under it, by the parent links in the list itself.
@@ -382,7 +421,7 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
       const raw = [];
       try {
         await setup(source, recipe);
-        const items = await list(source, recipe, { pages: 1, raw });
+        const items = await list(source, recipe, { pages: 1, raw, containersMax: 2 });
         const sample = [];
         for (const item of items.slice(0, 2)) {
           const text = await read(source, recipe, item).catch((e) => `ERROR: ${e.message}`);
@@ -642,7 +681,10 @@ function checkRecipe(r) {
   if (!r.list?.tool) out.push("list.tool is required");
   if (!r.list?.single && !r.list?.items) out.push("list.items is required: the path to the array of items in the response, e.g. data.issues");
   if (!r.list?.single && !r.list?.id) out.push("list.id is required: the path to an item's id");
-  if (!r.read?.tool && !r.list?.text) out.push("read.tool (+ read.text) or list.text is required");
+  for (let e = r.list?.each, n = 0; e && n < 4; e = e.each, n++) {
+    if (!e.tool || !e.items || !e.id) out.push("list.each needs tool, items and id (and label): the call that lists the containers");
+  }
+  if (!r.read?.tool && !r.list?.text && !r.list?.single) out.push("read.tool (+ read.text) or list.text is required");
   if (r.read?.tool && !r.read.text) out.push("read.text is required: the path to the text in the read response");
   if (r.scope && typeof r.scope !== "object") out.push("scope must be an object of fields");
   for (const x of r.exclude ?? []) {

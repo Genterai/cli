@@ -252,7 +252,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     const toolkit = info.toolkit?.slug ?? record.tool.split("_")[0].toLowerCase();
     const shape = inferList({ data });
     const name = titleOf(record.memory?.description) || info.name || record.tool;
-    const triggers = await pickTriggers({ toolkit, record }).catch(() => []);
+    const triggers = await pickTriggers({ toolkit, tool: record.tool, args: record.args, description: record.memory?.description }).catch(() => []);
     record.live = {
       name,
       toolkit,
@@ -269,7 +269,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
   }
 
   // Triggers that fire when this call's result may change, chosen by a model, with config it could fill.
-  async function pickTriggers({ toolkit, record }) {
+  async function pickTriggers({ toolkit, tool, args, description }) {
     const types = await triggersOf(toolkit);
     if (!types.length || !openrouterApiKey) return [];
     const options = types.map((t) => ({
@@ -286,8 +286,8 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
           {
             role: "user",
             content:
-              `A recipe runs ${record.tool} with args ${JSON.stringify(record.args)}` +
-              `${record.memory?.description ? ` (${record.memory.description.slice(0, 400)})` : ""}. ` +
+              `A recipe runs ${tool} with args ${JSON.stringify(args)}` +
+              `${description ? ` (${String(description).slice(0, 400)})` : ""}. ` +
               "Which of these triggers fire when its result may change (a new or updated item it would return)? " +
               'Reply with JSON only: {"triggers": [{"slug": "...", "config": {...}, "label": "on every new email"}]}. ' +
               "Fill every required config field from the args; skip a trigger you can not fill. Usually one or two; none fits: [].\n\n" +
@@ -301,7 +301,8 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     return picked
       .filter((t) => {
         const type = types.find((x) => x.slug === t.slug);
-        return type && (type.config?.required ?? []).every((k) => t.config?.[k] != null && t.config[k] !== "");
+        // A config the model left as a placeholder ({{container}}) can not be filled for one trigger.
+        return type && !JSON.stringify(t.config ?? {}).includes("{{") && (type.config?.required ?? []).every((k) => t.config?.[k] != null && t.config[k] !== "");
       })
       .slice(0, 3)
       .map((t) => ({ slug: t.slug, config: t.config ?? {}, label: String(t.label || t.slug).slice(0, 60) }));
@@ -433,6 +434,9 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     // Sources: templates(), choices({template, account?}), list(), get(id), create({template, scope, depth?, account?}),
     // sync({id, budgetMs?}), watch({id, on?}), onTrigger({triggerId}), remove({id}).
     sources,
+
+    // Triggers that fire when a call's result may change, picked by a model: [{ slug, config, label }].
+    pick_triggers: (args) => pickTriggers(args).catch(() => []),
 
     // The tools of an app that read, compact, for planning what can be synced: [{ tool, description, args }].
     async app_tools({ toolkit }) {

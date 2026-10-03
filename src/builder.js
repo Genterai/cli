@@ -58,9 +58,10 @@ export function createBuilder({ genter, openrouterApiKey, model = process.env.BU
               "knowledge: THEIR OWN data (their emails, events, rows, tasks, messages, posts, documents, their repos' issues...), " +
               "up to 6 kinds, most useful first. Never a global or public search (all of GitHub, all of Twitter): reach their data " +
               "through tools that list what belongs to them, or a search scoped to them (author:@me, in their workspace). " +
-              "When the content lives in containers the person picks from (labels, calendars, spreadsheets, task lists, channels, boards, " +
-              "teams, lists, folders), give a containers call that lists them and an items call that lists the content of one, with " +
-              '"{{container}}" where the container id goes. Prefer calls that return many items with their text and an updated time. ' +
+              "When the content lives in containers (labels, calendars, spreadsheets, task lists, channels, boards, teams, lists, " +
+              "folders), give a containers call that lists them and an items call that lists the content of one, with " +
+              '"{{container}}" where the container id goes: the recipe then runs over all of them. ' +
+              "Prefer calls that return many items with their text and an updated time. " +
               "Use only these tools and their argument names; ask for the largest page size; recent items first.\n" +
               "Kinds must not overlap (not both all mail and inbox). Mark recommended: true on the ones most people want kept. " +
               "Streams (mail, chat, posts) take recent items only (the newest page).\n" +
@@ -77,47 +78,62 @@ export function createBuilder({ genter, openrouterApiKey, model = process.env.BU
     return { kinds: (JSON.parse(data.choices[0].message.content).kinds ?? []).slice(0, 6), cost: data.usage?.cost ?? 0 };
   }
 
+  // A planned kind as a live sync recipe: its containers call (if any) and its items call, run for real once,
+  // their lists found with inferList.
+  async function shapeKind(toolkit, kind, account) {
+    let each;
+    let first;
+    if (kind.containers?.tool) {
+      const res = await genter.sources.probe({ tool: kind.containers.tool, args: kind.containers.args ?? {}, account, raw: true });
+      if (res?.successful === false) throw new Error(`${kind.containers.tool}: ${JSON.stringify(res.error).slice(0, 200)}`);
+      const shape = inferList(res);
+      if (!shape.items) throw new Error("no containers found");
+      first = [pick(res, shape.items)].flat()[0];
+      each = { tool: kind.containers.tool, args: kind.containers.args ?? {}, items: shape.items, id: shape.id, label: shape.title, max: 20 };
+    }
+    const args = kind.items.args ?? {};
+    const sampleArgs = each ? fill(args, { container: String(pick(first, each.id)) }) : args;
+    const res = await genter.sources.probe({ tool: kind.items.tool, args: sampleArgs, account, raw: true });
+    if (res?.successful === false) throw new Error(`${kind.items.tool}: ${JSON.stringify(res.error).slice(0, 200)}`);
+    const shape = inferList(res);
+    const triggers = await genter.pick_triggers({ toolkit, tool: kind.items.tool, args, description: kind.description });
+    return {
+      name: kind.name,
+      toolkit,
+      description: kind.description ?? kind.name,
+      title: kind.name,
+      recommended: Boolean(kind.recommended),
+      scope: {},
+      list: { tool: kind.items.tool, args, ...shape, ...(shape.version && shape.version === shape.id && { append: true }), ...(each && { each }) },
+      triggers,
+      every: triggers.length ? null : 60,
+    };
+  }
+
   return {
     // Everything an app can keep as knowledge, as recipes: plans the kinds, lists each kind's containers (up to
     // `perKind`) and runs its items call once per container. Every run is saved as a recipe with its live sync
     // plan, so each can be kept up to date with one click. onProgress gets { kind, container?, recipe?, error? }.
-    async discover({ toolkit, account, perKind = 12, onProgress = () => {} }) {
+    // Everything an app can keep as knowledge, as live sync recipes: a model plans the kinds of the person's own data,
+    // and each kind becomes one recursive recipe (its containers -> their items), shaped from real responses, with a
+    // trigger or an hourly schedule, tested and saved. onProgress gets { planned } then { kind, recipe | error }.
+    async discover({ toolkit, account, onProgress = () => {} }) {
       const { kinds, cost } = await plan(toolkit);
       onProgress({ planned: kinds.map((k) => ({ name: k.name, description: k.description, recommended: Boolean(k.recommended) })) });
       const made = [];
-      for (const kind of kinds) {
-        let containers = [null];
-        if (kind.containers?.tool) {
-          const res = await genter.sources.probe({ tool: kind.containers.tool, args: kind.containers.args ?? {}, account, raw: true }).catch(() => null);
-          const shape = res && inferList(res);
-          const list = shape?.items ? [pick(res, shape.items)].flat().filter(Boolean) : [];
-          containers = list.slice(0, perKind).map((c) => ({ id: String(pick(c, shape.id)), label: String(pick(c, shape.title) ?? pick(c, shape.id)) }));
-          if (!containers.length) {
-            onProgress({ kind: kind.name, error: "no containers found" });
-            continue;
-          }
-        }
-        for (const c of containers) {
-          const args = c ? fill(kind.items.args ?? {}, { container: c.id }) : (kind.items.args ?? {});
-          const name = c ? `${kind.name}: ${c.label}` : kind.name;
+      await Promise.all(
+        kinds.map(async (kind) => {
           try {
-            const out = await genter.execute({
-              tool: kind.items.tool,
-              args,
-              account,
-              description: `### ${name}\n\n\`${kind.items.tool}\` · args: \`{${Object.keys(args).join(", ")}}\`\n\n${kind.description ?? ""}`,
-              short: name,
-              tags: [toolkit, "sync", "синхронизация"],
-            });
-            if (out.result?.successful === false) throw new Error(JSON.stringify(out.result.error).slice(0, 200));
-            await out.pending; // the recipe and its live sync plan are saved
-            made.push({ kind: kind.name, container: c?.label ?? null, recipe: out.id });
-            onProgress({ kind: kind.name, container: c?.label ?? null, recipe: out.id });
+            const recipe = await shapeKind(toolkit, kind, account);
+            const out = await genter.save_live_sync({ recipe, description: kind.description || kind.name, short: kind.name, tags: [toolkit, "sync", "синхронизация"], account });
+            if (!out.saved) throw new Error((out.test?.problems ?? ["test failed"]).join("; "));
+            made.push({ kind: kind.name, recipe: out.id });
+            onProgress({ kind: kind.name, recipe: out.id });
           } catch (e) {
-            onProgress({ kind: kind.name, container: c?.label ?? null, error: e.message });
+            onProgress({ kind: kind.name, error: e.message });
           }
-        }
-      }
+        }),
+      );
       return { kinds, made, cost };
     },
 
