@@ -17,7 +17,7 @@ export function createAgent({
   secret,
   userId,
   runs, // get(id) -> { blob } | undefined, put({ id, blob })
-  model = process.env.AGENT_MODEL || "openai/gpt-4.1-mini",
+  model = process.env.AGENT_MODEL || "openai/gpt-oss-20b",
   maxSteps = 12,
   canExecute = true,
   canConnect = true,
@@ -37,6 +37,7 @@ export function createAgent({
         tools: TOOLS,
         parallel_tool_calls: true,
         temperature: 0,
+        reasoning: { effort: "low" }, // the fast agent: short thinking, quick tool calls
         usage: { include: true },
       }),
     });
