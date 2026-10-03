@@ -25,10 +25,10 @@ export const TEMPLATES = {
     name: "GitHub repository",
     title: "{{owner}}/{{repo}}",
     scope: {
-      owner: { required: true, description: "Repository owner (user or organization)" },
-      repo: { required: true, description: "Repository name" },
-      branch: { description: "Branch, tag or commit; the default branch if empty" },
-      path: { description: "Only files under this folder, e.g. docs/" },
+      owner: { required: true, description: "Repository owner (user or organization)", example: "Genterai" },
+      repo: { required: true, description: "Repository name", example: "genter-cli" },
+      branch: { description: "Branch, tag or commit; the default branch if empty", example: "main" },
+      path: { description: "Only files under this folder", example: "docs/" },
     },
     setup: [{ tool: "GITHUB_GET_A_REPOSITORY", args: { owner: "{{owner}}", repo: "{{repo}}" }, set: { branch: "data.default_branch" } }],
     list: {
@@ -57,7 +57,7 @@ export const TEMPLATES = {
     name: "Notion pages",
     title: "Notion{{query? · }}{{query}}",
     scope: {
-      query: { description: "Only pages whose title matches; all pages shared with Genter if empty" },
+      query: { description: "Only pages whose title matches; all pages shared with Genter if empty", example: "Roadmap" },
     },
     list: {
       tool: "NOTION_SEARCH_NOTION_PAGE",

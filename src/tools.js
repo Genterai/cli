@@ -155,6 +155,7 @@ export function agentTools({ connected = [] } = {}) {
         "It is faster and more reliable than calling app tools yourself: it starts from recipes of past calls that already worked, " +
         "so a known task takes one step.\n" +
         "Use for: send or reply to an email or message, create or update an issue, event, doc, row or deal, post, schedule, " +
+        "remembering an app's content as searchable knowledge (\"remember the acme/api repo\", \"keep our Notion roadmap pages\"), " +
         "and workflows across apps (e.g. \"turn today's support emails into Linear issues and post a summary to #support\").\n" +
         "Pass the full task with every known detail (names, dates, ids, which account) in one call. " +
         "If the result has status needs_input or needs_connection, show the question or the connect link to the user, " +
@@ -170,7 +171,8 @@ export function agentTools({ connected = [] } = {}) {
       description:
         "Find anything in the user's apps and past results: emails, messages, meetings, files, docs, issues, PRs, contacts, deals, invoices. " +
         "Read-only and safe — nothing is sent or changed.\n" +
-        "Searches by meaning across everything fetched before (summaries of past results, with ids to open them), " +
+        "Searches by meaning across everything fetched before (summaries of past results, with ids to open them) " +
+        "and across synced sources (repos, Notion pages kept as knowledge), " +
         "then reads live data from the apps when needed, so repeat questions answer instantly.\n" +
         "Call it before answering any question about the user's own data instead of guessing or saying you can't see it: " +
         "\"what did Anna write about the contract\", \"my meetings tomorrow\", \"PRs waiting for my review\", \"the invoice from March\"." +
