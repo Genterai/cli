@@ -126,7 +126,7 @@ export function createAgent({
         }
         run.failed[key] = "the same call is already running"; // parallel duplicates in one step run once
         const started = Date.now();
-        const out = await genter.execute({ ...input, account: input.account ?? run.account }).catch((e) => ({ thrown: e.message }));
+        const out = await executeOn(run, input, input.account).catch((e) => ({ thrown: e.message }));
         run.timing.tool_ms += Date.now() - started;
         const error = out.thrown ?? (out.result?.successful === false ? out.result?.error : null);
         if (error) {
@@ -145,7 +145,7 @@ export function createAgent({
         const ok = out.result?.successful !== false;
         const data = ok ? (out.result?.data ?? null) : null;
         const empty = ok && isEmpty(data);
-        run.steps.push({ tool: tool ?? input.id, recipe: input.id ?? null, ok, summary: out.summary ?? null, saved: out.id ?? null });
+        run.steps.push({ tool: tool ?? input.id, recipe: input.id ?? null, ok, summary: out.summary ?? null, saved: out.id ?? null, ...(out.account && { account: out.account }) });
         onEvent({ type: "tool", tool: tool ?? input.id, recipe: input.id ?? null, ok, empty, summary: out.summary ?? (empty ? "nothing found" : null) });
         const args = { ...(input.id ? run.recipeArgs[input.id] : {}), ...(input.args ?? {}) };
         if (out.id) {
@@ -163,9 +163,10 @@ export function createAgent({
                 "plus close synonyms, fewer words and no date filter.")
             : undefined;
         const missing = !ok && /not found|404|does not exist/i.test(String(JSON.stringify(out.result?.error ?? "")))
-          ? "What these args point to does not exist (wrong owner, repo, path or id?). Do not guess again: find the real name with a list or search tool first, or answer without it."
+          ? `What these args point to does not exist (wrong owner, repo, path or id?)${out.tried > 1 ? `, on any of the ${out.tried} connected accounts` : ""}. Do not guess again: find the real name with a list or search tool first, or answer without it.`
           : undefined;
-        const short = { ref: cited.ref ?? undefined, id: out.id, successful: ok, summary: out.summary ?? undefined, error: ok ? undefined : out.result?.error, hint: retry ?? missing ?? out.hint };
+        // Found on another connection of the app than the default: the answer says on which.
+        const short = { ref: cited.ref ?? undefined, id: out.id, successful: ok, account: out.account, summary: out.summary ?? undefined, error: ok ? undefined : out.result?.error, hint: retry ?? missing ?? out.hint };
         const text = ok ? JSON.stringify(cited.data) : "";
         // Stored without the data: the items it listed stay citable by their numbers.
         const items = run.refs.filter((r) => cited.items.includes(r.n)).map((r) => [r.n, String(r.title).slice(0, 80)]);
@@ -184,7 +185,7 @@ export function createAgent({
             : input.path && shapeRef({ app: "github", via: "call", tool: "GITHUB_GET_REPOSITORY_CONTENT", where: { owner: input.owner, repo: input.repo, path: input.path, branch: input.branch } });
         if (!place) return { content: JSON.stringify({ error: input.ref != null ? `No reference [${input.ref}] in this run` : "Pass ref (the file's reference number) or owner, repo and path" }) };
         const n = register(run, place);
-        const out = await editFile({ place, edits: input.edits, message: input.message, account: input.account ?? run.account }).catch((e) => ({ error: e.message }));
+        const out = await editFile({ run, place, edits: input.edits, message: input.message, account: input.account }).catch((e) => ({ error: e.message }));
         run.steps.push({ tool: "edit_file", recipe: null, ok: !out.error, summary: out.error ?? out.summary, saved: null });
         onEvent({ type: "tool", tool: "edit_file", ok: !out.error, summary: out.error ?? out.summary });
         if (out.error) {
@@ -374,6 +375,8 @@ export function createAgent({
         mode,
         sync: mode === "run" && canExecute && !target && SYNC_INTENT.test(task),
         account,
+        // Active connections, so a call one account cannot see is tried on the app's others (executeOn).
+        connections: connected.filter((c) => !c.status || c.status === "ACTIVE").map((c) => ({ toolkit: c.toolkit, account: c.account, alias: c.alias, default: c.default })),
         status: "running",
         created_at: new Date().toISOString(),
         apps: [...new Set(connected.map((c) => c.toolkit))],
@@ -465,7 +468,7 @@ export function createAgent({
     const hint = place?.write?.find((h) => h.tool === tool);
     const started = Date.now();
     onEvent({ type: "step", tool: "execute", input: { tool } });
-    const out = await genter.execute({ tool, args: { ...hint?.args, ...args }, account: account ?? run?.account });
+    const out = await executeOn(run ?? {}, { tool, args: { ...hint?.args, ...args } }, account);
     const ok = out.result?.successful !== false;
     const data = ok ? out.result?.data : null;
     onEvent({ type: "tool", tool, ok, summary: ok ? null : String(JSON.stringify(out.result?.error ?? "failed")).slice(0, 200) });
@@ -484,19 +487,48 @@ export function createAgent({
     };
   }
 
+  // A call on the account asked for, else the one this run already found the app's data on, else the default.
+  // An app connected several times (two GitHub accounts): what the default cannot see (another owner's repository:
+  // 404, no access) is tried on the app's other connections. The one that works is kept for the app for the rest of
+  // the run, so later reads and writes there (edit_file, GENTER_WRITE) go to it too. Returns the call's result with
+  // account (its alias) and accountId when another connection answered, and tried: how many connections were tried.
+  async function executeOn(run, input, account) {
+    const app = appOf(input.tool ?? run.recipes?.[input.id], run.apps);
+    const chosen = account ?? run.account ?? run.accounts?.[app];
+    const first = await genter.execute({ ...input, account: chosen });
+    if (chosen || !notHere(first)) return chosen ? { ...first, accountId: chosen } : first;
+    run.connections ??= await genter
+      .login()
+      .then((l) => (l.connected ?? []).filter((c) => !c.status || c.status === "ACTIVE"))
+      .catch(() => []);
+    const own = run.connections.filter((c) => c.toolkit === app);
+    if (own.length < 2) return first;
+    const others = own.some((c) => c.default) ? own.filter((c) => !c.default) : own;
+    for (const c of others) {
+      const out = await genter.execute({ ...input, account: c.account }).catch(() => null);
+      if (out && out.result?.successful !== false) {
+        (run.accounts ??= {})[app] = c.account;
+        onEvent({ type: "account", app, account: c.alias ?? c.account });
+        return { ...out, account: c.alias ?? c.account, accountId: c.account };
+      }
+    }
+    return { ...first, tried: own.length };
+  }
+
   // A file changed in one commit: read (its text and sha), the edits applied here, committed with that sha.
   // Neither call is saved as a recipe: they are steps of the edit, and the commit carries the whole file.
-  async function editFile({ place, edits, message, account }) {
+  async function editFile({ run, place, edits, message, account }) {
     if (!canExecute) throw new Error("This user can search but not change files");
     const editor = fileEditor(place);
     if (!editor) throw new Error(`[${place.n ?? "?"}] is a ${place.app} ${place.kind}, not a file that edits work on; write there with change or tool + args`);
     if (!String(message ?? "").trim()) throw new Error("Pass message: the commit message");
-    const read = await genter.execute({ ...editor.read, account, remember: false });
+    const read = await executeOn(run ?? {}, { ...editor.read, remember: false }, account);
     if (read.result?.successful === false) throw new Error(`Could not read ${refLabel(place)}: ${errorText(read.result.error)}`);
     const file = editor.file(read.result?.data);
     const text = applyEdits(file.text, edits);
     if (text === file.text) return { unchanged: true, summary: "nothing changed: the edits give the same text" };
-    const out = await genter.execute({ ...editor.write({ text, sha: file.sha, message: String(message).trim() }), account, remember: false });
+    // Committed on the account the file was read on.
+    const out = await genter.execute({ ...editor.write({ text, sha: file.sha, message: String(message).trim() }), account: read.accountId ?? account, remember: false });
     if (out.result?.successful === false) throw new Error(`Could not commit ${refLabel(place)}: ${errorText(out.result.error)}`);
     const before = file.text.split("\n").length;
     const after = text.split("\n").length;
@@ -508,7 +540,7 @@ export function createAgent({
     if (!place) throw new Error("Pass ref: the file's reference number [n] from run_id's result, or a link to it");
     const started = Date.now();
     onEvent({ type: "step", tool: "edit_file", input: { file: refLabel(place) } });
-    const out = await editFile({ place, edits, message, account: account ?? run?.account }).catch((e) => ({ error: e.message }));
+    const out = await editFile({ run, place, edits, message, account }).catch((e) => ({ error: e.message }));
     onEvent({ type: "tool", tool: "edit_file", ok: !out.error, summary: out.error ?? out.summary });
     const ms = Date.now() - started;
     return {
@@ -521,6 +553,10 @@ export function createAgent({
     };
   }
 }
+
+// A failure that may be this account's view, not the call: what it points to is missing or not visible to it.
+const notHere = (out) =>
+  out?.result?.successful === false && /not found|\b40[134]\b|forbidden|not accessible|permission|unauthori[sz]ed|bad credentials/i.test(errorText(out.result.error));
 
 const errorText = (e) => (typeof e === "string" ? e : JSON.stringify(e ?? "failed")).slice(0, 300);
 
@@ -725,7 +761,7 @@ The first message already holds everything for a fast start: saved recipes that 
 - If a recipe returned something different from its description, save it again with status "outdated" (save_recipes) and say why.
 - An app the task needs is not connected: call connect_app and stop.
 - Never ask the user anything and never end with a question or a choice for them. Ambiguous: take the most likely reading (the default account, the latest, all of them, the closest name), do it, and say in one line what you assumed. Only an irreversible action (delete, send, pay) on a target you cannot pin down is not done: say what was not done and why.
-- An app is connected several times: pass account (alias or id) when the user names one; otherwise the default is used.
+- An app is connected several times: pass account (alias or id) when the user names one; otherwise the default is used, and a call the default cannot see (another owner's repo: not found, no access) is retried on the app's other connections by itself. A result with account says which connection had it: say so in the answer. Not found on every account means the name is wrong, not the account.
 Always end with an answer built from what you found, even partial; never "I can't" while a tool could still be tried.
 Final answer: short and concrete, in the user's language. Include the names, ids and links needed to open or continue the result. Say what was done, not how.`;
 
