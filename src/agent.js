@@ -81,7 +81,7 @@ export function createAgent({
         if (run.searches > MAX_SEARCHES) {
           return { content: JSON.stringify({ error: "No more searching.", hint: `Execute now the closest tool you already have: ${[...(run.seen ?? [])].slice(0, 8).join(", ")}. Then answer.` }) };
         }
-        const found = await genter.search({ query: input.query, limit: 6, apps: run.apps, toolkits: run.named, tools: true });
+        const found = await genter.search({ query: input.query, limit: 6, apps: run.apps, toolkits: run.named, tools: true, connected: true });
         run.seen = new Set([...(run.seen ?? []), ...found.filter((f) => f.tool).slice(0, 4).map((f) => f.tool)]);
         for (const f of found) if (f.id && f.args) run.recipeArgs[f.id] = f.args;
         const shown = found.map((f) => compactFound(f, recipeRef(run, f)));
@@ -128,9 +128,17 @@ export function createAgent({
         // "Not Found" is also what an app says about a repo, file or id that does not exist: only a slug Composio
         // does not know is a missing tool, otherwise the model drops a working tool or retries it forever.
         if (error && tool && /not found|does not exist|invalid tool|unknown tool|no tool/i.test(String(error)) && !(await genter.schema(tool).then(() => true, () => false))) {
-          const similar = await genter.search({ query: tool.toLowerCase().replace(/_/g, " "), limit: 5, apps: run.apps, tools: true }).catch(() => []);
+          const similar = await genter.search({ query: tool.toLowerCase().replace(/_/g, " "), limit: 5, apps: run.apps, tools: true, connected: true }).catch(() => []);
           onEvent({ type: "tool", tool, ok: false, summary: "no such tool" });
           return { content: JSON.stringify({ error: `${tool} does not exist`, use_one_of: similar.map(compactFound) }) };
+        }
+        // A tool of an app that is not connected fails at once ("no connected account"): the model gets the connected
+        // apps and their closest tools instead of trying it again or giving up.
+        const app = tool && appOf(tool, run.apps);
+        if (error && app && run.apps?.length && !run.apps.includes(app)) {
+          const similar = await genter.search({ query: `${run.task ?? ""} ${tool.toLowerCase().replace(/_/g, " ")}`, limit: 5, apps: run.apps, tools: true, connected: true }).catch(() => []);
+          onEvent({ type: "tool", tool, ok: false, summary: `${app} is not connected` });
+          return { content: JSON.stringify({ error: `${tool} is a tool of ${app}, which is not connected. Connected apps: ${run.apps.join(", ")}.`, use_one_of: similar.map(compactFound), hint: "Use a tool of a connected app; only if none can do it, connect_app." }) };
         }
         if (out.thrown) throw new Error(out.thrown);
         const ok = out.result?.successful !== false;
@@ -260,6 +268,7 @@ export function createAgent({
     run.nudged = false;
     run.unstuck = false;
     run.prompted = false;
+    run.leaked = false;
     run.searches = 0;
     run.seen = new Set();
     run.touched = {}; // recipe id -> { id, created, changed } of this round
@@ -273,9 +282,20 @@ export function createAgent({
       for (let step = 0; step < maxSteps && !result; step++) {
         // Stuck on the fast model (failed calls, searching again and again): the rest of the run goes to the strong one.
         if (!run.strong && (Object.keys(run.failures).length || run.searches >= 2 || run.nudged || run.unstuck || run.prompted || run.retried)) run.strong = true;
-        const message = await llm(run.messages, usage, toolsFor(run.mode), undefined, run.strong ? strongModel : model);
+        const message = asCalls(await llm(run.messages, usage, toolsFor(run.mode), undefined, run.strong ? strongModel : model), `call_${run.id.slice(0, 8)}_${step}`);
         run.messages.push({ role: "assistant", content: message.content ?? null, ...(message.tool_calls?.length && { tool_calls: message.tool_calls }) });
         if (!message.tool_calls?.length) {
+          // The model's reasoning or a broken call written as text is never the answer: sent back once, then it fails.
+          if (LEAKED.test(message.content ?? "")) {
+            if (!run.leaked && step < maxSteps - 1) {
+              run.leaked = true;
+              run.messages.pop(); // not kept: the model would go on from its own reasoning
+              run.messages.push({ role: "user", content: NOT_AN_ANSWER });
+              continue;
+            }
+            result = { status: "failed", answer: "The agent did not give an answer. Run it again." };
+            break;
+          }
           // An answer that is a question for the user: once, it is sent back to do the task instead.
           if (ASKS.test(message.content ?? "") && !run.nudged && step < maxSteps - 2) {
             run.nudged = true;
@@ -339,9 +359,10 @@ export function createAgent({
       if (!result) {
         run.messages.push({ role: "user", content: "No more tool calls. Answer now from what you found; say briefly what is missing." });
         const message = await llm(run.messages, usage, TOOLS, "none", run.strong ? strongModel : model).catch(() => null);
-        run.messages.push({ role: "assistant", content: message?.content ?? null });
-        result = message?.content?.trim()
-          ? { status: "done", answer: message.content.trim() }
+        const text = message?.content && finalText(message.content);
+        run.messages.push({ role: "assistant", content: text || null });
+        result = text && !LEAKED.test(text)
+          ? { status: "done", answer: text }
           : { status: "failed", answer: `Stopped after ${maxSteps} steps without an answer.` };
       }
     } catch (error) {
@@ -376,7 +397,7 @@ export function createAgent({
       const searched = Date.now();
       const connecting = genter.login().then((l) => l.connected ?? []).catch(() => []);
       let [found, connected, english] = await Promise.all([
-        connecting.then((c) => genter.search({ query: task, limit: 8, apps: c.map((x) => x.toolkit) })).catch(() => []),
+        connecting.then((c) => genter.search({ query: task, limit: 8, apps: c.map((x) => x.toolkit), connected: true })).catch(() => []),
         connecting,
         genter.translate ? genter.translate(task) : null, // shared with search, so no second model call
       ]);
@@ -804,6 +825,75 @@ const NOTHING_WRITTEN =
   "Nothing has been written yet: no commit and no write call worked in this round. Do the change now (edit_file for a file, " +
   "the write tool otherwise), then answer with what was written and its link. If it cannot be done, say exactly why.";
 
+// gpt-oss (harmony) now and then gets its channels back as text, when the provider does not parse them: "analysisWe
+// need… assistantcommentary to=functions.execute json{"tool": …}" came as the answer of a calendar question. A call
+// written that way is made as a call; the final channel ("…assistantfinal<answer>") is the answer; the rest is reasoning.
+// A slug the model called as a function (GOOGLECALENDAR_FIND_EVENT {…}) is an execute of it.
+export function asCalls(message, prefix = "call") {
+  let calls = message.tool_calls ?? [];
+  let content = message.content ?? null;
+  if (!calls.length && typeof content === "string" && content.includes("to=functions.")) {
+    calls = writtenCalls(content).map((c, i) => ({ id: `${prefix}_${i}`, type: "function", function: c }));
+    if (calls.length) content = null;
+  }
+  if (typeof content === "string") content = finalText(content);
+  calls = calls.map((tc) => {
+    const name = String(tc.function?.name ?? "").replace(/^functions\./, "").replace(/<\|.*$/s, "").trim();
+    if (TOOL_NAMES.has(name) || !/^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$/.test(name)) return name === tc.function?.name ? tc : { ...tc, function: { ...tc.function, name } };
+    let args = {};
+    try {
+      args = JSON.parse(tc.function.arguments || "{}");
+    } catch {}
+    const wrapped = args && typeof args.args === "object" && Object.keys(args).every((k) => ["args", "account", "description", "short", "tags"].includes(k));
+    return { ...tc, function: { name: "execute", arguments: JSON.stringify(wrapped ? { ...args, tool: name } : { tool: name, args }) } };
+  });
+  return { ...message, content, ...(calls.length ? { tool_calls: calls } : { tool_calls: undefined }) };
+}
+
+// The calls in harmony text: "to=functions.<name>" and the JSON object after it.
+function writtenCalls(text) {
+  const out = [];
+  for (const m of text.matchAll(/to=functions\.([A-Za-z0-9_]+)/g)) {
+    const start = text.indexOf("{", m.index);
+    const next = text.indexOf("to=functions.", m.index + 1);
+    if (start < 0 || (next >= 0 && start > next)) continue;
+    const json = objectAt(text, start);
+    try {
+      if (json) out.push({ name: m[1], arguments: JSON.stringify(JSON.parse(json)) });
+    } catch {}
+  }
+  return out;
+}
+
+// The balanced {...} that starts at i (strings and escapes respected), or null.
+function objectAt(text, i) {
+  let depth = 0;
+  let quoted = false;
+  for (let j = i; j < text.length; j++) {
+    const ch = text[j];
+    if (quoted) {
+      if (ch === "\\") j++;
+      else if (ch === '"') quoted = false;
+    } else if (ch === '"') quoted = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}" && --depth === 0) return text.slice(i, j + 1);
+  }
+  return null;
+}
+
+// The answer of a harmony text: what follows its last final channel, without special tokens.
+function finalText(text) {
+  const at = text.lastIndexOf("assistantfinal");
+  const final = at >= 0 ? text.slice(at + "assistantfinal".length) : text;
+  return final.replace(/<\|[a-z_]+\|>/g, "").trim();
+}
+
+// Reasoning or a call written as text, not an answer.
+const LEAKED = /^analysis[A-Z]|assistant(commentary|analysis)|\bto=functions\.|<\|(channel|message|call|start|end)\|>/;
+const NOT_AN_ANSWER =
+  "Your last message was your reasoning or a tool call written as text, not a call and not an answer. " +
+  "Call the tool now with a real tool call (execute {tool: <slug>, args}), or answer the task.";
+
 // A tool that keeps failing is stopped after this many failures in one round, so a run never spins on it.
 const MAX_TOOL_FAILURES = 3;
 const MAX_SEARCHES = 3;
@@ -995,3 +1085,4 @@ const TOOLS = [
 const MODE_ONLY = { execute_many: ["prepare"], recheck_recipe: ["event"], forget_recipe: ["event"] };
 const TOOLSETS = Object.fromEntries(["run", "find", "prepare", "event"].map((mode) => [mode, TOOLS.filter((t) => !MODE_ONLY[t.function.name] || MODE_ONLY[t.function.name].includes(mode))]));
 const toolsFor = (mode) => TOOLSETS[mode] ?? TOOLSETS.run;
+const TOOL_NAMES = new Set(TOOLS.map((t) => t.function.name));

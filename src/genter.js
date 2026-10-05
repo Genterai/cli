@@ -441,9 +441,15 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     // value), plain Composio tools as fallback. Only fresh, enabled recipes. A non-English query is matched in its
     // language and in English. `apps`: the connected toolkits; those the query names give their tools first.
     // `toolkits`: apps to search in anyway. `tools`: Composio tools come too even when a recipe fits well.
-    async search({ query, limit = 5, apps = [], toolkits: also = [], tools: withTools = false }) {
+    // `connected`: only tools of `apps` (the agent: a tool of an app nobody connected cannot run). Composio's search over
+    // all apps gave CLARIFY_MCP_GET_CALENDAR_EVENTS for "What's on my calendar today" with Google Calendar connected,
+    // and the agent ran it. So the apps the query means by a word of their name ("calendar") give their tools first,
+    // and without one the connected apps' tools are ranked by the query's words.
+    async search({ query, limit = 5, apps = [], toolkits: also = [], tools: withTools = false, connected = false }) {
       const english = await translate(query);
-      const toolkits = [...new Set([...also, ...namedApps(`${query} ${english?.en ?? ""}`, apps)])];
+      const text = `${query} ${english?.en ?? ""}`;
+      const only = connected && apps.length ? new Set(apps.map((a) => String(a).toLowerCase())) : null;
+      const toolkits = [...new Set([...also, ...namedApps(text, apps), ...(only ? appsMeant(text, apps) : [])])];
       const vector = await embed(english?.en ? `${query}\n${english.en}` : query).catch(() => null);
       if (vector) askedVectors.set(query, vector);
       if (askedVectors.size > MAX_ASKED) askedVectors.delete(askedVectors.keys().next().value);
@@ -473,12 +479,21 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       if (!withTools && memories.some((m) => m.score >= strongScore)) return memories;
 
       const search = english?.en ?? query;
-      const [own, all] = await Promise.all([
+      const ofApps = (t) => !only || only.has(String(t.toolkit?.slug ?? "").toLowerCase());
+      const [own, all, ranked] = await Promise.all([
         toolkits.length ? appToolsFor(toolkits, `${query}\n${english?.en ?? ""}`, vector, Math.max(limit, 8)).catch(() => []) : [],
         // Custom toolkits (MCP servers added by address) are shared by the Composio project: only connected ones.
-        composio.tools.getRawComposioTools({ search, limit }).then((list) => list.filter((t) => !isCustomToolkit(t.toolkit?.slug) || apps.includes(t.toolkit.slug))),
+        composio.tools
+          .getRawComposioTools({ search, limit: only ? limit * 4 : limit })
+          .then((list) => list.filter((t) => (!isCustomToolkit(t.toolkit?.slug) || apps.includes(t.toolkit.slug)) && ofApps(t)).slice(0, limit))
+          .catch((e) => (only ? [] : Promise.reject(e))),
+        // No connected app named: the connected apps' tools by the query's words, after Composio's (by meaning).
+        only && !toolkits.length
+          ? Promise.all([...only].map((app) => toolsOf([app]).catch(() => []))).then((lists) => rankTools(lists.flat(), `${query}\n${english?.en ?? ""}`, limit))
+          : [],
       ]);
-      const tools = [...own, ...all.filter((t) => !own.some((o) => o.slug === t.slug))].slice(0, limit + own.length);
+      const first = [...own, ...all.filter((t) => !own.some((o) => o.slug === t.slug))].slice(0, limit + own.length);
+      const tools = [...first, ...ranked.filter((t) => !first.some((o) => o.slug === t.slug))].slice(0, Math.max(limit, first.length));
       const found = tools.map((t) => ({
         id: null,
         tool: t.slug,
@@ -760,6 +775,24 @@ export function namedApps(text, apps = []) {
   const flat = String(text).toLowerCase().replace(/[^a-z0-9]/g, "");
   return [...new Set(apps)].filter((slug) => slug && flat.includes(slug.toLowerCase().replace(/[^a-z0-9]/g, "")));
 }
+
+// Connected apps the text means by a word of their name or what they hold, not their whole slug: "calendar" or
+// "meetings" -> googlecalendar, "my drive" -> googledrive. Only for finding tools: a recipe of another app still counts.
+export function appsMeant(text, apps = []) {
+  const stem = (w) => w.replace(/(ies|es|s)$/, "");
+  const words = new Set(String(text).toLowerCase().split(/[^a-z0-9а-яё]+/).filter(Boolean).map(stem));
+  return [...new Set(apps)].filter((slug) => {
+    const s = String(slug ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    const rest = s.replace(/^(google|microsoft|ms|zoho|atlassian|amazon|aws)/, "");
+    const names = [...(rest.length >= 4 && rest !== s ? [rest] : []), ...(APP_WORDS[s] ?? [])];
+    return names.some((n) => words.has(stem(n)));
+  });
+}
+// What people call an app's data instead of the app (English and Russian).
+const APP_WORDS = {
+  googlecalendar: ["meeting", "event", "schedule", "agenda", "календарь", "календаре", "встреча", "встречи", "событие", "события"],
+  gmail: ["email", "mail", "inbox", "почта", "почте", "письма", "письмо"],
+};
 
 // An app's tools ranked for a query. Composio's search inside a toolkit is alphabetical, so "list my tasks"
 // in Google Tasks gave BATCH_EXECUTE, BULK_INSERT, CLEAR... and never LIST_TASKS. Words of the query in the
