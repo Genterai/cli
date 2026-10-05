@@ -639,3 +639,13 @@ describe("Recipes in the agent", () => {
     assert.match(briefingOf(model.requests[0]), /Mode: event/);
   });
 });
+
+describe("MCP result text", () => {
+  it("passes the agent's suggestions into the meta line", () => {
+    const text = agentResultText({ run_id: "r1", status: "done", answer: "ok", suggestions: [{ label: "Genterai/genter-cli" }] });
+    const meta = JSON.parse(text.slice(text.lastIndexOf("\n") + 1));
+    assert.deepEqual(meta.suggestions, [{ label: "Genterai/genter-cli" }]);
+    const none = agentResultText({ run_id: "r1", status: "done", answer: "ok" });
+    assert.equal("suggestions" in JSON.parse(none.slice(none.lastIndexOf("\n") + 1)), false);
+  });
+});
