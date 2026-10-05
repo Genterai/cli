@@ -90,6 +90,9 @@ describe("MCP servers by address", () => {
     assert.equal(mcpUrl("https://MCP.Linear.app/mcp/#x"), "https://mcp.linear.app/mcp");
     assert.equal(mcpSlug(mcpUrl("https://mcp.linear.app/mcp/")), mcpSlug("https://mcp.linear.app/mcp"));
     assert.match(mcpSlug("https://mcp.linear.app/mcp"), /^MCP_LINEAR_[0-9A-F]{8}$/);
+    assert.match(mcpSlug("https://gateway.pipeworx.io/wikipedia/mcp"), /^MCP_PIPEWORX_WIKIPEDI_[0-9A-F]{8}$/);
+    assert.ok(mcpSlug("https://a-very-long-company-name.example.com/and-a-long-path/mcp").length <= 30);
+    assert.match(mcpSlug("https://api.example.com/v1/sse"), /^MCP_EXAMPLE_[0-9A-F]{8}$/);
     assert.notEqual(mcpSlug("https://mcp.linear.app/mcp"), mcpSlug("https://mcp.linear.app/sse"));
     assert.throws(() => mcpUrl("http://mcp.example.com"), /https/);
   });
