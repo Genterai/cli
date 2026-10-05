@@ -83,6 +83,8 @@ A run ends `done`, `needs_input` (a question), `needs_connection` (a connect lin
 A `done` answer cites its sources as `[n]` and comes with `references` (see below).
 `find` runs only tools that read (by Composio's hint or the verb in the slug). Every successful call is saved as a recipe
 automatically; each step of the result says `recipe: {id, created, changed}` and the result lists `saved` and `recipes_used`. The model is `AGENT_MODEL` on OpenRouter, default `openai/gpt-oss-120b` (see Models).
+The agent is offered only tools of connected apps (`genter.search({ connected: true })`), and a call gpt-oss writes as
+text instead of making it (its harmony channels came back unparsed) is made as a call, never shown as the answer.
 
 ```js
 import { createAgent } from "genter-cli/agent";
@@ -205,6 +207,8 @@ Composio schemas (`test/fixtures/catalogues.json`: Linear, Slack, Jira, Trello, 
 | R1–R9 | recipes | one record per call whatever the arg order; an unchanged result calls no model and only bumps `checked_at`; a changed one regenerates the same recipe; a failed call creates nothing; gone / denied are never offered; two accounts, two recipes; partial pages; recheck, triggers, scopes |
 | N2–N7 | recipes in the agent | `recipe: {id, created, changed}` on steps, `saved`, `recipes_used`; the prompt; `suggest_prepare`; `execute_many` in a prepare task; event tasks |
 | recipe.test.js | pure `src/recipe.js` | canonical args, ids, content hash, partial detection, failure classes, provenance, legacy records |
+| C1–C4 | the agent's tool search (`connected: true`) | only tools of connected apps: "What's on my calendar today" gets Google Calendar's, never another app's calendar tool (Clarify); an app meant by a word ("calendar", "meetings", "drive"); without `connected` Composio's search over all apps is as before |
+| H1–H4 | gpt-oss calls as text | a call written as harmony text (`to=functions.execute json{…}`) is made, not shown; the final channel is the answer, reasoning alone is sent back once then fails; a slug called as a function is an execute; a tool of an app that is not connected names the connected apps and their tools |
 | A8–A10 | refused | a number without its run, an unknown number, a tool of another app, a viewer; `GENTER_WRITE` only where writing is on |
 
 ## Preparing an area, triggers

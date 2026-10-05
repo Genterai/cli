@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
-import { addQuery, createGenter } from "../src/genter.js";
+import { addQuery, appsMeant, createGenter } from "../src/genter.js";
 
 // The real createGenter on a Composio stand-in: tool calls are answered over fetch, so execute runs its own code
 // (the agent tests replace genter as a whole and never reach it).
@@ -409,5 +409,56 @@ describe("queryEmbeddings", () => {
     assert.equal(list[0].n, 2);
     assert.ok(!list.some((q) => q.e[1] === 1), "the oldest single went first");
     assert.ok(list.some((q) => q.e[9] === 1), "the newest is kept");
+  });
+});
+
+describe("tool search of the agent: only connected apps", () => {
+  // Composio over fetch: the tools of an app (toolkit_slug), or its search over all apps (search alone).
+  const tool = (slug, toolkit, description = "") => ({ slug, name: slug, description, toolkit: { slug: toolkit, name: toolkit, logo: "" }, input_parameters: {}, output_parameters: {}, tags: [], version: "1", available_versions: ["1"], scopes: [], no_auth: false, is_deprecated: false });
+  const CATALOG = {
+    googlecalendar: [tool("GOOGLECALENDAR_ACL_DELETE", "googlecalendar"), tool("GOOGLECALENDAR_EVENTS_LIST", "googlecalendar", "List events of a calendar"), tool("GOOGLECALENDAR_FIND_EVENT", "googlecalendar", "Find events in a calendar")],
+    gmail: [tool("GMAIL_FETCH_EMAILS", "gmail", "Fetch emails"), tool("GMAIL_SEND_EMAIL", "gmail", "Send an email")],
+  };
+  const GLOBAL = [tool("BIGDATA_COM_MCP_BIGDATA_EVENTS_CALENDAR", "bigdata_com_mcp"), tool("CLARIFY_MCP_GET_CALENDAR_EVENTS", "clarify_mcp"), tool("LODGIFY_GET_PROPERTY_AVAILABILITY", "lodgify")];
+  const fakeTools = () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+      const u = new URL(String(url));
+      const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+      if (!u.pathname.endsWith("/tools")) return json({ items: [] });
+      const toolkit = u.searchParams.get("toolkit_slug");
+      return json({ items: toolkit ? (CATALOG[toolkit] ?? []) : GLOBAL, next_cursor: null, total_pages: 1 });
+    };
+    restore = () => (globalThis.fetch = original);
+  };
+  const genter = () => createGenter({ composioApiKey: "k", userId: "u", secret: "s", store: memoryStore() });
+
+  it("C1 'What's on my calendar today' with Google Calendar connected: its tools, never another app's calendar tool", async () => {
+    fakeTools();
+    const found = await genter().search({ query: "What's on my calendar today", limit: 5, apps: ["googlecalendar", "gmail"], connected: true });
+    const tools = found.map((f) => f.tool);
+    assert.ok(tools.length, "tools found");
+    assert.ok(tools.every((t) => t.startsWith("GOOGLECALENDAR_") || t.startsWith("GMAIL_")), tools.join(", "));
+    assert.ok(tools[0].startsWith("GOOGLECALENDAR_"), tools.join(", "));
+  });
+
+  it("C2 nothing in the query names a connected app: their tools are ranked by its words", async () => {
+    fakeTools();
+    const tools = (await genter().search({ query: "anything new", limit: 5, apps: ["gmail"], connected: true })).map((f) => f.tool);
+    assert.ok(tools.length && tools.every((t) => t.startsWith("GMAIL_")), tools.join(", "));
+  });
+
+  it("C3 without connected (the dashboard's tool search) Composio's search over all apps is as before", async () => {
+    fakeTools();
+    const tools = (await genter().search({ query: "What's on my calendar today", limit: 5, apps: ["googlecalendar"] })).map((f) => f.tool);
+    assert.ok(tools.includes("CLARIFY_MCP_GET_CALENDAR_EVENTS"));
+  });
+
+  it("C4 an app is meant by a word of its name or what it holds, not only by its slug", () => {
+    assert.deepEqual(appsMeant("What's on my calendar today", ["googlecalendar", "gmail", "github"]), ["googlecalendar"]);
+    assert.deepEqual(appsMeant("my meetings this week", ["googlecalendar", "gmail"]), ["googlecalendar"]);
+    assert.deepEqual(appsMeant("files in my drive", ["googledrive", "github"]), ["googledrive"]);
+    assert.deepEqual(appsMeant("unread emails", ["gmail", "github"]), ["gmail"]);
+    assert.deepEqual(appsMeant("open pull requests", ["googlecalendar", "gmail"]), []);
   });
 });

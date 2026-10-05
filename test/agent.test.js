@@ -649,3 +649,63 @@ describe("MCP result text", () => {
     assert.equal("suggestions" in JSON.parse(none.slice(none.lastIndexOf("\n") + 1)), false);
   });
 });
+
+describe("gpt-oss calls that come as text, and tools of apps that are not connected", () => {
+  const events = { items: [{ summary: "Standup", start: { dateTime: "2026-10-05T10:00:00Z" } }] };
+
+  it("H1 a call written as text (harmony) is made, never shown as the answer", async () => {
+    const genter = fakeGenter({ connected: ["googlecalendar"], results: { GOOGLECALENDAR_EVENTS_LIST: events } });
+    model = fakeModel([
+      answer(
+        'analysisWe need today\'s events. Use execute.assistantcommentary to=functions.execute json{"tool": "GOOGLECALENDAR_EVENTS_LIST", "args": { "timeMin": "2026-10-05T00:00:00Z", "timeMax": "2026-10-06T00:00:00Z" } }',
+      ),
+      answer("**Standup** at 10:00 [1]."),
+    ]);
+    const out = await agentWith(genter).start({ task: "What's on my calendar today", mode: "find" });
+    assert.deepEqual(genter.executed.map((e) => [e.tool, e.args.timeMin]), [["GOOGLECALENDAR_EVENTS_LIST", "2026-10-05T00:00:00Z"]]);
+    assert.equal(out.status, "done");
+    assert.equal(out.answer, "**Standup** at 10:00 [1].");
+    const second = model.requests[1].messages;
+    assert.equal(second.find((m) => m.role === "assistant").tool_calls[0].function.name, "execute");
+    assert.ok(!second.some((m) => /analysisWe|to=functions/.test(m.content ?? "")));
+  });
+
+  it("H2 the final channel of a harmony text is the answer; reasoning alone is sent back once, then the run fails", async () => {
+    const genter = fakeGenter({ connected: ["googlecalendar"] });
+    model = fakeModel([answer("analysisThe user asks. Nothing to call.assistantfinalNo events today.")]);
+    assert.equal((await agentWith(genter).start({ task: "What's on my calendar today", mode: "find" })).answer, "No events today.");
+    model.restore();
+    model = fakeModel([answer("analysisWe need to think about the calendar."), answer("analysisStill thinking.")]);
+    const out = await agentWith(genter).start({ task: "What's on my calendar today", mode: "find" });
+    assert.equal(out.status, "failed");
+    assert.doesNotMatch(out.answer, /analysis/);
+    assert.match(lastOf(model.requests[1], "user"), /not a call and not an answer/);
+  });
+
+  it("H3 a slug called as a function is an execute of it", async () => {
+    const genter = fakeGenter({ connected: ["googlecalendar"], results: { GOOGLECALENDAR_EVENTS_LIST: events } });
+    model = fakeModel([call("GOOGLECALENDAR_EVENTS_LIST", { timeMin: "2026-10-05T00:00:00Z" }), answer("Standup [1].")]);
+    const out = await agentWith(genter).start({ task: "What's on my calendar today", mode: "find" });
+    assert.deepEqual(genter.executed.map((e) => [e.tool, e.args]), [["GOOGLECALENDAR_EVENTS_LIST", { timeMin: "2026-10-05T00:00:00Z" }]]);
+    assert.equal(out.status, "done");
+  });
+
+  it("H4 a tool of an app that is not connected: the error names the connected apps and their tools", async () => {
+    const genter = fakeGenter({ connected: ["googlecalendar"], results: { GOOGLECALENDAR_EVENTS_LIST: events } });
+    const searched = [];
+    genter.search = async (args) => (searched.push(args), args.tools ? [{ id: null, tool: "GOOGLECALENDAR_EVENTS_LIST", description: "List events", args: {} }] : []);
+    model = fakeModel([
+      call("execute", { tool: "CLARIFY_MCP_GET_CALENDAR_EVENTS", args: {} }),
+      (body) => {
+        const reply = JSON.parse(lastOf(body, "tool"));
+        assert.match(reply.error, /clarify, which is not connected\. Connected apps: googlecalendar/);
+        assert.equal(reply.use_one_of[0].tool, "GOOGLECALENDAR_EVENTS_LIST");
+        return call("execute", { tool: "GOOGLECALENDAR_EVENTS_LIST", args: {} });
+      },
+      answer("Standup [1]."),
+    ]);
+    const out = await agentWith(genter).start({ task: "What's on my calendar today", mode: "find" });
+    assert.equal(out.status, "done");
+    assert.ok(searched.every((s) => s.connected === true), "every tool search of the agent is of connected apps");
+  });
+});
