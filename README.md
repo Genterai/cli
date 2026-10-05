@@ -28,16 +28,17 @@ upserts the same Recipe; two connected accounts never share one. Dates in args s
 `gone`, "forbidden / revoked" `denied`; neither is found by search again). A successful result is hashed
 (`contentHash`: volatile keys dropped, base64 file content decoded, whitespace normalized):
 
-- no recipe yet: it is described (title, short, a semantic summary, one line per item) and embedded;
+- no recipe yet: it is described (title, short, a semantic summary, one line per item, search keywords) and embedded;
 - same hash: nothing is described or embedded, only `checked_at` moves;
 - other hash: the same recipe is described and embedded again (`updated_at` = when the result last changed).
 
 A result that is a page or cut off (next-page token, `has_more`, `truncated`) is marked `partial`; its summary only claims
-what was returned. Retrieval embeds the result summary and items, never the tool's description. A recipe's summary says
+what was returned. Retrieval embeds the result summary (with its keywords: the app, the kind of thing, synonyms and names, in English and
+in the data's language, so "почта" finds "Unread emails from today") and items, never the tool's description. A recipe's summary says
 which call to make, not the current value: the agent always executes again.
 
 Recipe record (stored encrypted, raw results never): `{id, tool, args, scope:{account, toolkit}, title, short, summary, items,
-digest, partial, source:{app, path[], url}, created_at, updated_at, checked_at, status: fresh|stale|gone|denied,
+keywords, digest, partial, source:{app, path[], url}, created_at, updated_at, checked_at, status: fresh|stale|gone|denied,
 trigger:{active, spec, id}}`. Records of the older model (`memory`, `alias`, `kind: "sync"`) are normalized on read.
 
 ## Install
@@ -57,7 +58,7 @@ Without it, `search` uses Composio only.
 | --- | --- | --- |
 | `register_tool` | `{toolkit, alias?}` or `{mcp_url, name?, api_key_header?}` | `{toolkit, connect_url, connection_id}` — open the URL to connect the app; an app can be connected several times. `mcp_url`: any remote MCP server, added to Composio as a custom toolkit (`custom_mcp_<name>_<hash>`, one per address); how it signs in (none, OAuth with client registration, an API key) is asked of the server, and one with no sign-in answers `no_auth: true` and no URL |
 | `login` | `{}` | `{user_id, connected: [{toolkit, account, alias, status}]}` |
-| `search` | `{query, limit?}` | `[{id, tool, args, title, short, summary, matched?, score, status, updated_at, checked_at, trigger:{active}}]` (fresh recipes only), then Composio tools (`id: null`) |
+| `search` | `{query, limit?}` | `[{id, tool, args, title, short, summary, keywords?, matched?, score, status, updated_at, checked_at, trigger:{active}}]` (fresh recipes only), then Composio tools (`id: null`) |
 | `execute` | `{tool, args}` or `{id, args?}`, optional `{account}` | `{id, result, created, changed, unchanged, recipe_status}` |
 | `recipes` | `{}` | every recipe without vectors |
 | `recheck_recipe` | `{id}` | `{recipe, changed, status}` |

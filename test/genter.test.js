@@ -123,6 +123,32 @@ describe("genter.execute", () => {
     assert.equal(recipe.summary, SUMMARY); // the rich text is kept for retrieval and the recipe page
   });
 
+  // An inbox described in English ("Unread emails from today") has no "почта" in it: the keywords written with the
+  // summary carry it, in the summary's vector and as a key term.
+  it("G4c a recipe is found by the search keywords written with its summary", async () => {
+    const SUMMARY = "Five unread emails from today: an invoice from Acme, a meeting invite from Anna.";
+    const TEXT = `${SUMMARY}\nKeywords: email, inbox, unread, почта, письма`;
+    fakeComposio(
+      { messages: [{ subject: "Invoice" }] },
+      {
+        chat: (prompt) =>
+          /Translate it for searching/.test(prompt)
+            ? { en: "what is in my mail", terms: ["почта", "mail"] }
+            : { title: "Unread emails from today", short: "Who wrote and about what.", summary: SUMMARY, items: [], keywords: ["Email", "inbox", "unread", "почта", "письма", "email"] },
+        vector: (t) => (t === TEXT || t.startsWith("что") ? [1, 0, 0] : [0, 1, 0]), // only the summary with its keywords is close
+      },
+    );
+    const store = memoryStore();
+    const deferred = [];
+    const genter = createGenter({ composioApiKey: "k", openrouterApiKey: "o", userId: "u", secret: "s", store, defer: (p) => deferred.push(p) });
+    const out = await genter.execute({ tool: "GMAIL_FETCH_EMAILS", args: { query: "is:unread" } });
+    await Promise.all(deferred);
+    const recipe = (await genter.search({ query: "что в почте" })).find((r) => r.id === out.id);
+    assert.ok(recipe, "found through its keywords");
+    assert.deepEqual(recipe.keywords, ["email", "inbox", "unread", "почта", "письма"]); // lowercased, no repeats
+    assert.ok(recipe.score >= 0.45);
+  });
+
   it("G5 a key term of the request written in a recipe's result puts it among the recipes, items or not", async () => {
     fakeComposio(
       { items: [{ summary: "Уборка" }] },

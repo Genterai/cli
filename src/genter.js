@@ -202,9 +202,11 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     return (await res.json()).data.sort((a, b) => a.index - b.index).map((d) => d.embedding);
   }
 
-  // What a result is and what it holds, from one model call: { title, short, summary, items }. The summary is
+  // What a result is and what it holds, from one model call: { title, short, summary, items, keywords }. The summary is
   // semantic: what the data MEANS (subjects, people, dates, ids), written only from what was returned. A partial
-  // result (a page, truncated) is described as such and never claims more than it holds.
+  // result (a page, truncated) is described as such and never claims more than it holds. keywords: the words people
+  // search with that the result's own text rarely has (the kind of thing, synonyms, the app, both languages), embedded
+  // with the summary: "почта" finds an inbox described as "Unread emails from today".
   async function describe(tool, args, data, { partial = false } = {}) {
     if (!openrouterApiKey) return null;
     const text = await chat({
@@ -216,13 +218,18 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
           role: "user",
           content:
             `A call of ${tool} with args ${JSON.stringify(args).slice(0, 600)} returned the data below. ` +
-            'Reply with JSON only: {"title": "...", "short": "...", "summary": "...", "items": ["..."]}.\n' +
+            'Reply with JSON only: {"title": "...", "short": "...", "summary": "...", "items": ["..."], "keywords": ["..."]}.\n' +
             'title: what this result is, as a name of up to 8 words for these exact args, in English, e.g. "Open pull requests of Genterai/genter-cli".\n' +
             "short: ONE sentence of up to 140 characters saying what this result is about and can answer (the content, not the call or its args). Not a repeat of the title.\n" +
-            "summary: 2-4 sentences retelling what the result MEANS and contains, so it can be found later by topic: subjects, people, dates, decisions, " +
-            "and the ids or URLs needed to open it again. Write in English, but quote subjects, titles and names exactly as they are.\n" +
+            "summary: 2-4 sentences retelling what the result MEANS and contains, so it can be found later by topic: the app and the kind of things it holds, " +
+            "subjects, people, companies, projects, dates, decisions, and the ids or URLs needed to open it again. Use the plain words people search with " +
+            "(email, meeting, invoice, pull request, task). Write in English, but quote subjects, titles and names exactly as they are.\n" +
             "items: up to 15 things the result holds, one short line each, the way someone would look for it: what it is, its " +
             'title or subject exactly as written, its date, e.g. "Calendar event «Уборка» on 2026-10-03 13:00". [] when it is empty.\n' +
+            "keywords: 10-25 search keywords and short phrases (1-3 words each) someone would type to find this result later: the app, the kind " +
+            "of thing (email, inbox, calendar event, pull request, invoice), synonyms and related words (meeting, call, appointment), the topics, and " +
+            "the people, companies, projects and places named in it. In English, and the same words again in the language of the data when it is not " +
+            'English (e.g. "email", "inbox", "unread", "почта", "письма", "входящие"). Lowercase, no repeats.\n' +
             (partial
               ? "This result is only a PAGE or was cut off (the data carries a next-page marker or says it is truncated). Say in the summary that it is " +
                 'the first part ("first N of more"), and claim ONLY what was returned: never totals, never "no more", never that something is absent.\n'
@@ -237,7 +244,8 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       const out = JSON.parse(text);
       const clean = (v, n) => (typeof v === "string" && v.trim() ? v.trim().slice(0, n) : null);
       const items = (Array.isArray(out.items) ? out.items : []).map((i) => clean(i, 200)).filter(Boolean).slice(0, 15);
-      return { title: clean(out.title, 100)?.replace(/^#+\s*/, ""), short: clean(out.short, 200), summary: clean(out.summary, 1200), items };
+      const keywords = [...new Set((Array.isArray(out.keywords) ? out.keywords : []).map((k) => clean(k, 60)?.toLowerCase()).filter(Boolean))].slice(0, 30);
+      return { title: clean(out.title, 100)?.replace(/^#+\s*/, ""), short: clean(out.short, 200), summary: clean(out.summary, 1200), items, keywords };
     } catch {
       return { summary: text.slice(0, 1200) };
     }
@@ -245,7 +253,8 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
 
   // How well a recipe fits a request: its result summary and each thing it held (not the tool's description).
   // A line of its last result with a key term of the request in it or very close by meaning makes it a strong match;
-  // a line somewhat close (0.33+) or a key term in the summary puts it among the recipes offered. matched: those lines.
+  // a line somewhat close (0.33+) or a key term in the summary or its keywords puts it among the recipes offered.
+  // matched: those lines.
   function resultMatch(r, vector, terms) {
     const lines = r.items ?? [];
     const byItem = (r.itemEmbeddings ?? []).map((e, i) => [lines[i], cosine(vector.slice(0, e.length), e)]);
@@ -257,7 +266,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     const written = lines.filter(said);
     const matched = [...new Set([...written, ...close.map(([l]) => l)])].slice(0, 3);
     if (written.length || close[0]?.[1] >= ITEM_STRONG) score = Math.max(score, strongScore);
-    else if (matched.length || said(r.summary)) score = Math.max(score, (minScore + strongScore) / 2);
+    else if (matched.length || said(r.summary) || (r.keywords ?? []).some(said)) score = Math.max(score, (minScore + strongScore) / 2);
     return { score, matched };
   }
 
@@ -330,7 +339,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     let summaryEmbedding;
     let itemEmbeddings;
     if (named?.summary) {
-      const vectors = await embedMany([named.summary, ...lines]).catch(() => []);
+      const vectors = await embedMany([summaryText(named), ...lines]).catch(() => []);
       [summaryEmbedding, ...itemEmbeddings] = vectors;
       itemEmbeddings = itemEmbeddings?.length ? itemEmbeddings.map((e) => e.slice(0, ITEM_DIMS)) : undefined;
     }
@@ -346,6 +355,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         short: named.short ?? named.title ?? record.short,
         summary: named.summary ?? null,
         items: lines.length ? lines : undefined,
+        keywords: named.keywords?.length ? named.keywords : undefined,
         summaryEmbedding,
         itemEmbeddings,
       }),
@@ -468,6 +478,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
               title: r.title,
               short: r.short,
               summary: r.summary,
+              ...(r.keywords && { keywords: r.keywords }),
               ...(matched.length && { matched }),
               score: Number(score.toFixed(2)),
               status: r.status,
@@ -705,6 +716,9 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
 // text-embedding-3 vectors keep their meaning when cut (Matryoshka), «Уборка» vs "когда мне убираться" is 0.40 at 1536
 // and 0.41 at 256, unrelated events stay under 0.22, and 100 lines cost ~34 KB instead of 600.
 const MAX_ITEMS = 100;
+
+// What a recipe's summary vector is made of: the summary and the search keywords written with it.
+const summaryText = ({ summary, keywords }) => (keywords?.length ? `${summary}\nKeywords: ${keywords.join(", ")}` : summary);
 const ITEM_DIMS = 256;
 // How close a line of a result is to a request (256 dims): «Уборка» to "когда мне убираться" 0.40, to "when should I
 // clean" 0.36, to "когда уборка" 0.56; "Стоматолог" to "когда к стоматологу" 0.60; unrelated lines mostly under 0.30,
