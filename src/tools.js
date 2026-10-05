@@ -34,9 +34,14 @@ const recipeTags = z.array(z.string()).describe("Tags in English and Russian, e.
 
 export const tools = {
   register_tool: {
-    description: "Connect an app (toolkit) like gmail or github. Returns a URL the user must open to authorize it.",
+    description:
+      "Connect an app (toolkit) like gmail or github, or any remote MCP server by its address (mcp_url). Returns a URL the user must open " +
+      "to authorize it; a server that needs no sign-in is connected at once (no_auth, no URL).",
     input: z.object({
-      toolkit: z.string().describe("Composio toolkit slug, e.g. gmail, github, slack"),
+      toolkit: z.string().optional().describe("Composio toolkit slug, e.g. gmail, github, slack"),
+      mcp_url: z.string().url().optional().describe("Instead of toolkit: a remote MCP server's address, e.g. https://mcp.example.com/mcp. Added as a custom toolkit"),
+      name: z.string().max(60).optional().describe("With mcp_url: the server's name to show"),
+      api_key_header: z.string().max(80).optional().describe("With mcp_url: the server takes an API key in this header (Authorization: as a Bearer token)"),
       callback_url: z.string().url().optional().describe("Where to send the user after connecting (gets ?status=success|failed)"),
       alias: z.string().optional().describe("Name for this connection when the app is connected more than once, e.g. work"),
     }),

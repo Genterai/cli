@@ -32,6 +32,9 @@ import { jsonToMarkdown } from "./markdown.js";
 // A list without items/id is shaped from its first real response (inferList): a ready recipe needs only the call.
 // Every call recipe can be synced: inferList finds the list, id, version and title in a real response.
 // Updates: the recipe's triggers, or a schedule ({ every: minutes }); store rows carry next_sync_at for the scheduler.
+// A recipe with no triggers may say how often its sources are checked (every: minutes): set when a source is made.
+// list.complete: a path that is false when a response is not the whole list (a crawl cut short by time); the items
+// it did not list are kept then.
 // A sync cut short by its time budget (partial) is due again a minute later, so the scheduler finishes it.
 //
 // A recipe with no parameters: vars hold its fixed values ({ owner, repo, branch }), used like scope fields, so the
@@ -102,6 +105,29 @@ export const BUILTIN = {
     prefix: "{{path}}",
     exclude: [BINARY, "(^|/)(node_modules|vendor|dist|build|\\.git|\\.next|coverage)/", "(^|/)(package-lock\\.json|yarn\\.lock|pnpm-lock\\.yaml)$"],
     maxSize: 300_000,
+  },
+  website: {
+    toolkit: "website",
+    name: "Website",
+    description: "The pages of a website: its address and the pages it links to on the same site, up to two links deep, checked every hour.",
+    title: "{{url}}",
+    scope: {
+      url: { required: true, description: "The site's address: this page and the pages under it that it links to", example: "https://docs.example.com" },
+      depth: { description: "How many links deep from the address: 0 (only it), 1 or 2 (default)", example: "2" },
+    },
+    every: 60, // a site has no triggers: checked hourly, only changed pages are embedded again
+    list: {
+      tool: "WEBSITE_CRAWL", // local (web.js)
+      args: { url: "{{url}}", depth: "{{depth}}" },
+      items: "data.pages",
+      complete: "data.complete",
+      id: "url",
+      version: "hash",
+      title: "title",
+      url: "url",
+      size: "size",
+      text: "text",
+    },
   },
   notion: {
     toolkit: "notion",
@@ -227,6 +253,7 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
       if (role.nextPage) page = n + 1;
       const res = await run(role.tool, fill(role.args ?? {}, { ...base, page }), source.account);
       if (res?.successful === false) throw new Error(`${role.tool}: ${errorText(res.error)}`);
+      if (role.complete && pick(res, role.complete) === false) out.cut = true;
       // A list given only as a call: its items, id, version and title are found in the first real response.
       if (n === 0 && !role.single && !role.items) {
         role = shaped(role, res);
@@ -312,7 +339,9 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
       return false;
     };
     const exclude = (part.exclude ?? []).map((x) => new RegExp(x, "i"));
-    return out.filter((i) => (!root || under(i.id)) && i.id.startsWith(prefix) && !exclude.some((re) => re.test(i.id)) && !(part.maxSize && i.size > part.maxSize));
+    const kept = out.filter((i) => (!root || under(i.id)) && i.id.startsWith(prefix) && !exclude.some((re) => re.test(i.id)) && !(part.maxSize && i.size > part.maxSize));
+    kept.cut = out.cut; // not the whole list: what it missed is kept
+    return kept;
   }
 
   // Lists every item of a source: { items, failed, incremental }. Each item knows its part (index) and its id within
@@ -331,7 +360,9 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
       if (since) incremental.push(part.key);
       const vars = since ? { since, since_unix: Math.floor(new Date(since).getTime() / 1000) } : {};
       try {
-        for (const item of await listPart(source, template, part, { pages, raw, containersMax, vars })) {
+        const items = await listPart(source, template, part, { pages, raw, containersMax, vars });
+        if (items.cut && !since) incremental.push(part.key);
+        for (const item of items) {
           item.part = index;
           item.local = item.id;
           if (part.key) item.id = `${part.key}:${item.id}`;
@@ -646,6 +677,7 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
         status: "new",
         created_at: new Date().toISOString(),
         stats: { items: 0, chunks: 0 },
+        ...(t.every && { schedule: { every: t.every, next: new Date(Date.now() + t.every * 60_000).toISOString() } }),
       };
       await saveSource(source);
       return publicSource(source);

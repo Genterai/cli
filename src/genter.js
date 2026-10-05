@@ -1,7 +1,9 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
 import { Composio } from "@composio/core";
+import { addMcpServer, isCustomToolkit, mcpUrl } from "./mcp.js";
 import { readyFor } from "./ready.js";
 import { createSources, fill, inferList, pick } from "./sync.js";
+import { crawl } from "./web.js";
 
 // Genter = Composio + recipes of past calls.
 // A call record is { id, tool, args, created_at, summary, digest, memory }: memory is the recipe description,
@@ -146,9 +148,22 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     return (await res.json()).data[0].embedding;
   }
 
+  // Composio's own sign-in for an app; an app it has none for (an MCP server added by its address) signs in its own
+  // way (OAuth with client registration, an API key), with nothing to fill in here.
+  async function newAuthConfig(toolkit) {
+    try {
+      return (await composio.authConfigs.create(toolkit, { type: "use_composio_managed_auth", name: `${toolkit} auth config` })).id;
+    } catch (e) {
+      const mode = (await composio.toolkits.get(toolkit).catch(() => null))?.authConfigDetails?.[0]?.mode;
+      if (!mode || mode === "NO_AUTH") throw e;
+      return (await composio.authConfigs.create(toolkit, { type: "use_custom_auth", authScheme: mode, credentials: {}, name: `${toolkit} auth config` })).id;
+    }
+  }
+
   // A connection alias from login -> its account id. Unknown aliases stay as they are (strict) or mean the default.
   async function accountId(account, { strict = true } = {}) {
     if (!account || account.startsWith("ca_")) return account || undefined;
+    if (account.startsWith("own_")) return undefined; // kept by the host, not Composio: a server with no sign-in, a website
     const { items } = await composio.connectedAccounts.list({ userIds: [userId], limit: 100 });
     return items.find((a) => a.alias === account)?.id ?? (strict ? account : undefined);
   }
@@ -171,6 +186,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     knowledge &&
     createSources({
       run: async (tool, args, account) => {
+        if (tool === "WEBSITE_CRAWL") return crawl(args); // a local tool (web.js), not Composio's
         const id = await accountId(account, { strict: false });
         return composio.tools.execute(tool, { userId, arguments: args, ...(id && { connectedAccountId: id }), dangerouslySkipVersionCheck: true });
       },
@@ -459,17 +475,21 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     // Returns a Composio link the user opens to connect an app (gmail, github, ...).
     // callback_url: where Composio sends the user afterwards (with ?status=success|failed).
     // An app can be connected several times (e.g. work and personal gmail); alias names the connection.
-    async register_tool({ toolkit, callback_url, alias }) {
+    // mcp_url: a remote MCP server Composio has no toolkit for is added as one first (mcp.js); one that needs no
+    // sign-in has no connection to make: { toolkit, no_auth: true }.
+    async register_tool({ toolkit, mcp_url, name, api_key_header, callback_url, alias }) {
+      let auth;
+      if (mcp_url) ({ toolkit, auth } = await addMcpServer({ apiKey: composioApiKey, url: mcp_url, name, api_key_header }));
+      if (!toolkit) throw new Error("Pass toolkit (an app's slug) or mcp_url (an MCP server's address)");
+      if (auth === "NO_AUTH") return { toolkit, connect_url: null, connection_id: null, no_auth: true, mcp_url: mcpUrl(mcp_url) };
       const configs = await composio.authConfigs.list({ toolkit });
-      const authConfigId =
-        configs.items[0]?.id ??
-        (await composio.authConfigs.create(toolkit, { type: "use_composio_managed_auth", name: `${toolkit} auth config` })).id;
+      const authConfigId = configs.items[0]?.id ?? (await newAuthConfig(toolkit));
       const request = await composio.connectedAccounts.link(userId, authConfigId, {
         allowMultiple: true,
         ...(callback_url && { callbackUrl: callback_url }),
         ...(alias && { alias }),
       });
-      return { toolkit, connect_url: request.redirectUrl, connection_id: request.id };
+      return { toolkit, connect_url: request.redirectUrl, connection_id: request.id, ...(mcp_url && { mcp_url: mcpUrl(mcp_url) }) };
     },
 
     // Who am I and which apps are connected. `account` is what execute takes when an app has several connections.
@@ -533,7 +553,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       const search = english?.en ?? query;
       const [own, all] = await Promise.all([
         toolkits.length ? appToolsFor(toolkits, `${query}\n${english?.en ?? ""}`, vector, Math.max(limit, 8)).catch(() => []) : [],
-        composio.tools.getRawComposioTools({ search, limit }),
+        composio.tools.getRawComposioTools({ search, limit }).then((list) => list.filter((t) => !isCustomToolkit(t.toolkit?.slug) || apps.includes(t.toolkit.slug))),
       ]);
       const tools = [...own, ...all.filter((t) => !own.some((o) => o.slug === t.slug))].slice(0, limit + own.length);
       const found = tools.map((t) => ({

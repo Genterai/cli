@@ -53,7 +53,7 @@ Without it, `search` uses Composio only.
 
 | tool | input | output |
 | --- | --- | --- |
-| `register_tool` | `{toolkit, alias?}` | `{toolkit, connect_url, connection_id}` — open the URL to connect the app; an app can be connected several times |
+| `register_tool` | `{toolkit, alias?}` or `{mcp_url, name?, api_key_header?}` | `{toolkit, connect_url, connection_id}` — open the URL to connect the app; an app can be connected several times. `mcp_url`: any remote MCP server, added to Composio as a custom toolkit (`custom_mcp_<name>_<hash>`, one per address); how it signs in (none, OAuth with client registration, an API key) is asked of the server, and one with no sign-in answers `no_auth: true` and no URL |
 | `login` | `{}` | `{user_id, connected: [{toolkit, account, alias, status}]}` |
 | `search` | `{query, limit?}` | `[{id, tool, args, description, short, summary, when, tags, status}]` |
 | `execute` | `{tool, args}` or `{id, args?}`, optional `{account, description, short, tags}` | `{id, result, summary, saved?, note?}` |
@@ -62,6 +62,7 @@ Without it, `search` uses Composio only.
 
 ```bash
 genter register_tool '{"toolkit":"gmail"}'
+genter register_tool '{"mcp_url":"https://mcp.deepwiki.com/mcp","name":"DeepWiki"}'
 genter search '{"query":"unread emails from today"}'
 genter execute '{"tool":"GMAIL_FETCH_EMAILS","args":{"query":"is:unread newer_than:1d"},
   "description":"### Fetch unread emails\n`GMAIL_FETCH_EMAILS` · args: `{query, max_results?}`\nReturns a list of messages. For other filters override `query`.",
@@ -235,7 +236,10 @@ genter run '{"task":"remember the Notion pages about the roadmap, summaries only
 The sync engine knows no connector. A **live sync recipe** (plain JSON, `src/sync.js`) maps an app's tools onto roles:
 `list` (pages of items with an id and a version), `read` (an item's text), and optional `choices` (what the user can pick:
 their repos, top-level pages), `setup` (fills scope fields, e.g. the default branch) and `triggers` (Composio events that
-mean "changed"; an event syncs the source). GitHub files and Notion pages are built in. For anything else the agent's
+mean "changed"; an event syncs the source). GitHub files, Notion pages and websites are built in. A website
+(`{"template":"website","scope":{"url":"https://docs.example.com"}}`) needs no app: a local crawl (`src/web.js`) reads the
+address and the pages it links to on the same site, up to two links deep (at most 120 pages, robots.txt respected, public
+addresses only), and the source is checked every hour (a recipe's `every`); only pages whose text changed are embedded again. For anything else the agent's
 `build_live_sync` runs a builder (`src/builder.js`, `BUILDER_MODEL`, default `google/gemma-4-31b-it`) that explores the app's
 tools with real sample calls, writes the recipe, tests it on real data (`test_live_sync`) and saves it like any recipe
 (`save_live_sync`), so it is found by search and reused:
