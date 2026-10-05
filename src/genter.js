@@ -238,9 +238,11 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
           role: "user",
           content:
             `A call of ${tool} with args ${JSON.stringify(args).slice(0, 600)} returned the data below. ` +
-            `Reply with JSON only: {"title": "...", "about": "...", "summary": "...", "items": ["..."]${task ? ', "relevant": true' : ""}}.\n` +
+            `Reply with JSON only: {"title": "...", "about": "...", "short": "...", "summary": "...", "items": ["..."]${task ? ', "relevant": true' : ""}}.\n` +
             'title: what this result is, as a name of up to 8 words for these exact args, in English, e.g. "Open pull requests of Genterai/genter-cli", "Unread emails from today".\n' +
             "about: 1-2 sentences: what the result is (which items, which filters) and what each item has, so someone knows what they get without running it.\n" +
+            "short: ONE sentence of up to 140 characters saying what this result is about and can answer (the content, not the call or its args), " +
+            'for a table row, e.g. "Titles, authors and states of the pull requests still open in the repository". Not a repeat of the title.\n' +
             "summary: 1-3 sentences retelling what it contains, so it can be found later by topic: subjects, people, dates, and the ids or URLs " +
             "needed to open it again. Write in English, but quote subjects, titles and names exactly as they are.\n" +
             "items: up to 15 things the result holds, one short line each, the way someone would look for it: what it is, its " +
@@ -262,6 +264,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       return {
         title: clean(out.title, 100)?.replace(/^#+\s*/, ""),
         about: clean(out.about, 600),
+        short: clean(out.short, 200),
         summary: clean(out.summary, 1200),
         items,
         relevant: out.relevant === false ? false : true,
@@ -351,7 +354,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       await api.save_recipes({
         recipes: [
           named?.title
-            ? { id: target.id, description: resultRecipe(named, record.tool), short: named.title, tags, auto: true }
+            ? { id: target.id, description: resultRecipe(named, record.tool), short: named.short ?? named.title, tags, auto: true }
             : { id: target.id, description: autoRecipe(info, record.tool, record.args), tags, auto: true },
         ],
       });

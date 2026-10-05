@@ -116,6 +116,31 @@ describe("genter.execute", () => {
     assert.deepEqual(recipe.matched, ['Calendar event "Уборка" on 2026-10-03 13:00']);
   });
 
+  // The table shows one sentence about the result (`short`); retrieval embeds the richer summary, not that sentence.
+  it("G4b a new recipe gets a one-sentence result description apart from its title, and is found by its result summary", async () => {
+    const SUMMARY = "Three open pull requests: #12 fix login, #15 add billing page, #18 bump deps.";
+    fakeComposio(
+      { items: [{ title: "fix login" }] },
+      {
+        chat: (prompt) =>
+          /Translate it for searching/.test(prompt)
+            ? { en: "which pull requests are waiting", terms: [] }
+            : { title: "Open pull requests of o/r", about: "Open PRs.", short: "Titles and numbers of pull requests still waiting for review.", summary: SUMMARY, items: [], relevant: true },
+        vector: (t) => (t === SUMMARY || t.startsWith("which pull") ? [1, 0, 0] : [0, 1, 0]), // only the summary is close to the request
+      },
+    );
+    const store = memoryStore();
+    const deferred = [];
+    const genter = createGenter({ composioApiKey: "k", openrouterApiKey: "o", userId: "u", secret: "s", store, defer: (p) => deferred.push(p) });
+    const out = await genter.execute({ tool: "GITHUB_LIST_PULL_REQUESTS", args: { owner: "o", repo: "r" } });
+    await Promise.all(deferred);
+    const recipe = (await genter.search({ query: "which pull requests are waiting" })).find((r) => r.id === out.id);
+    assert.ok(recipe, "found through its result summary");
+    assert.equal(recipe.short, "Titles and numbers of pull requests still waiting for review.");
+    assert.notEqual(recipe.short, "Open pull requests of o/r");
+    assert.equal(recipe.summary, SUMMARY); // the rich text is kept for retrieval and the recipe page
+  });
+
   it("G5 a key term of the request written in a recipe's result puts it among the recipes, items or not", async () => {
     fakeComposio(
       { items: [{ summary: "Уборка" }] },
