@@ -1,7 +1,9 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { Composio } from "@composio/core";
+import { addMcpServer, isCustomToolkit, mcpUrl } from "./mcp.js";
 import { canonicalArgs, canonicalJson, classifyFailure, contentHash, isPartial, normalizeLegacy, publicRecipe, recipeId, sourceOf } from "./recipe.js";
 import { fill, inferList, pick } from "./shape.js";
+import { crawl, forgetPage, readPage, siteUrl, underSite } from "./web.js";
 
 // Genter = Composio + recipes of past calls.
 // A Recipe is ONE successful tool call with fixed args plus knowledge about its actual result (see recipe.js and
@@ -164,9 +166,25 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     return (await res.json()).data[0].embedding;
   }
 
+  // Composio's own sign-in for an app; an app it has none for (an MCP server added by its address) signs in its own
+  // way (OAuth with client registration, an API key), with nothing to fill in here.
+  async function newAuthConfig(toolkit) {
+    try {
+      return (await composio.authConfigs.create(toolkit, { type: "use_composio_managed_auth", name: `${toolkit} auth config` })).id;
+    } catch (e) {
+      const mode = (await composio.toolkits.get(toolkit).catch(() => null))?.authConfigDetails?.[0]?.mode;
+      if (!mode || mode === "NO_AUTH") throw e;
+      return (await composio.authConfigs.create(toolkit, { type: "use_custom_auth", authScheme: mode, credentials: {}, name: `${toolkit} auth config` })).id;
+    }
+  }
+
+  // Tools that run here, not in Composio: a website's page (web.js).
+  const LOCAL = { WEBSITE_READ_PAGE: readPage };
+
   // A connection alias from login -> its account id. Unknown aliases stay as they are (strict) or mean the default.
   async function accountId(account, { strict = true } = {}) {
     if (!account || account.startsWith("ca_")) return account || undefined;
+    if (account.startsWith("own_")) return undefined; // kept by the host, not Composio: a server with no sign-in, a website
     const { items } = await composio.connectedAccounts.list({ userIds: [userId], limit: 100 });
     return items.find((a) => a.alias === account)?.id ?? (strict ? account : undefined);
   }
@@ -331,6 +349,10 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     return load(id);
   }
 
+  // The page recipes of a site (any status).
+  const websitePages = async (site) =>
+    (await everyRecipe()).filter((r) => r.tool === "WEBSITE_READ_PAGE" && typeof r.args?.url === "string" && underSite(r.args.url, site));
+
   const toolkitOf = (tool) => String(tool).split("_")[0].toLowerCase();
   const now = () => new Date().toISOString();
 
@@ -338,17 +360,62 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     // Returns a Composio link the user opens to connect an app (gmail, github, ...).
     // callback_url: where Composio sends the user afterwards (with ?status=success|failed).
     // An app can be connected several times (e.g. work and personal gmail); alias names the connection.
-    async register_tool({ toolkit, callback_url, alias }) {
+    // mcp_url: a remote MCP server Composio has no toolkit for is added as one first (mcp.js); one that needs no
+    // sign-in has no connection to make: { toolkit, no_auth: true }.
+    async register_tool({ toolkit, mcp_url, name, api_key_header, callback_url, alias }) {
+      let auth;
+      if (mcp_url) ({ toolkit, auth } = await addMcpServer({ apiKey: composioApiKey, url: mcp_url, name, api_key_header }));
+      if (!toolkit) throw new Error("Pass toolkit (an app's slug) or mcp_url (an MCP server's address)");
+      if (auth === "NO_AUTH") return { toolkit, connect_url: null, connection_id: null, no_auth: true, mcp_url: mcpUrl(mcp_url) };
       const configs = await composio.authConfigs.list({ toolkit });
-      const authConfigId =
-        configs.items[0]?.id ??
-        (await composio.authConfigs.create(toolkit, { type: "use_composio_managed_auth", name: `${toolkit} auth config` })).id;
+      const authConfigId = configs.items[0]?.id ?? (await newAuthConfig(toolkit));
       const request = await composio.connectedAccounts.link(userId, authConfigId, {
         allowMultiple: true,
         ...(callback_url && { callbackUrl: callback_url }),
         ...(alias && { alias }),
       });
-      return { toolkit, connect_url: request.redirectUrl, connection_id: request.id };
+      return { toolkit, connect_url: request.redirectUrl, connection_id: request.id, ...(mcp_url && { mcp_url: mcpUrl(mcp_url) }) };
+    },
+
+    // A website as a prepared area: a crawl finds its pages (web.js) and each one is read as a recipe of its own
+    // (WEBSITE_READ_PAGE). Again (the host's scheduler, every hour): an unchanged page only moves checked_at, a changed
+    // one is described again, a new one is added, and a known page the crawl no longer finds is read again, so one the
+    // site removed (404) is marked gone. { url, pages, created, changed, unchanged, failed, complete, scope }.
+    async prepare_website({ url, depth, account }) {
+      const site = siteUrl(url);
+      const crawled = await crawl({ url: site, depth });
+      if (!crawled.successful) throw new Error(crawled.error);
+      const { pages, complete } = crawled.data;
+      const stats = { url: site, pages: pages.length, created: 0, changed: 0, unchanged: 0, failed: 0, complete };
+      const read = async (pageUrl) => {
+        const out = await api.execute({ tool: "WEBSITE_READ_PAGE", args: { url: pageUrl }, account });
+        if (out.created) stats.created++;
+        else if (out.changed) stats.changed++;
+        else if (out.unchanged) stats.unchanged++;
+        else stats.failed++;
+      };
+      await pool(pages.map((p) => p.url), 4, read);
+      if (complete) {
+        const found = new Set(pages.map((p) => p.url));
+        const missing = (await websitePages(site)).filter((r) => r.status === "fresh" && !found.has(r.args.url)).map((r) => r.args.url);
+        missing.forEach(forgetPage);
+        await pool(missing, 4, read);
+      }
+      const scope = scopeStore ? await api.recipes.prepareScope({ label: site, toolkit: "website", account: account ?? "" }) : null;
+      if (scope) await scopeStore.put({ ...scope, spec: { kind: "website", url: site, depth: depth ?? null, every: 60, last: { ...stats, at: now() } } });
+      return { ...stats, scope: scope?.id ?? null };
+    },
+
+    // A website no longer kept: its pages' recipes and its area record go. { url, removed }.
+    async forget_website({ url, account }) {
+      const site = siteUrl(url);
+      const pages = await websitePages(site);
+      for (const r of pages) await drop(r.id);
+      if (scopeStore) {
+        const scope = await api.recipes.prepareScope({ label: site, toolkit: "website", account: account ?? "" });
+        await (scopeStore.remove ? scopeStore.remove(scope.id) : null);
+      }
+      return { url: site, removed: pages.length };
     },
 
     // Who am I and which apps are connected. `account` is what execute takes when an app has several connections.
@@ -399,7 +466,8 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       const search = english?.en ?? query;
       const [own, all] = await Promise.all([
         toolkits.length ? appToolsFor(toolkits, `${query}\n${english?.en ?? ""}`, vector, Math.max(limit, 8)).catch(() => []) : [],
-        composio.tools.getRawComposioTools({ search, limit }),
+        // Custom toolkits (MCP servers added by address) are shared by the Composio project: only connected ones.
+        composio.tools.getRawComposioTools({ search, limit }).then((list) => list.filter((t) => !isCustomToolkit(t.toolkit?.slug) || apps.includes(t.toolkit.slug))),
       ]);
       const tools = [...own, ...all.filter((t) => !own.some((o) => o.slug === t.slug))].slice(0, limit + own.length);
       const found = tools.map((t) => ({
@@ -433,12 +501,14 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       let result;
       try {
         // Dates stay placeholders in the recipe ({{today}}, {{ago.7d}}) and are filled for this run.
-        result = await composio.tools.execute(tool, {
-          userId,
-          arguments: withDates(args),
-          ...(account && { connectedAccountId: account }),
-          dangerouslySkipVersionCheck: true,
-        });
+        result = LOCAL[tool]
+          ? await LOCAL[tool](withDates(args))
+          : await composio.tools.execute(tool, {
+              userId,
+              arguments: withDates(args),
+              ...(account && { connectedAccountId: account }),
+              dangerouslySkipVersionCheck: true,
+            });
       } catch (e) {
         // The SDK wraps API errors ("Error executing the tool X"): the cause says what happened (not found, forbidden...).
         const error = [e.message, e.cause?.message, e.cause?.error?.error?.message].filter((x, i, all) => x && all.indexOf(x) === i).join(": ");
@@ -745,6 +815,14 @@ function forSummary(data) {
     if (list && typeof value === "string" && value.length > 400) return `${value.slice(0, 400)}…`;
     return decodeBase64(key, value);
   });
+}
+
+// fn over items, n at a time.
+async function pool(items, n, fn) {
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
+    while (i < items.length) await fn(items[i++]);
+  }));
 }
 
 function cosine(a, b) {

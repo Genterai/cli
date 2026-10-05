@@ -55,7 +55,7 @@ Without it, `search` uses Composio only.
 
 | tool | input | output |
 | --- | --- | --- |
-| `register_tool` | `{toolkit, alias?}` | `{toolkit, connect_url, connection_id}` — open the URL to connect the app; an app can be connected several times |
+| `register_tool` | `{toolkit, alias?}` or `{mcp_url, name?, api_key_header?}` | `{toolkit, connect_url, connection_id}` — open the URL to connect the app; an app can be connected several times. `mcp_url`: any remote MCP server, added to Composio as a custom toolkit (`custom_mcp_<name>_<hash>`, one per address); how it signs in (none, OAuth with client registration, an API key) is asked of the server, and one with no sign-in answers `no_auth: true` and no URL |
 | `login` | `{}` | `{user_id, connected: [{toolkit, account, alias, status}]}` |
 | `search` | `{query, limit?}` | `[{id, tool, args, title, short, summary, matched?, score, status, updated_at, checked_at, trigger:{active}}]` (fresh recipes only), then Composio tools (`id: null`) |
 | `execute` | `{tool, args}` or `{id, args?}`, optional `{account}` | `{id, result, created, changed, unchanged, recipe_status}` |
@@ -65,6 +65,7 @@ Without it, `search` uses Composio only.
 
 ```bash
 genter register_tool '{"toolkit":"gmail"}'
+genter register_tool '{"mcp_url":"https://mcp.deepwiki.com/mcp","name":"DeepWiki"}'
 genter search '{"query":"unread emails from today"}'
 genter execute '{"tool":"GMAIL_FETCH_EMAILS","args":{"query":"is:unread newer_than:1d"}}'
 genter recipes '{}'
@@ -213,6 +214,12 @@ If the agent finds a finite area (a repository's files, a Drive folder, a channe
 `execute_many` (up to 100 calls, 4 at a time); each success is an ordinary atomic recipe. `genter.recipes.prepareScope`
 keeps a minimal area record in the optional `scopes` store so events know the area was prepared.
 
+**Websites** need no app. `prepare_website({url, depth?})` is a prepared area: a local crawl (`src/web.js`) finds the
+address and the pages it links to on the same site, up to two links deep (at most 120 pages, robots.txt respected,
+public addresses only), and each page is read by the local tool `WEBSITE_READ_PAGE {url}` as an ordinary recipe. Run it
+again (the hosted backend does, every hour): an unchanged page only moves `checked_at`, a changed one is described again,
+a new one is added, a page the site removed (404) is marked gone. `forget_website({url})` drops the site's recipes.
+
 A trigger keeps a recipe current: `recipes.recommendTrigger(id)` lets a model pick a Composio trigger spec for the
 recipe's app (cached in `trigger.spec`), `recipes.setTrigger({id, active})` creates or disables it (only where
 `createGenter` gets `triggers: true`, the hosted backend), `recipes.byTrigger({triggerId})` finds the recipes an event
@@ -240,6 +247,7 @@ import { tools } from "genter-cli/tools";
 
 const genter = createGenter({ composioApiKey, openrouterApiKey, userId, secret, store }); // store: get(id), put(row), all(), remove?(id)
 // workspaceId (default userId), scopes (get/put/list/remove), triggers: true, allow(record), defer(promise)
+await genter.register_tool({ mcp_url: "https://mcp.example.com/mcp" }); // or { toolkit }; prepare_website({ url }), forget_website({ url })
 await genter.search({ query: "send a slack message" });
 const out = await genter.execute({ tool: "GMAIL_FETCH_EMAILS", args: { query: "is:unread" } }); // { id, result, created, changed, unchanged, pending }
 await genter.recipes.list(); // get(id), remove(id), recheck(id), invalidateAccount({account|toolkit}), markGone(id),
