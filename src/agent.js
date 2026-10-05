@@ -1,8 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { cipher, namedApps } from "./genter.js";
-import { createBuilder } from "./builder.js";
 import { appOf, applyEdits, citedRefs, fileEditor, needsCatalogue, refFromUrl, refLabel, refsOfResult, shapeRef, writeHints } from "./refs.js";
-import { locatorArgs } from "./sync.js";
+import { locatorArgs } from "./shape.js";
 
 // The task agent: an LLM loop over genter (search -> execute -> save), tuned for speed.
 // Before the first LLM call it already has, in parallel: the saved recipes matching the task (found by
@@ -39,30 +38,10 @@ export function createAgent({
 }) {
   if (!openrouterApiKey) throw new Error("The agent needs an OpenRouter key (OPENROUTER_API_KEY)");
   const { seal, open } = cipher(`${secret}:${userId}:runs`);
-  const builder = genter.sources && genter.save_live_sync ? createBuilder({ genter, openrouterApiKey, onEvent }) : null;
   let lastNote = null;
   let currentRun = {};
   const personal = String(instructions ?? "").trim();
   const preamble = [{ role: "system", content: SYSTEM }, ...(personal ? [{ role: "system", content: personalNote(personal) }] : [])];
-
-  // A source made, synced (one round) and kept up to date; the note says it all for the model.
-  async function addSource({ template, scope, depth, filter, account, watch }) {
-    const source = await genter.sources.create({ template, scope, depth, filter, account });
-    onEvent({ type: "step", tool: "sync_source", input: { source: source.title } });
-    const synced = await genter.sources.sync({ id: source.id, budgetMs: 60000 });
-    let watching = synced.watching;
-    let watchError;
-    if (watch !== false && genter.sources.watch) {
-      const watched = await genter.sources.watch({ id: source.id }).catch((e) => ({ watch_error: e.message }));
-      watching = watched.watching ?? [];
-      watchError = watched.watch_error;
-    }
-    onEvent({ type: "tool", tool: "sync_source", ok: synced.status !== "failed", summary: syncText(synced) });
-    const note = `${syncText(synced)}${watching?.length ? ` Kept up to date ${watching.join(", ")}.` : ""}${watchError ? ` Auto-update could not be turned on: ${watchError}` : ""}`;
-    lastNote = note;
-    if (synced.status !== "failed") currentRun.sourced = true;
-    return { ...synced, watching, note };
-  }
 
   async function llm(messages, usage, tools = TOOLS, toolChoice, useModel = model) {
     const started = Date.now();
@@ -122,8 +101,8 @@ export function createAgent({
           onEvent({ type: "tool", tool: "execute", ok: false, summary: "no tool or id" });
           return { content: JSON.stringify({ error: "Pass tool (a slug from the first message or search results) and args, or id of a saved recipe." }) };
         }
-        if (run.mode === "find" && tool && !isReadOnly(tool)) {
-          return { content: `Not allowed: ${tool} changes data and this is a read-only find. Only read, or tell the user to use run_task.` };
+        if (READ_ONLY_MODES.includes(run.mode) && tool && !isReadOnly(tool)) {
+          return { content: `Not allowed: ${tool} changes data and this is a read-only ${run.mode}. Only read, or tell the user to use run_task.` };
         }
         // A call that already failed is not run again: the model gets the error back and must change course.
         const key = `${tool ?? input.id} ${JSON.stringify(input.args ?? {})}`;
@@ -158,8 +137,10 @@ export function createAgent({
         if (ok && tool && !isReadOnly(tool)) run.wrote = true;
         const data = ok ? (out.result?.data ?? null) : null;
         const empty = ok && isEmpty(data);
-        run.steps.push({ tool: tool ?? input.id, recipe: input.id ?? null, ok, summary: out.summary ?? null, saved: out.id ?? null, ...(out.account && { account: out.account }) });
-        onEvent({ type: "tool", tool: tool ?? input.id, recipe: input.id ?? null, ok, empty, summary: out.summary ?? (empty ? "nothing found" : null) });
+        const recipe = ok && out.id ? { id: out.id, created: Boolean(out.created), changed: Boolean(out.changed) } : null;
+        if (recipe) (run.touched ??= {})[recipe.id] = { ...(run.touched?.[recipe.id]), ...recipe, created: Boolean(run.touched?.[recipe.id]?.created || recipe.created), changed: Boolean(run.touched?.[recipe.id]?.changed || recipe.changed) };
+        run.steps.push({ tool: tool ?? input.id, from_recipe: input.id ?? null, recipe, ok, summary: out.summary ?? null, saved: out.id ?? null, ...(out.recipe_status && out.recipe_status !== "fresh" && { recipe_status: out.recipe_status }), ...(out.account && { account: out.account }) });
+        onEvent({ type: "tool", tool: tool ?? input.id, recipe, ok, empty, summary: out.summary ?? (empty ? "nothing found" : null) });
         const args = { ...(input.id ? run.recipeArgs[input.id] : {}), ...(input.args ?? {}) };
         if (out.id) {
           run.recipes[out.id] = tool;
@@ -191,13 +172,13 @@ export function createAgent({
       case "read_file": {
         // Reading a repository file is the base of most code tasks, and tool search does not surface it
         // ("read file" finds READMEs and gists, not GITHUB_GET_REPOSITORY_CONTENT): it is built in, like edit_file.
-        if (!canExecute) return { content: "Not allowed: this user can search but not run tools. Answer from recipes and synced knowledge." };
+        if (!canExecute) return { content: "Not allowed: this user can search but not run tools. Answer from what recipes say, or say which tool would do it." };
         const place = fileRef(run, input);
         if (!place) return { content: JSON.stringify({ error: input.ref != null ? `No reference [${input.ref}] in this run` : "Pass ref (the file's reference number) or owner, repo and path" }) };
         const n = register(run, place);
         const out = await readFile({ run, place, account: input.account || undefined }).catch((e) => ({ error: e.message }));
         if (out.error) run.failures.read_file = (run.failures.read_file ?? 0) + 1;
-        run.steps.push({ tool: "read_file", recipe: null, ok: !out.error, summary: out.error ?? out.summary, saved: null });
+        run.steps.push({ tool: "read_file", from_recipe: null, recipe: null, ok: !out.error, summary: out.error ?? out.summary, saved: null });
         onEvent({ type: "tool", tool: "read_file", ok: !out.error, summary: out.error ?? out.summary });
         const { summary, ...shown } = out;
         return {
@@ -207,13 +188,13 @@ export function createAgent({
       }
       case "edit_file": {
         if (!canExecute) return { content: "Not allowed: this user can search but not change files." };
-        if (run.mode === "find") return { content: "Not allowed: editing a file changes it and this is a read-only find. Tell the user to use run_task." };
+        if (READ_ONLY_MODES.includes(run.mode)) return { content: `Not allowed: editing a file changes it and this is a read-only ${run.mode}. Tell the user to use run_task.` };
         if ((run.failures.edit_file ?? 0) >= MAX_TOOL_FAILURES) return { content: JSON.stringify({ error: `edit_file failed ${MAX_TOOL_FAILURES} times in this run.`, hint: "Answer with what you have and say what did not work." }) };
         const place = fileRef(run, input);
         if (!place) return { content: JSON.stringify({ error: input.ref != null ? `No reference [${input.ref}] in this run` : "Pass ref (the file's reference number) or owner, repo and path" }) };
         const n = register(run, place);
         const out = await editFile({ run, place, edits: input.edits, message: input.message, account: input.account || undefined }).catch((e) => ({ error: e.message }));
-        run.steps.push({ tool: "edit_file", recipe: null, ok: !out.error, summary: out.error ?? out.summary, saved: null });
+        run.steps.push({ tool: "edit_file", from_recipe: null, recipe: null, ok: !out.error, summary: out.error ?? out.summary, saved: null });
         onEvent({ type: "tool", tool: "edit_file", ok: !out.error, summary: out.error ?? out.summary });
         if (out.error) {
           run.failures.edit_file = (run.failures.edit_file ?? 0) + 1;
@@ -222,56 +203,36 @@ export function createAgent({
         if (!out.unchanged) run.wrote = true;
         return { content: JSON.stringify({ ref: n, committed: !out.unchanged, ...out }) };
       }
-      case "search_knowledge": {
-        const hits = await genter.knowledge({ query: input.query, limit: 8, source: input.source });
-        return { content: JSON.stringify(hits.map((h) => compactHit(h, register(run, hitRef(h))))) };
+      case "suggest_prepare": {
+        // No side effects: the UI offers "prepare this area"; accepting starts a prepare run.
+        const label = String(input.label ?? "").trim().slice(0, 120);
+        if (label && !(run.suggestions ??= []).some((x) => x.label === label)) run.suggestions.push({ label, ...(input.why && { why: String(input.why).slice(0, 300) }) });
+        return { content: JSON.stringify({ noted: Boolean(label) }) };
       }
-      case "add_source": {
-        if (!genter.sources) return { content: "Sources are not available here." };
-        if (!canExecute) return { content: "Not allowed: this user can search but not add sources." };
-        const account = input.account ?? run.account;
-        let scope = input.scope ?? {};
-        // "genter-cli", "Roadmap": picked from what the connection has, so nobody needs owner/repo or page ids.
-        if (input.pick && !Object.keys(scope).length) {
-          const all = await genter.sources.choices({ template: input.template, account });
-          const want = input.pick.toLowerCase().trim();
-          const exact = all.filter((c) => c.label.toLowerCase() === want || c.label.toLowerCase().endsWith(`/${want}`));
-          const found = exact.length ? exact : all.filter((c) => c.label.toLowerCase().includes(want));
-          if (found.length !== 1) {
-            return {
-              content: JSON.stringify({
-                error: found.length ? `Several match "${input.pick}"` : `Nothing matches "${input.pick}"`,
-                choices: (found.length ? found : all).slice(0, 15).map((c) => c.label),
-                hint: "Do not ask: call add_source again with the exact name of the closest choice; if none fits, say so in the answer with the choices.",
-              }),
-            };
-          }
-          scope = found[0].scope;
-        }
-        return { content: JSON.stringify(await addSource({ template: input.template, scope, depth: input.depth, filter: input.filter, account, watch: input.watch })) };
+      case "execute_many": {
+        if (!canExecute) return { content: "Not allowed: this user can search but not run tools." };
+        if (run.mode !== "prepare") return { content: "execute_many is only for a prepare task. Use execute." };
+        return executeMany(run, input);
       }
-      case "build_live_sync": {
-        if (!builder) return { content: "Building live sync recipes is not available here." };
-        if (!canExecute) return { content: "Not allowed: this user can search but not add sources." };
-        const account = input.account ?? run.account;
-        const built = await builder.build({ goal: input.goal, toolkit: input.toolkit, account });
-        run.usage_extra = (run.usage_extra ?? 0) + (built.cost ?? 0);
-        run.calls_extra = (run.calls_extra ?? 0) + (built.steps ?? 0);
-        onEvent({ type: "tool", tool: "build_live_sync", ok: built.saved, summary: built.saved ? `recipe ${built.id}` : built.answer });
-        if (!built.saved) return { content: JSON.stringify({ error: built.answer }) };
-        const source = await addSource({ template: built.id, scope: built.scope, depth: input.depth, filter: input.filter, account, watch: input.watch });
-        return { content: JSON.stringify({ recipe: built.id, ...source, note: `New live sync recipe saved (${built.id}). ${source.note}` }) };
+      case "recheck_recipe": {
+        if (!canExecute) return { content: "Not allowed: this user can search but not run tools." };
+        if (!input.id) return { content: JSON.stringify({ error: "Pass id of the recipe" }) };
+        const started = Date.now();
+        const out = await genter.recipes.recheck(input.id).catch((e) => ({ error: e.message }));
+        run.timing.tool_ms += Date.now() - started;
+        const ok = !out.error && out.status !== "failed";
+        run.steps.push({ tool: "recheck_recipe", from_recipe: input.id, recipe: out.recipe ? { id: input.id, created: false, changed: Boolean(out.changed) } : null, ok, summary: out.error ?? out.status, saved: out.recipe ? input.id : null });
+        onEvent({ type: "tool", tool: "recheck_recipe", ok, summary: out.error ?? `${out.status}${out.changed ? ", changed" : ""}` });
+        if (out.recipe) (run.touched ??= {})[input.id] = { id: input.id, created: false, changed: Boolean(out.changed) };
+        return { content: JSON.stringify({ id: input.id, status: out.status, changed: out.changed, title: out.recipe?.title, error: out.error ?? (out.status === "failed" ? out.error : undefined) }) };
       }
-      case "sync_source": {
-        if (!genter.sources) return { content: "Sources are not available here." };
-        if (!canExecute) return { content: "Not allowed: this user can search but not sync sources." };
-        const synced = await genter.sources.sync({ id: input.id, budgetMs: 60000 });
-        onEvent({ type: "tool", tool: "sync_source", ok: synced.status !== "failed", summary: syncText(synced) });
-        return { content: JSON.stringify({ ...synced, note: syncText(synced) }) };
-      }
-      case "save_recipes": {
-        const saved = await genter.save_recipes({ recipes: input.recipes ?? [] });
-        return { content: JSON.stringify(saved.map(({ id, status }) => ({ id, status }))) };
+      case "forget_recipe": {
+        if (!canExecute) return { content: "Not allowed: this user can search but not run tools." };
+        if (!input.id) return { content: JSON.stringify({ error: "Pass id of the recipe" }) };
+        const out = await genter.recipes.markGone(input.id).then(() => ({ id: input.id, status: "gone" }), (e) => ({ error: e.message }));
+        run.steps.push({ tool: "forget_recipe", from_recipe: input.id, recipe: null, ok: !out.error, summary: out.error ?? (input.reason ? String(input.reason).slice(0, 200) : "gone"), saved: null });
+        onEvent({ type: "tool", tool: "forget_recipe", ok: !out.error, summary: out.error ?? "gone" });
+        return { content: JSON.stringify(out) };
       }
       case "connect_app": {
         if (!canConnect) {
@@ -296,12 +257,13 @@ export function createAgent({
     currentRun = run;
     run.refs ??= [];
     run.recipeArgs ??= {};
-    run.sourced = false;
     run.nudged = false;
     run.unstuck = false;
     run.prompted = false;
     run.searches = 0;
     run.seen = new Set();
+    run.touched = {}; // recipe id -> { id, created, changed } of this round
+    run.suggestions = [];
     run.failed = {}; // "<tool> <args>" -> error of a call that failed in this round
     run.failures = {}; // tool -> failed calls in this round
     run.wrote = false; // something was written or committed in this round
@@ -309,23 +271,20 @@ export function createAgent({
     let result = null;
     try {
       for (let step = 0; step < maxSteps && !result; step++) {
-        // A remember/keep-up-to-date task gets only the source tools: no one-off execute instead of a source.
-        // Once the source is added there is nothing left to call: only the answer.
-        // A question or a one-off task never adds sources: without these the model reads the data instead.
         // Stuck on the fast model (failed calls, searching again and again): the rest of the run goes to the strong one.
         if (!run.strong && (Object.keys(run.failures).length || run.searches >= 2 || run.nudged || run.unstuck || run.prompted || run.retried)) run.strong = true;
-        const message = await llm(run.messages, usage, run.sync && builder ? SYNC_TOOLS : run.sync ? TOOLS : TASK_TOOLS, run.sourced ? "none" : undefined, run.strong ? strongModel : model);
+        const message = await llm(run.messages, usage, toolsFor(run.mode), undefined, run.strong ? strongModel : model);
         run.messages.push({ role: "assistant", content: message.content ?? null, ...(message.tool_calls?.length && { tool_calls: message.tool_calls }) });
         if (!message.tool_calls?.length) {
           // An answer that is a question for the user: once, it is sent back to do the task instead.
-          if (ASKS.test(message.content ?? "") && !run.nudged && step < maxSteps - 2 && !run.sourced) {
+          if (ASKS.test(message.content ?? "") && !run.nudged && step < maxSteps - 2) {
             run.nudged = true;
             run.messages.push({ role: "user", content: NO_QUESTIONS });
             continue;
           }
           // An answer that gives up on a part ("there is no tool to read files"): once, it is sent back to find the
           // tool and do it, on the strong model.
-          if (GIVES_UP.test(message.content ?? "") && !run.unstuck && step < maxSteps - 2 && !run.sourced) {
+          if (GIVES_UP.test(message.content ?? "") && !run.unstuck && step < maxSteps - 2) {
             run.unstuck = true;
             run.messages.push({ role: "user", content: NO_GIVING_UP });
             continue;
@@ -390,10 +349,6 @@ export function createAgent({
     }
     // The references the answer used, with how to write at each.
     if (result.status === "done") result.references = await withWrites(citedRefs(result.answer, run.refs, { round: run.round }));
-    usage.cost_usd += run.usage_extra ?? 0; // the live sync builder's model: its steps are credits too
-    usage.llm_calls += run.calls_extra ?? 0;
-    run.usage_extra = 0;
-    run.calls_extra = 0;
     run.status = result.status;
     run.updated_at = new Date().toISOString();
     // Stored without raw tool results: each one is replaced by its summary.
@@ -403,6 +358,10 @@ export function createAgent({
       run_id: run.id,
       ...result,
       steps: run.steps,
+      // Recipes this round executed and what happened to them (the UI shows "saved" from this, no toast).
+      saved: Object.values(run.touched ?? {}),
+      recipes_used: [...new Set(run.steps.flatMap((x) => [x.recipe?.id, x.from_recipe]).filter(Boolean))],
+      ...(run.suggestions?.length && { suggestions: run.suggestions.map(({ label }) => ({ label })) }),
       usage: { ...usage, ...run.timing, model: run.strong ? strongModel : model, cost_usd: Number(usage.cost_usd.toFixed(5)), ms: Date.now() - started + (run.timing.search_ms || 0) },
     };
     onEvent({ type: "done", result: out });
@@ -416,12 +375,10 @@ export function createAgent({
       onEvent({ type: "step", tool: "search_recipes", input: { query: task } });
       const searched = Date.now();
       const connecting = genter.login().then((l) => l.connected ?? []).catch(() => []);
-      let [found, connected, english, sources, knowledge] = await Promise.all([
+      let [found, connected, english] = await Promise.all([
         connecting.then((c) => genter.search({ query: task, limit: 8, apps: c.map((x) => x.toolkit) })).catch(() => []),
         connecting,
         genter.translate ? genter.translate(task) : null, // shared with search, so no second model call
-        genter.sources ? genter.sources.list().catch(() => []) : [],
-        genter.knowledge ? genter.knowledge({ query: task, limit: 8 }).catch(() => []) : [],
       ]);
       const search_ms = Date.now() - searched;
       // The apps the task names: recipes of other apps are left out ("what's new in Google Tasks" is not a Gmail search).
@@ -429,12 +386,11 @@ export function createAgent({
       const ofNamed = (r) => !named.length || !r.tool || named.some((t) => r.tool.startsWith(`${t.toUpperCase()}_`));
       found = found.filter(ofNamed);
       const recipes = found.filter((r) => r.id);
-      onEvent({ type: "recipes", recipes: recipes.map(({ id, tool, description, short, summary, score, status, tags, when, args }) => ({ id, tool, description, short, summary, score, status, tags, when, args })) });
+      onEvent({ type: "recipes", recipes: recipes.map(({ id, tool, title, short, summary, score, status, updated_at, checked_at, args }) => ({ id, tool, title, short, summary, score, status, updated_at, checked_at, args })) });
       const run = {
         id: randomUUID(),
         task,
         mode,
-        sync: mode === "run" && canExecute && !target && SYNC_INTENT.test(task),
         account,
         writing: Boolean(target), // a write: the run must write, not only read
         // Active connections, so a call one account cannot see is tried on the app's others (executeOn).
@@ -443,7 +399,7 @@ export function createAgent({
         created_at: new Date().toISOString(),
         apps: [...new Set(connected.map((c) => c.toolkit))],
         // No valid recipe that clearly fits: this task is new, the strong model works it out (and leaves recipes).
-        strong: !recipes.some((r) => r.status !== "outdated" && r.score >= STRONG_RECIPE),
+        strong: !recipes.some((r) => r.score >= STRONG_RECIPE),
         named, // apps the task is about
         recipes: Object.fromEntries(recipes.map((r) => [r.id, r.tool])),
         recipeArgs: Object.fromEntries(recipes.filter((r) => r.args).map((r) => [r.id, r.args])),
@@ -453,7 +409,7 @@ export function createAgent({
         timing: { search_ms },
       };
       const refer = (r) => register(run, r);
-      const brief = briefing({ task, mode, account, found, connected, canExecute, english, sources, knowledge, named, recipeRef: (r) => recipeRef(run, r), hitRef: (h) => refer(hitRef(h)) });
+      const brief = briefing({ task, mode, account, found, connected, canExecute, english, named, recipeRef: (r) => recipeRef(run, r) });
       const write = target && writeNote({ ...target, n: refer(target) }, task);
       run.messages = [{ role: "user", content: write ? `${brief}\n\n${write}` : brief }];
       return loop(run);
@@ -483,7 +439,6 @@ export function createAgent({
       if (!run) return api.start({ task: change, account, target: place });
       run.steps = [];
       run.mode = "run"; // a find goes on as a run: writing is what was asked
-      run.sync = false;
       run.writing = true; // this round must write
       if (account) run.account = account;
       run.messages.push({ role: "user", content: writeNote({ ...place, n: register(run, place) }, change) });
@@ -545,10 +500,58 @@ export function createAgent({
       answer: ok
         ? `Done: ${tool}${at}.${data != null ? `\n\n${text.length > 2000 ? `${text.slice(0, 2000)}… (truncated)` : text}` : ""}`
         : `${tool} failed${at}: ${typeof out.result?.error === "string" ? out.result.error : JSON.stringify(out.result?.error ?? "unknown error")}`,
-      steps: [{ tool, recipe: null, ok, summary: null, saved: out.id ?? null }],
+      steps: [{ tool, from_recipe: null, recipe: ok && out.id ? { id: out.id, created: Boolean(out.created), changed: Boolean(out.changed) } : null, ok, summary: null, saved: out.id ?? null }],
       references: place ? [place] : [],
       usage: { llm_calls: 0, tokens_in: 0, tokens_out: 0, cost_usd: 0, llm_ms: 0, search_ms: 0, tool_ms: ms, model: null, ms },
     };
+  }
+
+  // A prepare task's fan-out: many independent reads over one area, a few at a time. Every success is an ordinary
+  // atomic recipe; the model gets counts and the first failures, never the data.
+  async function executeMany(run, input) {
+    const calls = (Array.isArray(input.calls) ? input.calls : []).filter((c) => c && c.tool).slice(0, MAX_MANY);
+    if (!calls.length) return { content: JSON.stringify({ error: "Pass calls: [{tool, args, account?}]" }) };
+    const started = Date.now();
+    const counts = { requested: calls.length, ok: 0, created: 0, changed: 0, unchanged: 0, failed: 0, skipped: 0 };
+    const failures = [];
+    let next = 0;
+    const worker = async () => {
+      while (next < calls.length) {
+        const c = calls[next++];
+        if (!isReadOnly(c.tool)) {
+          counts.skipped++;
+          continue;
+        }
+        const key = `${c.tool} ${JSON.stringify(c.args ?? {})}`;
+        if (run.failed[key]) {
+          counts.failed++;
+          continue;
+        }
+        const out = await executeOn(run, { tool: c.tool, args: c.args ?? {} }, c.account).catch((e) => ({ thrown: e.message }));
+        const error = out.thrown ?? (out.result?.successful === false ? out.result?.error : null);
+        if (error) {
+          run.failed[key] = errorText(error);
+          counts.failed++;
+          if (failures.length < 10) failures.push({ tool: c.tool, args: c.args, error: errorText(error).slice(0, 160) });
+          run.steps.push({ tool: c.tool, from_recipe: null, recipe: null, ok: false, summary: errorText(error).slice(0, 160), saved: null });
+          continue;
+        }
+        counts.ok++;
+        if (out.created) counts.created++;
+        else if (out.changed) counts.changed++;
+        else counts.unchanged++;
+        const recipe = out.id ? { id: out.id, created: Boolean(out.created), changed: Boolean(out.changed) } : null;
+        if (recipe) (run.touched ??= {})[recipe.id] = recipe;
+        run.steps.push({ tool: c.tool, from_recipe: null, recipe, ok: true, summary: null, saved: out.id ?? null });
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(MANY_CONCURRENCY, calls.length) }, worker));
+    run.timing.tool_ms += Date.now() - started;
+    run.prepared = ["requested", "ok", "created", "changed", "unchanged", "failed", "skipped"].reduce((t, k) => ({ ...t, [k]: (run.prepared?.[k] ?? 0) + counts[k] }), {});
+    const note = `Prepared ${run.prepared.ok} reads: ${run.prepared.created} new recipes, ${run.prepared.changed} updated, ${run.prepared.unchanged} unchanged, ${run.prepared.failed} failed${run.prepared.skipped ? `, ${run.prepared.skipped} skipped (not reads)` : ""}.`;
+    lastNote = note;
+    onEvent({ type: "tool", tool: "execute_many", ok: counts.ok > 0 || !counts.failed, summary: note });
+    return { content: JSON.stringify({ ...counts, ...(failures.length && { failures }), note }) };
   }
 
   // A call on the account asked for, else the one this run already found the app's data on, else the default.
@@ -687,15 +690,11 @@ function register(run, { write, ...ref }) {
 const refKey = (r) => `${r.app}:${r.kind}:${r.url ?? JSON.stringify(Object.entries(r.where ?? {}).sort())}`;
 const MAX_REFS = 300;
 
-// A saved recipe as a reference: the call it makes points somewhere (its args). Not sync recipes: their chunks are.
+// A saved recipe as a reference: the call it makes points somewhere (its args).
 const recipeRef = (run, r) =>
-  r.id && r.kind !== "sync" && r.tool
-    ? register(run, shapeRef({ app: appOf(r.tool, run.apps), via: "recipe", tool: r.tool, title: r.short ?? r.description?.split("\n")[0]?.replace(/^#+\s*/, ""), where: locatorArgs(r.args ?? {}) }))
+  r.id && r.tool
+    ? register(run, shapeRef({ app: appOf(r.tool, run.apps), via: "recipe", tool: r.tool, title: r.short ?? r.title, where: locatorArgs(r.args ?? {}) }))
     : undefined;
-
-// A synced knowledge chunk as a reference: its item, where it is, and the source it was synced from.
-const hitRef = (h) =>
-  shapeRef({ app: h.toolkit, via: "knowledge", source: h.source, title: h.title, url: h.url, item: h.item, part: h.part, tool: h.tool, where: h.where, text: h.text, score: h.score });
 
 // The place a write is for: a reference number of the run ("3", "[3]"), or a link (one of the run's, or any link
 // refs.js knows). null without ref.
@@ -760,23 +759,15 @@ export function isEmpty(data) {
   return lists > 0 && items === 0;
 }
 
-// Search results as the model sees them: recipes in full (with their reference number), Composio tools with a compact
-// arg schema.
+// Search results as the model sees them: recipes (which call to make: their summary is what that call returned when it
+// was last saved, not the current value) with their reference number, Composio tools with a compact arg schema.
 function compactFound(r, ref) {
-  if (r.kind === "sync") {
-    // A sync recipe's result is kept as embeddings: read it with search_knowledge, or sync it first.
-    return {
-      id: r.id,
-      kind: "sync",
-      toolkit: r.toolkit,
-      description: r.description,
-      kept: r.source ? `${r.source.items} items, ${r.source.status}` : "not synced yet",
-      use: r.source ? `search_knowledge with source "${r.source.id}"` : `add_source with template "${r.id}" (syncs it, then search_knowledge)`,
-      score: r.score,
-    };
-  }
   if (r.id) {
-    return { ref, id: r.id, tool: r.tool, args: r.args, description: r.description, result_summary: r.summary, ...(r.matched && { result_matched: r.matched }), when: r.when, status: r.status, score: r.score };
+    return {
+      ref, id: r.id, tool: r.tool, args: r.args, title: r.title,
+      last_result: r.summary, ...(r.matched && { result_matched: r.matched }),
+      updated_at: r.updated_at, checked_at: r.checked_at, ...(r.partial && { partial: true }), score: r.score,
+    };
   }
   return { tool: r.tool, description: (r.description ?? "").slice(0, 300), args: compactSchema(r.args) };
 }
@@ -791,16 +782,6 @@ function compactSchema(schema) {
     ]),
   );
 }
-
-// A knowledge chunk as the model sees it, with its reference number.
-const compactHit = (h, ref) => ({ ref: ref ?? undefined, source: h.source_title, title: h.title, url: h.url, score: h.score, text: h.text.slice(0, 1200) });
-
-const syncText = (s) =>
-  s.status === "failed"
-    ? `Sync failed: ${s.last_run?.error ?? "unknown error"}`
-    : `${s.title}: ${s.stats.items} items, ${s.stats.chunks} chunks` +
-      (s.last_run ? ` (+${s.last_run.added} new, ${s.last_run.updated} updated, ${s.last_run.removed} removed${s.last_run.failed ? `, ${s.last_run.failed} failed` : ""})` : "") +
-      (s.status === "partial" ? `; ${s.last_run?.left ?? "some"} items left — it continues on the next sync (dashboard → Sources, or sync_source).` : "");
 
 // An answer that hands the work back to the user instead of doing it.
 const ASKS = /\?\s*$|let me know|which (one|tool|account)|would you like|do you want|please (specify|clarify|confirm|provide)|уточни|какой из|какую из|хотите ли|подскажите|выберите/i;
@@ -826,17 +807,12 @@ const NOTHING_WRITTEN =
 // A tool that keeps failing is stopped after this many failures in one round, so a run never spins on it.
 const MAX_TOOL_FAILURES = 3;
 const MAX_SEARCHES = 3;
+const READ_ONLY_MODES = ["find", "prepare", "event"];
+const MAX_MANY = 100;
+const MANY_CONCURRENCY = 4;
 const STRONG_RECIPE = 0.45; // a recipe this close to the task is known ground: the fast model is enough
 
-const SYNC_INTENT = /запомн|помни|держи .*актуал|актуальн|синхрон|проиндекс|индексир|remember|keep .*(up to date|in sync|current)|\bsync\b|index /i;
-
-const TEMPLATE_HELP =
-  'template: a live sync recipe — built in: github (files of a repository), notion (a page and every page under it, or all pages ' +
-  "shared with Genter) — or the id of a saved one (search shows them as live_sync). " +
-  "Pass pick (the repo or page name as the user said it) or scope. It is kept up to date on every change unless watch is false. " +
-  'depth: "titles" (names and links only, fast), "summary" (a short summary per item), "full" (whole text, default).';
-
-function briefing({ task, mode, account, found, connected, canExecute, english, sources = [], knowledge = [], named = [], recipeRef = () => undefined, hitRef = () => undefined }) {
+function briefing({ task, mode, account, found, connected, canExecute, english, named = [], recipeRef = () => undefined }) {
   const recipes = found.filter((r) => r.id).map((r) => compactFound(r, recipeRef(r)));
   const tools = found.filter((r) => !r.id).map((r) => compactFound(r));
   const apps = connected.map((c) => `${c.toolkit}${c.alias ? ` (${c.alias}${c.default ? ", default" : ""})` : ""}${c.status && c.status !== "ACTIVE" ? ` [${c.status}]` : ""}`);
@@ -844,21 +820,28 @@ function briefing({ task, mode, account, found, connected, canExecute, english, 
     `Task: ${task}`,
     english?.en && `In English: ${english.en}`,
     english?.terms?.length && `Search terms for keyword filters (use both languages, joined with OR): ${english.terms.join(" | ")}`,
-    mode === "find" ? "Mode: find (read-only: answer the question; only execute tools that read data)." : "Mode: run (do the task).",
-    SYNC_INTENT.test(task) &&
-      "This asks to remember or keep content up to date: add_source (built-in github files / notion pages, or a saved live_sync recipe), otherwise build_live_sync. Not a one-off execute.",
+    MODE_NOTES[mode] ?? MODE_NOTES.run,
     !canExecute && "This user cannot run tools: answer from recipe summaries, or say which tool and args would do it.",
     account && `Use connection: ${account}`,
     `Connected apps: ${apps.join(", ") || "none"}`,
     named.length && `The task is about ${named.join(", ")}: read the user's data there with its tools (search_tools "${named[0]} ..." if none below fits), not other apps.`,
-    `Saved recipes matching the task (best first):\n${recipes.length ? JSON.stringify(recipes) : "none"}`,
+    `Saved recipes matching the task (each is a call that worked before; last_result is what it returned then, not what is there now):\n${recipes.length ? JSON.stringify(recipes) : "none"}`,
     tools.length && `Candidate Composio tools:\n${JSON.stringify(tools)}`,
-    sources.length && `Synced sources: ${JSON.stringify(sources.map((s) => ({ id: s.id, title: s.title, toolkit: s.toolkit, depth: s.depth, status: s.status, items: s.stats.items, synced_at: s.synced_at })))}`,
-    knowledge.length && `Knowledge from synced sources matching the task (best first):\n${JSON.stringify(knowledge.map((h) => compactHit(h, hitRef(h))))}`,
   ]
     .filter(Boolean)
     .join("\n\n");
 }
+
+const MODE_NOTES = {
+  find: "Mode: find (read-only: answer the question; only execute tools that read data).",
+  run: "Mode: run (do the task).",
+  prepare:
+    "Mode: prepare. The task names an area (a repository, a folder, a channel, a list). Your only job is to read it: discover what is in it with list/search tools, then fan out the reads with execute_many " +
+    "(up to 100 calls each, 4 at a time; several rounds if it is bigger; read-only calls only). Every successful read is saved as its own recipe automatically. Do not summarize the content: finish with the counts execute_many returned.",
+  event:
+    "Mode: event. The task carries an event from an app and the recipes it may have changed. Re-read ONLY those recipes with recheck_recipe (all in one step). A recipe whose object was deleted: forget_recipe. " +
+    "Create new recipes (execute with the real read tool) for NEW objects only when the event is inside an area that was prepared (the task says so); otherwise do not. Finish with one line: what changed, what was forgotten.",
+};
 
 // A person's instructions from their workspace admin, as the second system message.
 const personalNote = (text) =>
@@ -866,12 +849,10 @@ const personalNote = (text) =>
 
 const SYSTEM = `You are Genter's task agent. You act in the user's connected apps through Composio tools, and you are judged on speed: the fewest steps that give a correct, complete result.
 
-The first message already holds everything for a fast start: saved recipes that match the task (proven past calls with their args and a summary of what they returned), candidate Composio tools with their args, and the connected apps.
-- If a recipe's result_summary or the knowledge from synced sources already answers the question, answer right away without calling anything. Not for what changes over time (latest, recent, new, today, current state): execute the recipe by id for fresh data.
-- result_matched lists what a recipe's last result held that is close to the task (an event, a task, an email). When those lines are what the task asks about, that recipe is where the answer is: execute it by id for the details first (or answer from it), before searching anywhere else. Lines about something else are not a match.
+A Recipe is one successful tool call with fixed args, remembered together with what it returned the last time. The first message already holds everything for a fast start: saved recipes that match the task (calls that worked, with their args and last_result), candidate Composio tools with their args, and the connected apps.
+- search_tools / the saved recipes tell you WHICH call to make. A recipe's last_result is what that call returned when it was saved: it is NOT the current value. ALWAYS execute the real tool (execute with the recipe id, or the tool and args) to get fresh data before you answer, even when last_result looks like the answer. Answer from last_result alone only when the user asks what was known earlier.
+- result_matched lists what a recipe's last result held that is close to the task (an event, a task, an email). When those lines are what the task asks about, that recipe is the call to make: execute it by id first, before searching anywhere else. Lines about something else are not a match.
 - A task with several parts (find the recent commits, read their files, write a note) is done part by part; a recipe that answers one part does not end the run.
-- Synced sources are an app's content kept searchable (a GitHub repo, Notion pages). Use search_knowledge for more of it. When the user asks to remember, index or keep an app's content up to date, call add_source; to refresh one, sync_source. Filters in the user's words ("only docs/", "no tests", "only the last 200") go to add_source filter.
-- Built-in live sync recipes cover only: github = the FILES of a repository; notion = pages. A saved one (live_sync in the first message) fits too: add_source with its id. Anything else (issues, pull requests, commits, emails, tickets, messages, rows, any other app) needs a new live sync recipe: call build_live_sync with the whole goal in the user's words; it builds, tests, saves and adds the source. Never use a built-in one for something it does not cover, and never answer a remember/sync request with a one-off execute.
 - If a recipe fits, execute it by id and override only the args that differ. This is the fastest path.
 - Otherwise pick a candidate tool and execute it. Call get_tool_schema only when the args are unclear; call search_tools only when nothing fits.
 - Make independent calls in the same step (parallel). Chain only when a call needs another's output.
@@ -881,33 +862,25 @@ The first message already holds everything for a fast start: saved recipes that 
 - A connected app always has tools: never answer that there is no tool for it. If no candidate fits, search_tools with the app name and what to do (e.g. "Google Tasks list tasks"), then execute.
 - A name you do not know (an org, a project, a repo, a person): look it up in the connected apps first (e.g. the user's GitHub repositories and orgs) and answer about what you found. "Projects" in GitHub usually means repositories: list them (and Projects only if asked).
 - "What's new in <app>" / "что нового в <app>" for a connected app means the user's own latest items there (recently created or updated tasks, issues, emails, files), read with that app's tools, not news about the product.
-- Every fact in the answer comes from a tool result, a recipe summary or synced knowledge of this run. Never answer from general knowledge about a product or company; if nothing was found, say what was checked.
-- Cite where each fact comes from: right after it, the ref number of the knowledge chunk, recipe, tool result or list item (its _ref) in square brackets, e.g. "Paging stops at a short page [3]." or "[2, 5]". Cite only what you used; never invent numbers. The user gets the cited places (paths, links, ids) with the answer.
+- Every fact in the answer comes from a tool result of this run (a recipe's last_result only says what to call). Never answer from general knowledge about a product or company; if nothing was found, say what was checked.
+- Cite where each fact comes from: right after it, the ref number of the recipe, tool result or list item (its _ref) in square brackets, e.g. "Paging stops at a short page [3]." or "[2, 5]". Cite only what you used; never invent numbers. The user gets the cited places (paths, links, ids) with the answer.
 - To read a file of a repository (its text) or a folder (its entries), call read_file with owner, repo, path (and branch), or the file's ref; several files: several read_file calls in one step. Never answer that a file cannot be read before read_file failed on it.
 - The files a GitHub commit changed: GITHUB_GET_A_COMMIT {owner, repo, ref: <sha>} (its files[].filename), then read_file for each.
 - Never show a file's text, a commit's files or any other content that no call of this run returned: read it first.
 - To change an existing file of a repository, call edit_file with exact pieces of its current text and what goes instead: it reads and commits the file for you. Never write a whole existing file out; GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS is for new files.
 - An empty result is not an answer: retry once with translated or broader terms before saying nothing was found. Neither is a result whose items only share a word with the request (a GitHub notification that says "clean up" for "when do I clean"): say it holds nothing about the task and look where it would be (calendar, tasks).
-- Every successful call is saved as a recipe: the exact call, named by its result, with no parameters. When you execute a tool that did not come from a recipe, pass description, short and tags so the next run finds its result:
-  description is Markdown named by what this exact call returns: "### <the result>" (e.g. "### Open pull requests of Genterai/genter-cli"), then what the result holds and how it is filtered, "- pitfall: ..." bullets if any; short is that name in one line under 100 characters; tags in English and Russian. Leave them out for a step whose result is only a means (an id lookup): it is named automatically.
-- A sync recipe (kind sync) keeps an app's content as embeddings: a whole GitHub project (files, issues, pull requests), mail, events. Its knowledge is in the first message when it matches; search_knowledge with its source reads more of it.
-- If a recipe returned something different from its description, save it again with status "outdated" (save_recipes) and say why.
+- Every successful call is saved as a recipe automatically (the same call updates the same recipe; a failed call saves nothing). Do not describe or name recipes: just make the calls that answer the task. A result that is only a page (next-page marker, truncated) is a partial result: say so, never claim totals or absence from it.
+- When you discover a finite area the user may want kept ready (a repository's files, a Drive folder, a channel), call suggest_prepare {label, why} once, and carry on with the task: it has no side effects.
 - An app the task needs is not connected: call connect_app and stop.
 - Never ask the user anything and never end with a question or a choice for them. Ambiguous: take the most likely reading (the default account, the latest, all of them, the closest name), do it, and say in one line what you assumed. Only an irreversible action (delete, send, pay) on a target you cannot pin down is not done: say what was not done and why.
 - An app is connected several times: pass account (alias or id) when the user names one; otherwise the default is used, and a call the default cannot see (another owner's repo: not found, no access) is retried on the app's other connections by itself. A result with account says which connection had it: say so in the answer. Not found on every account means the name is wrong, not the account.
 Always end with an answer built from what you found, even partial; never "I can't" while a tool could still be tried.
 Final answer: short and concrete, in the user's language. Include the names, ids and links needed to open or continue the result. Say what was done, not how.`;
 
-const recipeFields = {
-  description: { type: "string", description: "Markdown named by this call's result, no parameters (see instructions)" },
-  short: { type: "string", description: "The result's name in one line under 100 characters, e.g. 'Open pull requests of Genterai/genter-cli'" },
-  tags: { type: "array", items: { type: "string" }, description: "Tags in English and Russian" },
-};
-
 const TOOLS = [
   {
     name: "execute",
-    description: "Run a Composio tool: `tool` + `args`, or `id` of a saved recipe (args override its args). Returns the result data, a summary and the recipe id it was saved as.",
+    description: "Run a Composio tool for real: `tool` + `args`, or `id` of a saved recipe (args override its args). Returns the current result data and the id of the recipe it is saved as (saved or updated automatically).",
     parameters: {
       type: "object",
       properties: {
@@ -915,7 +888,6 @@ const TOOLS = [
         tool: { type: "string", description: "Tool slug, e.g. GMAIL_FETCH_EMAILS" },
         args: { type: "object", additionalProperties: true },
         account: { type: "string", description: "Connection alias or id when the app is connected several times" },
-        ...recipeFields,
       },
     },
   },
@@ -966,7 +938,7 @@ const TOOLS = [
   },
   {
     name: "search_tools",
-    description: "Search saved recipes (by what they do and what they returned) and Composio tools. Only when nothing in the first message fits.",
+    description: "Search saved recipes (by what their results meant) and Composio tools. Only when nothing in the first message fits. A recipe found says which call to make; execute it for fresh data.",
     parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
   },
   {
@@ -975,73 +947,42 @@ const TOOLS = [
     parameters: { type: "object", properties: { tools: { type: "array", items: { type: "string" } } }, required: ["tools"] },
   },
   {
-    name: "save_recipes",
-    description: "Improve recipe descriptions or mark one outdated.",
+    name: "suggest_prepare",
+    description: "Suggest that the user prepares a whole area (a repository, a folder, a channel) so it is found faster next time. No side effects: only a suggestion shown with the answer.",
+    parameters: {
+      type: "object",
+      properties: { label: { type: "string", description: "The area, e.g. 'Entire repository Genterai/genter-cli'" }, why: { type: "string" } },
+      required: ["label"],
+    },
+  },
+  {
+    name: "execute_many",
+    description: "Prepare task only: run up to 100 independent READ calls, 4 at a time. Each success is saved as its own recipe. Returns counts and the first failures, not data.",
     parameters: {
       type: "object",
       properties: {
-        recipes: {
+        calls: {
           type: "array",
+          maxItems: 100,
           items: {
             type: "object",
-            properties: { id: { type: "string" }, ...recipeFields, status: { type: "string", enum: ["valid", "outdated"] } },
-            required: ["id", "description"],
+            properties: { tool: { type: "string" }, args: { type: "object", additionalProperties: true }, account: { type: "string" } },
+            required: ["tool"],
           },
         },
       },
-      required: ["recipes"],
+      required: ["calls"],
     },
   },
   {
-    name: "search_knowledge",
-    description: "Search the synced sources (repos, Notion pages) by meaning. Returns the closest text chunks with titles and links.",
-    parameters: { type: "object", properties: { query: { type: "string" }, source: { type: "string", description: "Only this source id" } }, required: ["query"] },
-  },
-  {
-    name: "add_source",
-    description: `Remember an app's content as searchable knowledge and sync it now (a large one continues on later syncs). ${TEMPLATE_HELP}`,
-    parameters: {
-      type: "object",
-      properties: {
-        template: { type: "string", description: "github, notion or a saved live sync recipe id" },
-        filter: {
-          type: "object",
-          properties: {
-            include: { type: "string", description: "Regex over '<id> <title>', case-insensitive, e.g. ^docs/ or roadmap" },
-            exclude: { type: "string", description: "Regex over '<id> <title>', e.g. (^|/)tests?/" },
-            maxItems: { type: "integer" },
-          },
-        },
-        pick: { type: "string", description: "Name of the repo or top-level page as the user said it, e.g. genter-cli or Roadmap; found among the connection's repos/pages" },
-        scope: { type: "object", additionalProperties: true, description: "Template fields when known exactly, e.g. {owner, repo}" },
-        watch: { type: "boolean", description: "Keep it up to date on every change (default true)" },
-        depth: { type: "string", enum: ["titles", "summary", "full"] },
-        account: { type: "string", description: "Connection alias or id when the app is connected several times" },
-      },
-      required: ["template"],
-    },
-  },
-  {
-    name: "build_live_sync",
-    description:
-      "Remember content that no live sync recipe covers yet (issues, pull requests, emails, tickets, rows... of any app): " +
-      "a builder writes a live sync recipe from the app's tools, tests it on real data, saves it, then adds, syncs and watches the source.",
-    parameters: {
-      type: "object",
-      properties: {
-        goal: { type: "string", description: "What to remember, with every known detail, e.g. 'all pull requests of Genterai/genter-backend: title and description'" },
-        toolkit: { type: "string", description: "App slug, e.g. github, linear, gmail" },
-        depth: { type: "string", enum: ["titles", "summary", "full"] },
-        watch: { type: "boolean" },
-        account: { type: "string" },
-      },
-      required: ["goal"],
-    },
-  },
-  {
-    name: "sync_source",
-    description: "Bring a synced source up to date: only new and changed items are read.",
+    name: "recheck_recipe",
+    description: "Event task: run a saved recipe's call again. The recipe is updated only if its result changed. Returns { status: fresh | gone | denied | failed, changed }.",
     parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+  },
+  {
+    name: "forget_recipe",
+    description: "Event task: the object a recipe reads was deleted. Marks it gone: it is never offered as current again.",
+    parameters: { type: "object", properties: { id: { type: "string" }, reason: { type: "string" } }, required: ["id"] },
   },
   {
     name: "connect_app",
@@ -1050,5 +991,7 @@ const TOOLS = [
   },
 ].map(({ name, description, parameters }) => ({ type: "function", function: { name, description, parameters } }));
 
-const TASK_TOOLS = TOOLS.filter((t) => !["add_source", "build_live_sync"].includes(t.function.name));
-const SYNC_TOOLS = TOOLS.filter((t) => ["add_source", "build_live_sync", "sync_source", "search_knowledge", "connect_app"].includes(t.function.name));
+// Which tools a mode offers: execute_many only prepares an area, recheck / forget only answer an event.
+const MODE_ONLY = { execute_many: ["prepare"], recheck_recipe: ["event"], forget_recipe: ["event"] };
+const TOOLSETS = Object.fromEntries(["run", "find", "prepare", "event"].map((mode) => [mode, TOOLS.filter((t) => !MODE_ONLY[t.function.name] || MODE_ONLY[t.function.name].includes(mode))]));
+const toolsFor = (mode) => TOOLSETS[mode] ?? TOOLSETS.run;

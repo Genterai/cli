@@ -30,15 +30,22 @@ export const answer = (content) => ({ content });
 export const briefingOf = (body) => body.messages.find((m) => m.role === "user").content;
 export const lastOf = (body, role) => [...body.messages].reverse().find((m) => m.role === role)?.content;
 
-// A genter stand-in for the agent: recipes, knowledge hits, tool results and catalogues given per test.
+// A genter stand-in for the agent: recipes, tool results and catalogues given per test.
 // execute(tool, args) answers from `results` (a value or a function of args); every call is kept in `executed`.
-export function fakeGenter({ connected = [], recipes = [], knowledge = [], results = {}, catalogs = {} } = {}) {
+export function fakeGenter({ connected = [], recipes = [], results = {}, catalogs = {} } = {}) {
   const executed = [];
+  const rechecked = [];
+  const gone = [];
   return {
     executed,
+    rechecked,
+    gone,
+    recipes: {
+      recheck: async (id) => (rechecked.push(id), { recipe: { id, title: "t" }, changed: id.endsWith("changed"), status: "fresh" }),
+      markGone: async (id) => (gone.push(id), { id, status: "gone" }),
+    },
     login: async () => ({ connected: connected.map((toolkit) => ({ toolkit, account: `ca_${toolkit}`, status: "ACTIVE" })) }),
     search: async () => recipes,
-    knowledge: async () => knowledge,
     schema: async (tool) => ({ tool, args: {} }),
     catalog: async ({ toolkit }) => catalogs[toolkit] ?? [],
     async execute({ id, tool, args = {}, account, remember }) {
@@ -46,7 +53,7 @@ export function fakeGenter({ connected = [], recipes = [], knowledge = [], resul
       const out = results[tool];
       if (out === undefined) return { result: { successful: false, error: `no fake result for ${tool}` } };
       const data = typeof out === "function" ? out(args) : out;
-      return { id: `rec_${executed.length}`, result: { successful: true, data }, summary: null };
+      return { id: `rcp_${executed.length}`, result: { successful: true, data }, created: true, changed: false, unchanged: false, summary: null };
     },
   };
 }

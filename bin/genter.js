@@ -20,25 +20,11 @@ const store = {
   get: async (id) => read("calls.json")[id],
   put: async (row) => write("calls.json", { ...read("calls.json"), [row.id]: row }),
   all: async () => Object.values(read("calls.json")).filter((r) => r.remembered),
-};
-// Sources: ~/.genter/sources.json (one encrypted row per source) and ~/.genter/knowledge.json (per item).
-const knowledge = {
-  getSource: async (id) => read("sources.json")[id],
-  putSource: async (row) => write("sources.json", { ...read("sources.json"), [row.id]: row }),
-  deleteSource: async (id) => {
-    const all = read("sources.json");
+  remove: async (id) => {
+    const all = read("calls.json");
     delete all[id];
-    write("sources.json", all);
+    write("calls.json", all);
   },
-  sources: async () => Object.values(read("sources.json")),
-  items: async (sourceId) => Object.values(read("knowledge.json")).filter((r) => r.source_id === sourceId),
-  putItems: async (rows) => write("knowledge.json", { ...read("knowledge.json"), ...Object.fromEntries(rows.map((r) => [`${r.source_id}:${r.key}`, r])) }),
-  deleteItems: async (sourceId, keys) => {
-    const all = read("knowledge.json");
-    for (const key of keys) delete all[`${sourceId}:${key}`];
-    write("knowledge.json", all);
-  },
-  allItems: async () => Object.values(read("knowledge.json")),
 };
 const runs = {
   get: async (id) => read("runs.json")[id],
@@ -82,17 +68,12 @@ try {
     userId: process.env.GENTER_USER_ID || config.user_id || "default",
     secret: config.secret,
     store,
-    knowledge,
   });
-  const sourceCommands = {
-    sources: () => genter.sources.list(),
-    add_source: (input) => genter.sources.create(input),
-    sync_source: ({ id, budget_ms }) => genter.sources.sync({ id, budgetMs: budget_ms }),
-    remove_source: (input) => genter.sources.remove(input),
-    choices: (input) => genter.sources.choices(input),
-    watch_source: (input) => genter.sources.watch(input),
-    test_live_sync: (input) => genter.sources.test(input),
-    live_sync: ({ id, once, budget_ms }) => genter.live_sync({ id, once, budgetMs: budget_ms }),
+  // Commands that are not plain genter methods.
+  const recipeCommands = {
+    recipes: () => genter.recipes.list(),
+    recheck_recipe: ({ id }) => genter.recipes.recheck(id),
+    remove_recipe: ({ id }) => genter.recipes.remove(id),
   };
   if (agentCommands[name]) {
     const { tool, start } = agentCommands[name];
@@ -108,7 +89,7 @@ try {
     console.log(agentResultText(await start(agent, input), { write: true }));
   } else {
     const input = tools[name].input.parse(args);
-    const res = await (sourceCommands[name] ?? genter[name])(input);
+    const res = await (recipeCommands[name] ?? genter[name])(input);
     const out = Array.isArray(res) ? res : (({ pending, ...rest }) => rest)(res);
     console.log(JSON.stringify(out, null, 2));
   }

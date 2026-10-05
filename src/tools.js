@@ -2,35 +2,12 @@ import { z } from "zod";
 import { fileEditor, refLabel } from "./refs.js";
 
 // Shared by the CLI and the MCP server.
-export const instructions = `Genter runs Composio tools and keeps reusable call recipes.
-1. search first: a saved recipe (id + args) is faster than finding a tool again.
-2. execute with tool + args, or with id to repeat a recipe (override args as needed).
-3. Every successful call is saved as a recipe automatically, with a short summary of its result
-   (topics, names, ids to open it again). Search by topic, e.g. an email subject, finds the call that returned it;
-   then execute with the ids from its summary to dig deeper.
-   Make recipes easier to find: pass description + short + tags to execute, or improve several at once with save_recipes.
+export const instructions = `Genter runs Composio tools and remembers each successful call as a recipe: one call with fixed args, plus what it returned.
+1. search first: a saved recipe says which call (tool + args) answers a question. Its summary is what the call returned when it was saved, not the current value.
+2. execute with tool + args, or with id to repeat a recipe (override args as needed). The real tool always runs, so the data is fresh.
+3. Every successful call is saved automatically; the same call updates the same recipe, and only when its result changed. A failed call saves nothing.
 4. An app can be connected several times (e.g. work and personal gmail): login lists the connections,
-   pass \`account\` to execute to pick one; without it the default connection is used.
-Write the description as a general recipe in Markdown, not this one case:
-  ### <Verb> <object>
-  \`TOOL_SLUG\` · args: \`{a, b?}\`
-  Returns <what, format, size limits>. For another target override <args>.
-  - pitfall: <format, truncation, alternatives>
-Also pass \`short\`: one line under 100 characters for compact lists (the description is shown when a card is opened).
-Include the user's intent in plain words, tags in English and Russian, and pitfalls.
-If a saved recipe returns something different from its description, save it again with status "outdated" and say why.`;
-
-const recipeDescription = z
-  .string()
-  .describe(
-    "General recipe in Markdown: a '### <Verb> <object>' heading, a line '`TOOL_SLUG` · args: `{...}`', " +
-      "then what it returns, how to reuse it for another target, and '- ' bullets with pitfalls.",
-  );
-const recipeShort = z
-  .string()
-  .max(140)
-  .describe("One line, under 100 characters, for compact lists: what the recipe does, e.g. 'Fetch unread emails from the inbox'");
-const recipeTags = z.array(z.string()).describe("Tags in English and Russian, e.g. readme, github, репозиторий");
+   pass \`account\` to execute to pick one; without it the default connection is used.`;
 
 export const tools = {
   register_tool: {
@@ -54,9 +31,8 @@ export const tools = {
   },
   search: {
     description:
-      "Find a tool for a task, or a past result by its topic (e.g. an email subject). " +
-      "Returns saved recipes first ({id, tool, args, description, short, summary of the result, when, tags, status}); " +
-      "if none is valid, returns Composio tools (id: null, args = JSON schema).",
+      "Find which call to make: a saved recipe by what its result meant ({id, tool, args, title, short, summary, status, updated_at, checked_at}), " +
+      "or Composio tools (id: null, args = JSON schema). A recipe's summary is not the current value: execute it.",
     input: z.object({
       query: z.string().describe("What you want to do, in plain words"),
       limit: z.number().int().min(1).max(20).optional(),
@@ -66,112 +42,29 @@ export const tools = {
   execute: {
     description:
       "Run a tool. Pass `tool` + `args`, or `id` from search to repeat a recipe (args override). " +
-      "Every successful call is saved as a recipe automatically; pass `description` + `tags` to describe it better.",
+      "Every successful call is saved as a recipe automatically (the same call updates the same one).",
     input: z.object({
       id: z.string().optional().describe("id of a saved recipe to repeat"),
       tool: z.string().optional().describe("Tool slug, e.g. GMAIL_FETCH_EMAILS"),
       args: z.record(z.string(), z.any()).optional(),
       account: z.string().optional().describe("Connection to use (account id or alias from login) when the app is connected several times"),
-      description: recipeDescription.optional(),
-      short: recipeShort.optional(),
-      tags: recipeTags.optional(),
     }),
     annotations: { readOnlyHint: false, openWorldHint: true },
   },
-  save_recipes: {
-    description:
-      "Improve the descriptions of saved calls (ids from execute), several at once, so search finds them better. " +
-      "If a saved recipe returned something different from its description, save it again with status 'outdated' and say why.",
-    input: z.object({
-      recipes: z
-        .array(
-          z.object({
-            id: z.string().describe("id returned by execute"),
-            description: recipeDescription,
-            short: recipeShort.optional(),
-            tags: recipeTags.optional(),
-            status: z.enum(["valid", "outdated"]).optional(),
-          }),
-        )
-        .min(1),
-    }),
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  },
-  sources: {
-    description: "List synced sources (an app's content kept as searchable knowledge) with their status and size.",
+  recipes: {
+    description: "List saved recipes (id, title, source, status, updated and checked times, trigger state).",
     input: z.object({}),
     annotations: { readOnlyHint: true },
   },
-  add_source: {
-    description:
-      "Remember an app's content as searchable knowledge: github {owner, repo, branch?, path?}, notion {query?}. " +
-      "depth: titles (names and links only), summary (a short summary per item) or full (whole text, default). Run sync_source next.",
-    input: z.object({
-      template: z.string().describe("github, notion or the id of a saved live sync recipe"),
-      scope: z.record(z.string(), z.string()).optional(),
-      depth: z.enum(["titles", "summary", "full"]).optional(),
-      filter: z
-        .object({ include: z.string().optional(), exclude: z.string().optional(), maxItems: z.number().int().positive().optional() })
-        .optional()
-        .describe("Regexes over '<id> <title>' (case-insensitive) and a cap on items"),
-      account: z.string().optional().describe("Connection (account id) when the app is connected several times"),
-    }),
-    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-  },
-  sync_source: {
-    description: "Bring a source up to date: lists everything, reads only new and changed items, drops removed ones.",
-    input: z.object({ id: z.string(), budget_ms: z.number().int().positive().optional() }),
+  recheck_recipe: {
+    description: "Run a saved recipe's call again: updated only if its result changed. Returns { recipe, changed, status }.",
+    input: z.object({ id: z.string() }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   },
-  choices: {
-    description: "What a live sync recipe can sync for this connection (e.g. your repos), each with its scope and the source made from it.",
-    input: z.object({ template: z.string(), account: z.string().optional() }),
-    annotations: { readOnlyHint: true, openWorldHint: true },
-  },
-  watch_source: {
-    description: "Keep a source up to date on every change (its recipe's Composio triggers), or stop with on: false.",
-    input: z.object({ id: z.string(), on: z.boolean().optional() }),
-    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-  },
-  test_live_sync: {
-    description: "Try a live sync recipe (JSON, see src/sync.js) on real data without saving: first page, two items read, problems, raw items.",
-    input: z.object({ recipe: z.record(z.string(), z.any()), scope: z.record(z.string(), z.string()).optional(), account: z.string().optional() }),
-    annotations: { readOnlyHint: true, openWorldHint: true },
-  },
-  save_live_sync: {
-    description: "Save a live sync recipe after its test passes; use its id as the template of add_source.",
-    input: z.object({
-      id: z.string().optional(),
-      recipe: z.record(z.string(), z.any()),
-      description: z.string(),
-      short: z.string().optional(),
-      tags: z.array(z.string()).optional(),
-      scope: z.record(z.string(), z.string()).optional(),
-      account: z.string().optional(),
-    }),
-    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-  },
-  remove_source: {
-    description: "Delete a source and everything synced from it.",
+  remove_recipe: {
+    description: "Delete a saved recipe.",
     input: z.object({ id: z.string() }),
     annotations: { readOnlyHint: false, destructiveHint: true },
-  },
-  setup_recipes: {
-    description:
-      "Make the ready recipes of a connected app, no parameters: github (a sync recipe per repository: the whole project; " +
-      "reads like open pull requests, recent commits), gmail, googlecalendar, googletasks, notion. live_sync keeps a sync recipe as embeddings.",
-    input: z.object({ toolkit: z.string(), account: z.string().optional().describe("Connection (account id) when the app is connected several times") }),
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-  },
-  live_sync: {
-    description: "Keep a recipe's result as embeddings: sync it now (a big one continues on the next call) and keep it up to date; once: true syncs it once.",
-    input: z.object({ id: z.string(), once: z.boolean().optional(), budget_ms: z.number().int().positive().optional() }),
-    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-  },
-  knowledge: {
-    description: "Search synced sources by meaning: the closest text chunks with titles and links.",
-    input: z.object({ query: z.string(), limit: z.number().int().min(1).max(20).optional(), source: z.string().optional() }),
-    annotations: { readOnlyHint: true },
   },
 };
 
@@ -182,7 +75,7 @@ const APPS =
   "Telegram, Discord, Asana, Trello, Figma, Stripe, Shopify, Airtable, Zoom and 500+ more";
 
 export const agentInstructions = `Genter connects the user's apps (${APPS}) in one place and works in them with a fast agent that remembers what worked:
-every successful call becomes a recipe, found next time by what it does and by what it returned.
+every successful call becomes a recipe (one call with fixed args), found next time by what it returned; the real call is always re-run for fresh data.
 - GENTER_FIND: any question about the user's own data (emails, events, files, issues, messages, contacts). Read-only.
 - GENTER_RUN_TASK: anything that does something in an app: send, reply, create, update, schedule, post, move, multi-app workflows.
 - GENTER_CONTINUE_TASK: answer a run's question, continue after the user connected an app, or a follow-up on the same result.
@@ -210,8 +103,7 @@ export function agentTools({ connected = [], write = false } = {}) {
         "It is faster and more reliable than calling app tools yourself: it starts from recipes of past calls that already worked, " +
         "so a known task takes one step.\n" +
         "Use for: send or reply to an email or message, create or update an issue, event, doc, row or deal, post, schedule, " +
-        "remembering an app's content as searchable knowledge (\"remember the acme/api repo\", \"keep our Notion roadmap pages\"), " +
-        "and workflows across apps (e.g. \"turn today's support emails into Linear issues and post a summary to #support\").\n" +
+                "and workflows across apps (e.g. \"turn today's support emails into Linear issues and post a summary to #support\").\n" +
         "Pass the full task with every known detail (names, dates, ids, which account) in one call. " +
         "If the result has status needs_connection, show the connect link to the user, " +
         "then call GENTER_CONTINUE_TASK with run_id." +
@@ -226,9 +118,8 @@ export function agentTools({ connected = [], write = false } = {}) {
       description:
         "Find anything in the user's apps and past results: emails, messages, meetings, files, docs, issues, PRs, contacts, deals, invoices. " +
         "Read-only and safe — nothing is sent or changed.\n" +
-        "Searches by meaning across everything fetched before (summaries of past results, with ids to open them) " +
-        "and across synced sources (repos, Notion pages kept as knowledge), " +
-        "then reads live data from the apps when needed, so repeat questions answer instantly.\n" +
+        "Searches by meaning across calls made before (what their results meant) to pick the right call, " +
+        "then reads live data from the apps, so answers are always current.\n" +
         "Call it before answering any question about the user's own data instead of guessing or saying you can't see it: " +
         "\"what did Anna write about the contract\", \"my meetings tomorrow\", \"PRs waiting for my review\", \"the invoice from March\"." +
         have,

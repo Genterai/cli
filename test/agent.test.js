@@ -10,54 +10,44 @@ afterEach(() => model?.restore());
 
 const agentWith = (genter, options = {}) => createAgent({ genter, openrouterApiKey: "test", secret: "s", userId: "u", runs: memoryRuns(), ...options });
 
-// A chunk of the synced genter-cli project, as genter.knowledge returns it.
-const chunk = {
-  source: "src_1",
-  source_title: "Genterai/genter-cli",
-  toolkit: "github",
-  part: "files",
-  item: "src/sync.js",
-  tool: "GITHUB_GET_A_TREE",
-  title: "src/sync.js",
-  url: "https://github.com/Genterai/genter-cli/blob/main/src/sync.js",
-  where: { owner: "Genterai", repo: "genter-cli", branch: "main", path: "src/sync.js", sha: "s1" },
-  text: "// A page shorter than the page size asked for is the last one: no call for an empty page after it.",
-  score: 0.62,
-};
+// The file of genter-cli a find reads first: its reference [1] is what the writes below point at.
+const FILE = "// paging\nconst limit = 10;\nexport default limit;\n";
+const fileResult = (text = FILE, sha = "s1") => ({ content: { path: "src/sync.js", sha, content: Buffer.from(text).toString("base64"), encoding: "base64" } });
+const COMMITS = { id: "rcp_commits", tool: "GITHUB_LIST_COMMITS", args: { owner: "Genterai", repo: "genter-cli" }, title: "Recent commits of Genterai/genter-cli", short: "Recent commits", summary: "20 commits", status: "fresh", score: 0.8 };
+const readFirst = (text) => [call("read_file", { owner: "Genterai", repo: "genter-cli", path: "src/sync.js", branch: "main" }), answer(text)];
 
-describe("GitHub project: find, see the cited paths, write there", () => {
-  it("A1 a find answered from synced knowledge returns the cited file with where it is and how to write there", async () => {
-    const genter = fakeGenter({ connected: ["github"], knowledge: [chunk] });
-    model = fakeModel([answer("Paging stops at the first page shorter than the page size [1].")]);
+describe("GitHub file: find, see the cited paths, write there", () => {
+  it("A1 a find that read a file returns the cited file with where it is and how to write there", async () => {
+    const genter = fakeGenter({ connected: ["github"], results: { GITHUB_GET_REPOSITORY_CONTENT: fileResult() } });
+    model = fakeModel(readFirst("Paging stops at the first page shorter than the page size [1]."));
     const out = await agentWith(genter).start({ task: "when does paging stop in genter-cli?", mode: "find" });
 
-    assert.match(briefingOf(model.requests[0]), /"ref":1,"source":"Genterai\/genter-cli"/);
     assert.match(model.requests[0].messages[0].content, /Cite where each fact comes from/);
     assert.equal(out.status, "done");
     const [ref] = out.references;
     assert.deepEqual(
       { n: ref.n, kind: ref.kind, path: ref.path, where: ref.where, via: ref.via },
-      { n: 1, kind: "file", path: "src/sync.js", where: { owner: "Genterai", repo: "genter-cli", path: "src/sync.js", branch: "main" }, via: "knowledge" },
+      { n: 1, kind: "file", path: "src/sync.js", where: { owner: "Genterai", repo: "genter-cli", path: "src/sync.js", branch: "main" }, via: "call" },
     );
     assert.equal(ref.write[0].tool, "GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS");
 
     const text = agentResultText(out, { write: true });
-    assert.match(text, /References:\n\[1\] github file Genterai\/genter-cli\/src\/sync\.js — https:\/\/github\.com\/Genterai\/genter-cli\/blob\/main\/src\/sync\.js/);
+    assert.match(text, /References:\n\[1\] github file Genterai\/genter-cli\/src\/sync\.js\n/);
     assert.match(text, /where \{"owner":"Genterai","repo":"genter-cli","path":"src\/sync\.js","branch":"main"\}/);
     assert.match(text, /edit  \{edits: \[\{find, replace\}\], message\}: one commit, only those pieces change\n    write GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS\(message, content\)/);
     assert.match(text, /GENTER_WRITE \{run_id, ref: n, change\}/);
     assert.doesNotMatch(agentResultText(out), /write GITHUB_/); // without GENTER_WRITE: references only
   });
 
-  // The synced file as GitHub's contents API returns it.
-  const contents = (text, sha = "s1") => ({ content: { path: "src/sync.js", sha, content: Buffer.from(text).toString("base64"), encoding: "base64" } });
-  const file = "// paging\nconst limit = 10;\nexport default limit;\n";
+  const contents = fileResult;
+  const file = FILE;
   const findThenAgent = async (results) => {
-    const genter = fakeGenter({ connected: ["github"], knowledge: [chunk], results });
+    const genter = fakeGenter({ connected: ["github"], results });
     const agent = agentWith(genter);
-    model = fakeModel([answer("Paging stops at a short page [1].")]);
+    model = fakeModel(readFirst("Paging stops at a short page [1]."));
     const found = await agent.start({ task: "when does paging stop?", mode: "find" });
     model.restore();
+    genter.executed.length = 0;
     return { genter, agent, found };
   };
   const committed = (genter) => {
@@ -80,7 +70,7 @@ describe("GitHub project: find, see the cited paths, write there", () => {
     ]);
     const out = await agent.write({ run_id: found.run_id, ref: 1, change: "raise the page limit to 20" });
 
-    assert.match(note, /^Write at \[1\]: github file Genterai\/genter-cli\/src\/sync\.js \(https:\/\/github\.com\/Genterai\/genter-cli\/blob\/main\/src\/sync\.js\)/);
+    assert.match(note, /^Write at \[1\]: github file Genterai\/genter-cli\/src\/sync\.js\n/);
     assert.match(note, /Change this file with edit_file \{ref: 1, edits: \[\{find: .*never write the whole file out/);
     assert.match(note, /read the file first: GITHUB_GET_REPOSITORY_CONTENT \{"owner":"Genterai","repo":"genter-cli","path":"src\/sync\.js","ref":"main"\}/);
     assert.match(note, /Change: raise the page limit to 20/);
@@ -111,7 +101,7 @@ describe("GitHub project: find, see the cited paths, write there", () => {
   });
 
   it("A2c a find never edits: edit_file is refused there like any write", async () => {
-    const genter = fakeGenter({ connected: ["github"], knowledge: [chunk] });
+    const genter = fakeGenter({ connected: ["github"] });
     model = fakeModel([
       call("edit_file", { ref: 1, edits: [{ append: "x" }], message: "m" }),
       (body) => {
@@ -233,7 +223,7 @@ describe("Not GitHub: every app writes with its own tools", () => {
 
 describe("Writes that are refused", () => {
   it("A8 a reference number needs its run, an unknown one says which exist, a tool must be of the reference's app", async () => {
-    const genter = fakeGenter({ connected: ["github"], knowledge: [chunk] });
+    const genter = fakeGenter({ connected: ["github"], recipes: [COMMITS] });
     const agent = agentWith(genter);
     model = fakeModel([answer("See [1].")]);
     const found = await agent.start({ task: "paging", mode: "find" });
@@ -247,7 +237,7 @@ describe("Writes that are refused", () => {
   });
 
   it("A9 a viewer can find and see references, but not write", async () => {
-    const genter = fakeGenter({ connected: ["github"], knowledge: [chunk] });
+    const genter = fakeGenter({ connected: ["github"], recipes: [COMMITS] });
     const agent = agentWith(genter, { canExecute: false });
     model = fakeModel([answer("See [1].")]);
     const found = await agent.start({ task: "paging", mode: "find" });
@@ -372,11 +362,12 @@ describe("An app connected several times", () => {
 describe("A write that writes nothing", () => {
   const contents = (text) => ({ content: { path: "src/sync.js", sha: "s1", content: Buffer.from(text).toString("base64"), encoding: "base64" } });
   const found = async (results) => {
-    const genter = fakeGenter({ connected: ["github"], knowledge: [chunk], results });
+    const genter = fakeGenter({ connected: ["github"], results: { GITHUB_GET_REPOSITORY_CONTENT: fileResult(), ...results } });
     const agent = agentWith(genter);
-    model = fakeModel([answer("Paging [1].")]);
+    model = fakeModel(readFirst("Paging [1]."));
     const run = await agent.start({ task: "paging", mode: "find" });
     model.restore();
+    genter.executed.length = 0;
     return { genter, agent, run };
   };
 
@@ -552,5 +543,99 @@ describe("No answer is never Done", () => {
     assert.equal(out.status, "failed");
     assert.match(out.answer, /ran GITHUB_LIST_COMMITS but gave no answer/);
     assert.equal(out.references, undefined);
+  });
+});
+
+describe("Recipes in the agent", () => {
+  const stepsOf = (out) => out.steps.map((s) => s.recipe);
+
+  it("N2 every executed step says what happened to its recipe, and the result lists saved and recipes_used", async () => {
+    const genter = fakeGenter({ connected: ["github"], results: { GITHUB_LIST_COMMITS: [{ sha: "a" }] } });
+    model = fakeModel([call("execute", { tool: "GITHUB_LIST_COMMITS", args: { owner: "o", repo: "r" } }), answer("One commit.")]);
+    const out = await agentWith(genter).start({ task: "recent commits of o/r", mode: "find" });
+    assert.deepEqual(stepsOf(out), [{ id: "rcp_1", created: true, changed: false }]);
+    assert.equal(out.steps[0].saved, "rcp_1"); // the older field stays
+    assert.deepEqual(out.saved, [{ id: "rcp_1", created: true, changed: false }]);
+    assert.deepEqual(out.recipes_used, ["rcp_1"]);
+  });
+
+  it("N3 the prompt: a recipe says which call to make, the real tool is always executed, calls are saved automatically", async () => {
+    const genter = fakeGenter({ connected: ["github"], recipes: [COMMITS] });
+    model = fakeModel([answer("ok")]);
+    await agentWith(genter).start({ task: "recent commits", mode: "find" });
+    const system = model.requests[0].messages[0].content;
+    assert.match(system, /ALWAYS execute the real tool/);
+    assert.match(system, /NOT the current value/);
+    assert.match(system, /saved as a recipe automatically/);
+    assert.doesNotMatch(system, /add_source|build_live_sync|search_knowledge|live sync/);
+    const names = model.requests[0].tools.map((t) => t.function.name);
+    for (const gone of ["add_source", "build_live_sync", "sync_source", "search_knowledge", "save_recipes"]) assert.ok(!names.includes(gone), gone);
+    assert.ok(names.includes("suggest_prepare"));
+    assert.ok(!names.includes("execute_many") && !names.includes("recheck_recipe")); // modes only
+    assert.match(briefingOf(model.requests[0]), /last_result/);
+  });
+
+  it("N4 suggest_prepare records a suggestion and has no side effects", async () => {
+    const genter = fakeGenter({ connected: ["github"], results: { GITHUB_GET_A_TREE: { tree: [] } } });
+    model = fakeModel([call("suggest_prepare", { label: "Entire repository o/r", why: "many files" }), answer("Done.")]);
+    const out = await agentWith(genter).start({ task: "what is in o/r?", mode: "find" });
+    assert.deepEqual(out.suggestions, [{ label: "Entire repository o/r" }]);
+    assert.equal(genter.executed.length, 0);
+  });
+
+  it("N5 a prepare task fans out reads with execute_many (4 at a time, max 100) and finishes with counts; writes are skipped", async () => {
+    let running = 0;
+    let peak = 0;
+    const genter = fakeGenter({ connected: ["github"], results: { GITHUB_GET_REPOSITORY_CONTENT: ({ path }) => ({ path }) } });
+    const original = genter.execute;
+    genter.execute = async (input) => {
+      running++;
+      peak = Math.max(peak, running);
+      await new Promise((r) => setTimeout(r, 5));
+      running--;
+      return original(input);
+    };
+    const calls = Array.from({ length: 130 }, (_, i) => ({ tool: "GITHUB_GET_REPOSITORY_CONTENT", args: { owner: "o", repo: "r", path: `f${i}` } }));
+    calls.push({ tool: "GITHUB_CREATE_AN_ISSUE", args: {} });
+    model = fakeModel([
+      call("execute_many", { calls }),
+      (body) => {
+        const counts = JSON.parse(lastOf(body, "tool"));
+        assert.equal(counts.requested, 100);
+        assert.equal(counts.ok, 100);
+        assert.equal(counts.created, 100);
+        return answer("");
+      },
+    ]);
+    const out = await agentWith(genter).start({ task: "Prepare entire repository o/r", mode: "prepare" });
+    assert.equal(peak, 4);
+    assert.equal(genter.executed.length, 100);
+    assert.equal(out.status, "done");
+    assert.match(out.answer, /Prepared 100 reads: 100 new recipes, 0 updated, 0 unchanged, 0 failed/);
+    assert.equal(out.saved.length, 100);
+  });
+
+  it("N6 execute_many is refused outside a prepare task", async () => {
+    const genter = fakeGenter({ connected: ["github"] });
+    model = fakeModel([call("execute_many", { calls: [{ tool: "GITHUB_LIST_COMMITS" }] }), answer("no")]);
+    await agentWith(genter).start({ task: "x", mode: "run" });
+    assert.equal(genter.executed.length, 0);
+  });
+
+  it("N7 an event task rechecks only the affected recipes and forgets what was deleted; it never writes", async () => {
+    const genter = fakeGenter({ connected: ["github"] });
+    model = fakeModel([
+      call("recheck_recipe", { id: "rcp_a_changed" }),
+      call("forget_recipe", { id: "rcp_b", reason: "file deleted" }),
+      call("execute", { tool: "GITHUB_CREATE_AN_ISSUE", args: {} }),
+      answer("rcp_a changed, rcp_b forgotten."),
+    ]);
+    const out = await agentWith(genter).start({ task: "Event github push in o/r. Affected recipes: rcp_a_changed, rcp_b", mode: "event" });
+    assert.deepEqual(genter.rechecked, ["rcp_a_changed"]);
+    assert.deepEqual(genter.gone, ["rcp_b"]);
+    assert.equal(genter.executed.length, 0); // the write was refused
+    assert.deepEqual(out.steps.find((s) => s.tool === "recheck_recipe").recipe, { id: "rcp_a_changed", created: false, changed: true });
+    assert.deepEqual(model.requests[0].tools.map((t) => t.function.name).filter((n) => ["recheck_recipe", "forget_recipe"].includes(n)), ["recheck_recipe", "forget_recipe"]);
+    assert.match(briefingOf(model.requests[0]), /Mode: event/);
   });
 });

@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { publicFetch, textOf } from "./net.js";
 
-// A website as a source: its pages from one address and up to two links deep on the same site, as plain text.
-// WEBSITE_CRAWL is a local tool, called like an app's tool by the built-in "website" live sync recipe (sync.js).
-// Pages are versioned by their text, so a sync only embeds pages that changed. A crawl cut short by time says so
-// (complete: false) and the pages it did not reach are kept.
+// Websites: a page is read by a local tool, WEBSITE_READ_PAGE {url} -> { url, title, text }, and becomes a recipe like
+// any call (genter.js). Connecting a site is preparing an area: crawl() finds its pages (the address and the pages it
+// links to on the same site, up to two links deep), then each page is one execute. Pages the crawl just read are
+// kept for a few minutes, so the executes that follow do not download them again.
 
 export const WEBSITE = { maxDepth: 2, maxPages: 120, pageBytes: 2_000_000, pageMs: 12_000, budgetMs: 45_000, readers: 6 };
 
@@ -27,6 +27,18 @@ export function siteUrl(raw) {
 }
 
 const sameSite = (a, b) => a.replace(/^www\./, "") === b.replace(/^www\./, "");
+const folderOf = (u) => (u.pathname.endsWith("/") ? u.pathname : u.pathname.replace(/[^/]*$/, ""));
+
+// A page of this site: its host (www or not) and under the site address's folder.
+export function underSite(page, site) {
+  try {
+    const p = new URL(page);
+    const s = new URL(siteUrl(site));
+    return sameSite(p.hostname, s.hostname) && p.pathname.startsWith(folderOf(s));
+  } catch {
+    return false;
+  }
+}
 
 // A link as a page to visit: same site, under the start's folder, not a file; no fragment and no tracking params.
 function pageLink(href, base, start) {
@@ -114,6 +126,10 @@ async function page(url, rules) {
     signal: AbortSignal.timeout(WEBSITE.pageMs),
   });
   const type = res.headers.get("content-type") ?? "";
+  if (res.status === 404 || res.status === 410) {
+    await res.body?.cancel().catch(() => {});
+    return { missing: res.status };
+  }
   if (!res.ok || !/text\/(html|plain|markdown)|application\/xhtml/i.test(type)) {
     await res.body?.cancel().catch(() => {});
     return null;
@@ -131,15 +147,53 @@ async function page(url, rules) {
   return { url: final, title: title || new URL(final).pathname, text, links, base: base ? new URL(base, final).toString() : final };
 }
 
+// Pages read lately: url -> { at, page }.
+const recent = new Map();
+const RECENT_MS = 10 * 60_000;
+const remember = (url, got) => {
+  recent.set(url, { at: Date.now(), page: got });
+  if (recent.size > 2000) recent.delete(recent.keys().next().value);
+};
+
+// A page to be read again from the site, not from what a crawl just read.
+export const forgetPage = (url) => {
+  try {
+    recent.delete(siteUrl(url));
+  } catch {}
+};
+
+// The tool: one page as { successful, data: { url, title, text } }. A page that is gone answers 404 (its recipe is
+// then marked gone); one that could not be read (down, not text) is a failure that says nothing about the recipe.
+export async function readPage({ url } = {}) {
+  let target;
+  try {
+    target = siteUrl(url);
+  } catch (e) {
+    return { successful: false, error: e.message, data: null };
+  }
+  const hit = recent.get(target);
+  if (hit && Date.now() - hit.at < RECENT_MS) return { successful: true, data: hit.page };
+  try {
+    const got = await page(target, []);
+    if (got?.missing) return { successful: false, error: `${target}: not found (${got.missing})`, data: null };
+    if (!got?.text) return { successful: false, error: `${target}: no text to read`, data: null };
+    const data = { url: got.url, title: got.title, text: got.text };
+    remember(target, data);
+    return { successful: true, data };
+  } catch (e) {
+    return { successful: false, error: `${target}: ${e.cause?.message ?? e.message}`, data: null };
+  }
+}
+
 // The pages of a site: { successful, data: { pages: [{ url, title, text, hash, size }], complete } }.
-// depth: links to follow from the start (0-2, default 2); max: pages at most.
+// depth: links to follow from the start (0-2, default 2); max: pages at most. Every page read is kept for readPage.
 export async function crawl({ url, depth, max = WEBSITE.maxPages, budgetMs = WEBSITE.budgetMs } = {}) {
   const started = Date.now();
   const first = new URL(siteUrl(url));
   const levels = Math.max(0, Math.min(WEBSITE.maxDepth, depth === undefined || depth === "" ? WEBSITE.maxDepth : Number(depth) || 0));
   const limit = Math.max(1, Math.min(WEBSITE.maxPages, Number(max) || WEBSITE.maxPages));
   // Only pages under the start's folder: docs.example.com/guide/ stays in /guide/.
-  const start = { hostname: first.hostname, folder: first.pathname.endsWith("/") ? first.pathname : first.pathname.replace(/[^/]*$/, "") };
+  const start = { hostname: first.hostname, folder: folderOf(first) };
   const rules = await robots(first.origin);
   const seen = new Set([first.toString()]);
   const texts = new Set();
@@ -158,13 +212,15 @@ export async function crawl({ url, depth, max = WEBSITE.maxPages, budgetMs = WEB
         }
         const url = level[i++];
         const got = await page(url, rules).catch(() => null);
-        if (!got) continue;
+        if (!got?.text) continue;
         seen.add(got.url);
         const hash = createHash("sha256").update(got.text).digest("hex").slice(0, 16);
         // The same text under another address (a redirect, ?ref=) is one page.
         if (!got.text || texts.has(hash) || pages.length >= limit) continue;
         texts.add(hash);
         pages.push({ url: got.url, title: got.title, text: got.text, hash, size: got.text.length });
+        remember(url, { url: got.url, title: got.title, text: got.text });
+        if (got.url !== url) remember(got.url, { url: got.url, title: got.title, text: got.text });
         if (d < levels) {
           for (const href of got.links) {
             const link = pageLink(href, got.base, start);
