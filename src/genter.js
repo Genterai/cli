@@ -539,10 +539,12 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       }
 
       const digest = contentHash(result.data);
+      // The vector of the request: the one search() computed; on a cache miss (another process, eviction) embedded once here.
+      let asked = task ? askedVectors.get(task) : null;
+      if (task && !asked) asked = await embed(task).catch(() => null);
       if (existing && existing.digest === digest && (existing.summary || !openrouterApiKey)) {
         // Same result: nothing is described or embedded again.
         const next = { ...existing, status: "fresh", checked_at: at };
-        const asked = task && askedVectors.get(task);
         if (asked) next.queryEmbeddings = addQuery(existing.queryEmbeddings, asked, at);
         if (asked || existing.status !== "fresh" || existing.checked_at !== at) await save(next);
         return { id: rid, result, created: false, changed: false, unchanged: true, pending: Promise.resolve(publicRecipe(next)), recipe_status: "fresh" };
@@ -562,7 +564,6 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         ...(kept && { title: kept.title, short: kept.short, summary: kept.summary, items: kept.items, summaryEmbedding: kept.summaryEmbedding, itemEmbeddings: kept.itemEmbeddings, source: kept.source, partial: kept.partial }),
       };
       const record = { ...base, digest, status: "fresh", updated_at: at, checked_at: at };
-      const asked = task && askedVectors.get(task);
       if (asked) record.queryEmbeddings = addQuery(base.queryEmbeddings, asked, at);
       // The call as it ran: args kept as written (placeholders included), in canonical form so equal calls look equal.
       await save(record);

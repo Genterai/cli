@@ -383,6 +383,14 @@ describe("queryEmbeddings", () => {
     assert.equal((await genter.search({ query: "clumsy way to ask it" })).filter((r) => r.id).length, 0);
   });
 
+  it("Q6 a cache miss (no search of this text in this process) embeds the task once, so the link is not lost", async () => {
+    const { genter } = setup();
+    const out = await genter.execute({ ...call, task: "old question about waiting reviews" });
+    await out.pending;
+    const recipe = (await genter.search({ query: "clumsy way to ask it" })).find((r) => r.id === out.id);
+    assert.ok(recipe, "found through the request embedded on the miss");
+  });
+
   it("Q4 a near-duplicate request raises the count of the stored one instead of adding a vector", () => {
     let list = addQuery([], [1, 0, 0]);
     list = addQuery(list, [0.99, 0.05, 0]);
