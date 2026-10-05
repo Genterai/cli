@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
-import { createGenter } from "../src/genter.js";
+import { addQuery, createGenter } from "../src/genter.js";
 
 // The real createGenter on a Composio stand-in: tool calls are answered over fetch, so execute runs its own code
 // (the agent tests replace genter as a whole and never reach it).
@@ -331,5 +331,75 @@ describe("recipes", () => {
     assert.deepEqual((await genter.recipes.scopes()).map((x) => x.label), ["Entire repository o/r"]);
     assert.deepEqual(await genter.recipes.remove(out.id), { id: out.id, removed: true });
     assert.deepEqual(await genter.recipes.list(), []);
+  });
+});
+
+describe("queryEmbeddings", () => {
+  // The old request and the new clumsy one are close; the summary and the items are far from both.
+  const vector = (t) => (t.startsWith("old question") ? [1, 0, 0] : t.startsWith("clumsy") ? [0.99, 0.1, 0] : [0, 1, 0]);
+  const setup = () => {
+    fakeComposio(
+      { items: [{ title: "x" }] },
+      {
+        chat: (prompt) =>
+          /Translate it for searching/.test(prompt)
+            ? { en: "", terms: [] }
+            : { title: "Open pull requests", short: "PRs.", summary: "Three open pull requests.", items: [] },
+        vector,
+      },
+    );
+    const store = memoryStore();
+    return { store, genter: createGenter({ composioApiKey: "k", openrouterApiKey: "o", userId: "u", secret: "s", store }) };
+  };
+  const call = { tool: "GITHUB_LIST_PULL_REQUESTS", args: { owner: "o", repo: "r" } };
+
+  it("Q1 a new question close to a past request (far from the summary) finds the recipe through it", async () => {
+    const { genter } = setup();
+    await genter.search({ query: "old question about waiting reviews" });
+    const out = await genter.execute({ ...call, task: "old question about waiting reviews" });
+    await out.pending;
+    const recipe = (await genter.search({ query: "clumsy way to ask it" })).find((r) => r.id === out.id);
+    assert.ok(recipe, "found through the stored request");
+    assert.ok(recipe.score >= 0.9);
+    assert.equal(recipe.queryEmbeddings, undefined);
+  });
+
+  it("Q2 the same request again raises the count; the vector is cut to 256 dims and survives the store", async () => {
+    const { genter, store } = setup();
+    for (let i = 0; i < 2; i++) {
+      await genter.search({ query: "old question" });
+      await (await genter.execute({ ...call, task: "old question" })).pending;
+    }
+    const [row] = store.rows.values();
+    assert.ok(row.blob, "stored as a blob");
+    assert.ok(!JSON.stringify(row).includes("queryEmbeddings"), "encrypted: not visible in the row");
+    assert.ok((await genter.search({ query: "clumsy way to ask it" })).some((r) => r.tool === call.tool));
+  });
+
+  it("Q3 without a request on the call nothing is kept and the behaviour is as before", async () => {
+    const { genter } = setup();
+    const out = await genter.execute(call);
+    await out.pending;
+    assert.equal((await genter.search({ query: "clumsy way to ask it" })).filter((r) => r.id).length, 0);
+  });
+
+  it("Q4 a near-duplicate request raises the count of the stored one instead of adding a vector", () => {
+    let list = addQuery([], [1, 0, 0]);
+    list = addQuery(list, [0.99, 0.05, 0]);
+    list = addQuery(list, [1, 0.01, 0]);
+    assert.equal(list.length, 1);
+    assert.equal(list[0].n, 3);
+    assert.equal(addQuery(list, [0, 1, 0]).length, 2);
+  });
+
+  it("Q5 at most 8 requests are kept: the least frequent, then the oldest, goes", () => {
+    const axis = (i) => Array.from({ length: 10 }, (_, j) => (i === j ? 1 : 0));
+    let list = addQuery([], axis(0), "2026-01-01");
+    list = addQuery(list, axis(0), "2026-01-02"); // axis 0 came twice
+    for (let i = 1; i < 10; i++) list = addQuery(list, axis(i), `2026-02-0${i}`);
+    assert.equal(list.length, 8);
+    assert.equal(list[0].n, 2);
+    assert.ok(!list.some((q) => q.e[1] === 1), "the oldest single went first");
+    assert.ok(list.some((q) => q.e[9] === 1), "the newest is kept");
   });
 });

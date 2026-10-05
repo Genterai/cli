@@ -161,6 +161,6 @@ export function normalizeLegacy(record) {
 // A record without its vectors, for lists and pages.
 export function publicRecipe(record) {
   if (!record) return null;
-  const { summaryEmbedding, itemEmbeddings, memory, ...rest } = record;
+  const { summaryEmbedding, itemEmbeddings, queryEmbeddings, memory, ...rest } = record;
   return rest;
 }

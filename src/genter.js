@@ -249,7 +249,9 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
   function resultMatch(r, vector, terms) {
     const lines = r.items ?? [];
     const byItem = (r.itemEmbeddings ?? []).map((e, i) => [lines[i], cosine(vector.slice(0, e.length), e)]);
-    let score = r.summaryEmbedding ? cosine(vector, r.summaryEmbedding) : 0;
+    // Past requests this recipe answered count like its summary: a clumsy new question finds a similar old one.
+    const past = (r.queryEmbeddings ?? []).map((q) => cosine(vector.slice(0, q.e.length), q.e));
+    let score = Math.max(r.summaryEmbedding ? cosine(vector, r.summaryEmbedding) : 0, ...past);
     const said = (text) => terms.some((t) => String(text ?? "").toLowerCase().includes(t));
     const close = byItem.filter(([l, s]) => l && s >= ITEM_FIT).sort((a, b) => b[1] - a[1]);
     const written = lines.filter(said);
@@ -258,6 +260,11 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     else if (matched.length || said(r.summary)) score = Math.max(score, (minScore + strongScore) / 2);
     return { score, matched };
   }
+
+  // Vectors of the requests searched lately, by their text: execute({ task }) files the one it was made for on the
+  // recipe (queryEmbeddings) without embedding it again.
+  const askedVectors = new Map();
+  const MAX_ASKED = 50;
 
   const toolInfos = new Map();
   const toolInfo = (tool) => {
@@ -438,6 +445,8 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       const english = await translate(query);
       const toolkits = [...new Set([...also, ...namedApps(`${query} ${english?.en ?? ""}`, apps)])];
       const vector = await embed(english?.en ? `${query}\n${english.en}` : query).catch(() => null);
+      if (vector) askedVectors.set(query, vector);
+      if (askedVectors.size > MAX_ASKED) askedVectors.delete(askedVectors.keys().next().value);
       const terms = (english?.terms ?? []).map((t) => t.toLowerCase().trim()).filter((t) => t.length >= 4);
       const memories = vector
         ? (await everyRecipe())
@@ -488,7 +497,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     //   unchanged: same result, only checked_at moved. pending resolves to the recipe once its description is saved.
     // A failed call returns { result } (and recipe_status gone / denied, with the id, when it was a known recipe that
     // the error says is gone or forbidden). remember: false runs it without saving (an inner step).
-    async execute({ id, tool, args = {}, account, remember: keep = true }) {
+    async execute({ id, tool, args = {}, account, task, remember: keep = true }) {
       const previous = id ? await load(id) : null;
       if (id && !previous && !tool) throw new Error(`Unknown recipe: ${id}`);
       if (previous) {
@@ -533,7 +542,9 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       if (existing && existing.digest === digest && (existing.summary || !openrouterApiKey)) {
         // Same result: nothing is described or embedded again.
         const next = { ...existing, status: "fresh", checked_at: at };
-        if (existing.status !== "fresh" || existing.checked_at !== at) await save(next);
+        const asked = task && askedVectors.get(task);
+        if (asked) next.queryEmbeddings = addQuery(existing.queryEmbeddings, asked, at);
+        if (asked || existing.status !== "fresh" || existing.checked_at !== at) await save(next);
         return { id: rid, result, created: false, changed: false, unchanged: true, pending: Promise.resolve(publicRecipe(next)), recipe_status: "fresh" };
       }
       const created = !existing;
@@ -551,6 +562,8 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         ...(kept && { title: kept.title, short: kept.short, summary: kept.summary, items: kept.items, summaryEmbedding: kept.summaryEmbedding, itemEmbeddings: kept.itemEmbeddings, source: kept.source, partial: kept.partial }),
       };
       const record = { ...base, digest, status: "fresh", updated_at: at, checked_at: at };
+      const asked = task && askedVectors.get(task);
+      if (asked) record.queryEmbeddings = addQuery(base.queryEmbeddings, asked, at);
       // The call as it ran: args kept as written (placeholders included), in canonical form so equal calls look equal.
       await save(record);
       if (legacy && legacy.id !== rid) await drop(legacy.id).catch(() => {});
@@ -682,6 +695,21 @@ const ITEM_DIMS = 256;
 // a few short ones up to 0.35.
 const ITEM_FIT = 0.33;
 const ITEM_STRONG = 0.45;
+// The requests a recipe answered, as vectors: the one already computed when it was searched, cut like items (256 dims,
+// int8), at most MAX_QUERIES, each with how often it came. A near-duplicate (cosine >= QUERY_DUP) only raises the count
+// of the stored one; when full, the least frequent and then the oldest goes. No backfill: they pile up from now on.
+const MAX_QUERIES = 8;
+const QUERY_DUP = 0.95;
+export function addQuery(list = [], vector, at = new Date().toISOString()) {
+  if (!vector?.length) return list;
+  const e = Array.from(vector.slice(0, ITEM_DIMS));
+  const same = list.findIndex((q) => cosine(e, q.e) >= QUERY_DUP);
+  if (same >= 0) return list.map((q, i) => (i === same ? { ...q, n: q.n + 1, at } : q));
+  const next = [...list, { e, n: 1, at }];
+  if (next.length <= MAX_QUERIES) return next;
+  const drop = next.slice(0, -1).reduce((w, q, i, a) => (q.n < a[w].n || (q.n === a[w].n && q.at < a[w].at) ? i : w), 0);
+  return next.filter((_, i) => i !== drop);
+}
 const decrypted = new Map(); // "<user>:<blob prefix>" -> record, shared by every genter in the process
 const translations = new Map(); // query -> Promise<{ en, terms } | null>
 
@@ -692,11 +720,13 @@ function pack(record) {
   const out = { ...record };
   for (const key of VECTORS) if (out[key]) out[key] = toB64(out[key]);
   if (out.itemEmbeddings) out.itemEmbeddings = out.itemEmbeddings.map(toI8);
+  if (out.queryEmbeddings) out.queryEmbeddings = out.queryEmbeddings.map((q) => ({ ...q, e: toI8(q.e) }));
   return out;
 }
 function unpack(record) {
   for (const key of VECTORS) if (typeof record[key] === "string") record[key] = fromB64(record[key]);
   if (record.itemEmbeddings) record.itemEmbeddings = record.itemEmbeddings.map(fromI8);
+  if (record.queryEmbeddings) record.queryEmbeddings = record.queryEmbeddings.map((q) => ({ ...q, e: fromI8(q.e) }));
   if (typeof record.memory?.embedding === "string") record.memory.embedding = fromB64(record.memory.embedding); // legacy
   return record;
 }
