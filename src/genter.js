@@ -1,21 +1,24 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { Composio } from "@composio/core";
-import { readyFor } from "./ready.js";
-import { createSources, fill, inferList, pick } from "./sync.js";
+import { canonicalArgs, canonicalJson, classifyFailure, contentHash, isPartial, normalizeLegacy, publicRecipe, recipeId, sourceOf } from "./recipe.js";
+import { fill, inferList, pick } from "./shape.js";
 
 // Genter = Composio + recipes of past calls.
-// A call record is { id, tool, args, created_at, summary, digest, memory }: memory is the recipe description,
-// summary is a short retelling of the result (topics, names, ids to open it again). The raw result is never stored.
-// Every successful call is saved as a recipe; the slow part (summary, embeddings, dedupe) runs after the result
-// is returned, through `defer` (default: tracked, awaited by flush()). A call merged into an older recipe of the same
-// call is kept as an alias of it, so every id execute returned stays valid.
+// A Recipe is ONE successful tool call with fixed args plus knowledge about its actual result (see recipe.js and
+// docs: specs/recipes.md). Its id is deterministic (workspace, account, tool, canonical args): the same call upserts the
+// same record. The raw result is never stored: only a digest, a semantic summary, one line per item and their vectors.
+// execute() runs the REAL tool every time. Unchanged result (same digest): only checked_at moves, no model is called.
+// Changed result: the same recipe is described and embedded again. Failed call: no recipe; one that exists is marked
+// gone / denied when the error says so.
 // Records are encrypted before they reach the store, so the store only sees rows { id, remembered, blob }
-// and needs: get(id), put(row), all() (remembered rows).
-// knowledge (optional) stores sources, see sync.js; without it there are no sources.
-// onSync(source, { reason }) (optional) is told about every sync run: manual, trigger, schedule or live.
+// and needs: get(id), put(row), all() (remembered rows); remove(id) (optional).
+// scopes (optional): { get, put, list, remove } of prepared areas { id, label, toolkit, account, spec }.
+// workspaceId: part of every recipe id (default: userId).
 // triggers: true only where Composio's webhook reaches this code (the hosted backend); the CLI can not receive events.
-export function createGenter({ composioApiKey, openrouterApiKey, userId, secret, store, knowledge, triggers = false, defer, onSync, minScore = 0.25, strongScore = 0.45 }) {
+// allow(record) (optional): false hides a recipe from search (the backend: connections the person may use).
+export function createGenter({ composioApiKey, openrouterApiKey, userId, workspaceId, secret, store, scopes: scopeStore, triggers = false, defer, allow, minScore = 0.25, strongScore = 0.45 }) {
   if (!secret) throw new Error("secret is required to encrypt stored calls");
+  workspaceId ??= userId;
   const composio = new Composio({ apiKey: composioApiKey });
   const { seal, open: decrypt } = cipher(`${secret}:${userId}`);
   // Decrypted records are cached by their blob (a new seal has a new random iv), so search does not
@@ -30,13 +33,28 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     }
     return record;
   };
-  const load = async (id, hops = 0) => {
-    const row = await store.get(id);
-    if (!row) throw new Error(`Unknown id: ${id}`);
-    const record = open(row.blob);
-    return record.alias && hops < 3 ? load(record.alias, hops + 1) : record;
+  const read = (row) => {
+    try {
+      return normalizeLegacy(open(row.blob));
+    } catch {
+      return null;
+    }
   };
-  const save = (record, remembered = Boolean(record.memory)) => store.put({ id: record.id, remembered, blob: seal(pack(record)) });
+  const load = async (id) => {
+    const row = await store.get(id);
+    return row ? read(row) : null;
+  };
+  const loadOrThrow = async (id) => {
+    const record = await load(id);
+    if (!record) throw new Error(`Unknown recipe: ${id}`);
+    return record;
+  };
+  const everyRecipe = async () => (await store.all()).map(read).filter(Boolean);
+  const save = (record) => store.put({ id: record.id, remembered: true, blob: seal(pack(record)) });
+  const drop = async (id) => {
+    if (store.remove) return store.remove(id);
+    await store.put({ id, remembered: false, blob: seal({ id, removed: true }) });
+  };
   const pending = new Set();
   const later = (task) => {
     const p = task.catch((e) => console.error("genter: saving a recipe failed:", e.message));
@@ -153,9 +171,9 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     return items.find((a) => a.alias === account)?.id ?? (strict ? account : undefined);
   }
 
-  // Several texts at once, for source chunks.
+  // Several texts at once.
   async function embedMany(input) {
-    if (!openrouterApiKey) throw new Error("Sources need an OpenRouter key for embeddings (OPENROUTER_API_KEY)");
+    if (!openrouterApiKey) throw new Error("Recipes need an OpenRouter key for embeddings (OPENROUTER_API_KEY)");
     const res = await fetch("https://openrouter.ai/api/v1/embeddings", {
       method: "POST",
       headers: { Authorization: `Bearer ${openrouterApiKey}`, "Content-Type": "application/json" },
@@ -166,68 +184,10 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     return (await res.json()).data.sort((a, b) => a.index - b.index).map((d) => d.embedding);
   }
 
-  // Sources: an app's content synced as knowledge (sync.js). Tools run directly, they are not saved as recipes.
-  const sources =
-    knowledge &&
-    createSources({
-      run: async (tool, args, account) => {
-        const id = await accountId(account, { strict: false });
-        return composio.tools.execute(tool, { userId, arguments: args, ...(id && { connectedAccountId: id }), dangerouslySkipVersionCheck: true });
-      },
-      embedMany,
-      // A sync recipe's last result is what its sync keeps: its summary says so, for cards and search.
-      onSync: async (source, info) => {
-        if (source.recipe_of && source.status !== "failed") await noteSynced(source).catch((e) => console.error("genter: recipe summary failed:", e.message));
-        if (onSync) await onSync(source, info);
-      },
-      triggers: triggers && {
-        create: async (slug, config, account) => {
-          const id = await accountId(account, { strict: false });
-          return (await composio.triggers.create(userId, slug, { ...(id && { connectedAccountId: id }), triggerConfig: config })).triggerId;
-        },
-        disable: (id) => composio.triggers.disable(id),
-        remove: (id) => composio.triggers.delete(id),
-      },
-      summarize: (title, text) =>
-        chat({
-          model: process.env.SUMMARY_MODEL || "openai/gpt-oss-120b",
-          reasoning: { effort: "low" },
-          messages: [
-            {
-              role: "user",
-              content:
-                `Summarize "${title}" in 2-4 sentences so it can be found later: what it is about, key names, terms and decisions. ` +
-                `Write in the language of the text. No passwords, tokens or keys.\n\n${text.slice(0, 20000)}`,
-            },
-          ],
-        }).catch(() => null),
-      // Live sync recipes saved by the agent are records of kind "sync" in the recipe store.
-      recipes: {
-        get: async (id) => {
-          const row = await store.get(id);
-          const record = row && open(row.blob);
-          return record?.kind === "sync" ? record.sync : (record?.live ?? null);
-        },
-        list: async () =>
-          (await store.all())
-            .map((row) => open(row.blob))
-            .filter((r) => r.kind === "sync" && !r.alias && !r.memory?.disabled)
-            .map((r) => ({ id: r.id, recipe: r.sync })),
-      },
-      seal: (value) => seal(value),
-      open: (blob) => decrypt(blob),
-      store: knowledge,
-      namespace: userId,
-    });
-
-  // What a result is and what it holds, from one model call: { title, about, summary }. title names the result of
-  // this exact call ("Open pull requests of Genterai/genter-cli"): a recipe is named by it and has no parameters.
-  // summary retells the content so it is found later by topic. Skipped without an OpenRouter key.
-  // items: one line per thing found, each embedded on its own, so one event among ten is found by itself ("Уборка" in a
-  // week of events scored 0.20 against "когда мне убираться" as one summary, 0.42 as its own line).
-  // task (the request the call was made for): relevant says whether the result has anything for it. A keyword search
-  // that only shares a word with it (a GitHub email with "clean up" for "when do I clean") is not kept as a recipe.
-  async function describe(tool, args, data, task) {
+  // What a result is and what it holds, from one model call: { title, short, summary, items }. The summary is
+  // semantic: what the data MEANS (subjects, people, dates, ids), written only from what was returned. A partial
+  // result (a page, truncated) is described as such and never claims more than it holds.
+  async function describe(tool, args, data, { partial = false } = {}) {
     if (!openrouterApiKey) return null;
     const text = await chat({
       model: process.env.SUMMARY_MODEL || "openai/gpt-oss-120b",
@@ -238,52 +198,40 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
           role: "user",
           content:
             `A call of ${tool} with args ${JSON.stringify(args).slice(0, 600)} returned the data below. ` +
-            `Reply with JSON only: {"title": "...", "about": "...", "short": "...", "summary": "...", "items": ["..."]${task ? ', "relevant": true' : ""}}.\n` +
-            'title: what this result is, as a name of up to 8 words for these exact args, in English, e.g. "Open pull requests of Genterai/genter-cli", "Unread emails from today".\n' +
-            "about: 1-2 sentences: what the result is (which items, which filters) and what each item has, so someone knows what they get without running it.\n" +
-            "short: ONE sentence of up to 140 characters saying what this result is about and can answer (the content, not the call or its args), " +
-            'for a table row, e.g. "Titles, authors and states of the pull requests still open in the repository". Not a repeat of the title.\n' +
-            "summary: 1-3 sentences retelling what it contains, so it can be found later by topic: subjects, people, dates, and the ids or URLs " +
-            "needed to open it again. Write in English, but quote subjects, titles and names exactly as they are.\n" +
+            'Reply with JSON only: {"title": "...", "short": "...", "summary": "...", "items": ["..."]}.\n' +
+            'title: what this result is, as a name of up to 8 words for these exact args, in English, e.g. "Open pull requests of Genterai/genter-cli".\n' +
+            "short: ONE sentence of up to 140 characters saying what this result is about and can answer (the content, not the call or its args). Not a repeat of the title.\n" +
+            "summary: 2-4 sentences retelling what the result MEANS and contains, so it can be found later by topic: subjects, people, dates, decisions, " +
+            "and the ids or URLs needed to open it again. Write in English, but quote subjects, titles and names exactly as they are.\n" +
             "items: up to 15 things the result holds, one short line each, the way someone would look for it: what it is, its " +
             'title or subject exactly as written, its date, e.g. "Calendar event «Уборка» on 2026-10-03 13:00". [] when it is empty.\n' +
-            (task
-              ? `relevant: true if the result holds what this request asks about, or ids, lists or names that lead to it: "${String(task).slice(0, 300)}". ` +
-                "false when it is empty or its items only share a word with the request and are about something else.\n"
+            (partial
+              ? "This result is only a PAGE or was cut off (the data carries a next-page marker or says it is truncated). Say in the summary that it is " +
+                'the first part ("first N of more"), and claim ONLY what was returned: never totals, never "no more", never that something is absent.\n'
               : "") +
             "Only say what is in the data, do not guess. No passwords, tokens or keys." +
             `\n\n${forSummary(data).slice(0, 20000)}`,
         },
       ],
-    }).catch(() => null); // a recipe without a summary is still useful
+    }).catch(() => null);
     if (!text) return null;
     try {
       const out = JSON.parse(text);
       const clean = (v, n) => (typeof v === "string" && v.trim() ? v.trim().slice(0, n) : null);
       const items = (Array.isArray(out.items) ? out.items : []).map((i) => clean(i, 200)).filter(Boolean).slice(0, 15);
-      return {
-        title: clean(out.title, 100)?.replace(/^#+\s*/, ""),
-        about: clean(out.about, 600),
-        short: clean(out.short, 200),
-        summary: clean(out.summary, 1200),
-        items,
-        relevant: out.relevant === false ? false : true,
-      };
+      return { title: clean(out.title, 100)?.replace(/^#+\s*/, ""), short: clean(out.short, 200), summary: clean(out.summary, 1200), items };
     } catch {
       return { summary: text.slice(0, 1200) };
     }
   }
 
-  // How well a recipe fits a request: how it is described, what its result was about, and each thing it held.
-  // A line of its last result with a key term of the request in it ("Уборка" for "когда уборка") or very close by
-  // meaning makes it a strong match: the answer is there. A line somewhat close (0.33+) or a key term in the summary
-  // only puts it among the recipes offered: short lines come that close to unrelated requests too ("📣 X · bio" to
-  // "что нового в почте", 0.35), and the agent sees the lines and judges. matched: those lines.
+  // How well a recipe fits a request: its result summary and each thing it held (not the tool's description).
+  // A line of its last result with a key term of the request in it or very close by meaning makes it a strong match;
+  // a line somewhat close (0.33+) or a key term in the summary puts it among the recipes offered. matched: those lines.
   function resultMatch(r, vector, terms) {
     const lines = r.items ?? [];
     const byItem = (r.itemEmbeddings ?? []).map((e, i) => [lines[i], cosine(vector.slice(0, e.length), e)]);
-    // A line counts only when it clearly fits: among a hundred lines one is always a little close to anything.
-    let score = Math.max(...[r.memory.embedding, r.summaryEmbedding].filter(Boolean).map((e) => cosine(vector, e)));
+    let score = r.summaryEmbedding ? cosine(vector, r.summaryEmbedding) : 0;
     const said = (text) => terms.some((t) => String(text ?? "").toLowerCase().includes(t));
     const close = byItem.filter(([l, s]) => l && s >= ITEM_FIT).sort((a, b) => b[1] - a[1]);
     const written = lines.filter(said);
@@ -291,77 +239,6 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     if (written.length || close[0]?.[1] >= ITEM_STRONG) score = Math.max(score, strongScore);
     else if (matched.length || said(r.summary)) score = Math.max(score, (minScore + strongScore) / 2);
     return { score, matched };
-  }
-
-  // Slow part of a call, after its result went back: summary, embedding, dedupe against the same call, recipe.
-  async function remember(record, data, { description, short, tags, task }) {
-    const sameCall = (await store.all())
-      .map((row) => open(row.blob))
-      .filter((r) => r.id !== record.id && !r.alias && r.tool === record.tool && JSON.stringify(r.args) === JSON.stringify(record.args));
-    const known = sameCall.find((r) => r.digest === record.digest && r.summaryEmbedding);
-    let summary = known?.summary;
-    let summaryEmbedding;
-    let items = known?.items;
-    let itemEmbeddings = known?.itemEmbeddings;
-    let named = null;
-    if (!summary) {
-      named = (await describe(record.tool, record.args, data, task)) ?? (await describe(record.tool, record.args, data, task));
-      summary = named?.summary ?? null;
-      // The model sees the first part of a long result; every listed item gets its own line too (a 100-event week had
-      // «Уборка» as event 71, and nothing found it).
-      const lines = [...new Set([...(named?.items ?? []), ...listLines(data)])].slice(0, MAX_ITEMS);
-      items = lines.length ? lines : undefined;
-      const vectors = summary ? await embedMany([summary, ...lines, ...(task ? [task] : [])]).catch(() => []) : [];
-      const asked = task && vectors.length ? vectors.pop() : null;
-      [summaryEmbedding, ...itemEmbeddings] = vectors;
-      itemEmbeddings = itemEmbeddings?.length ? itemEmbeddings.map((e) => e.slice(0, ITEM_DIMS)) : undefined;
-      // The model misses one line among many and calls a result unrelated (40 events with «Уборка» for "когда мне
-      // убираться"): a line close to the request keeps it. Dropping a good recipe costs more than keeping a weak one.
-      if (named?.relevant === false && asked && itemEmbeddings?.some((e) => cosine(asked.slice(0, e.length), e) >= ITEM_FIT)) named.relevant = true;
-    }
-    // A recipe is a call whose result is known: no summary (the model failed twice) or nothing the request was about,
-    // and a new call is not kept as one (it stays runnable by its id, unlisted). A recipe that already exists (a ready
-    // read, the same call saved before) keeps its place.
-    if ((!summary || named?.relevant === false) && !record.memory && !sameCall.length) {
-      const { memory, ...stored } = (await load(record.id).catch(() => null)) ?? record; // save_recipes may have run meanwhile
-      await save({ ...stored, summary, ...(summary ? { unrelated: true } : { unsummarized: true }) }, false);
-      return summary;
-    }
-    const found = { ...(items && { items }), ...(itemEmbeddings && { itemEmbeddings }) };
-    // Same tool and args with the same result (identical, or a near-identical summary): refresh that recipe, keep this
-    // id as its alias. A different result, e.g. a new latest email, is a recipe of its own.
-    // A named recipe's own first run (a ready read) stays itself, never an alias of an older call.
-    const similar = record.memory
-      ? null
-      : sameCall.find((r) => r.digest === record.digest || (r.summaryEmbedding && summaryEmbedding && cosine(r.summaryEmbedding, summaryEmbedding) >= 0.9));
-    let target = record;
-    if (similar) {
-      target = { ...similar, created_at: record.created_at, digest: record.digest, ...(summaryEmbedding && { summary, summaryEmbedding, items, itemEmbeddings }) };
-      await save(target);
-      if (record.id !== similar.id) await save({ id: record.id, alias: similar.id }, false);
-    } else {
-      // What is stored now: the agent's save_recipes or a repeat may have written it since execute.
-      const stored = (await load(record.id).catch(() => null)) ?? record;
-      target = { ...stored, summary, summaryEmbedding, ...found };
-      await save(target, Boolean(target.memory));
-    }
-    if (description) {
-      await api.save_recipes({ recipes: [{ id: target.id, description, short, tags }] });
-    } else if (!target.memory) {
-      // Named by its result: what this exact call returns, no parameters to fill in.
-      const info = await toolInfo(record.tool);
-      const tags = [info.toolkit?.slug].filter(Boolean);
-      await api.save_recipes({
-        recipes: [
-          named?.title
-            ? { id: target.id, description: resultRecipe(named, record.tool), short: named.short ?? named.title, tags, auto: true }
-            : { id: target.id, description: autoRecipe(info, record.tool, record.args), tags, auto: true },
-        ],
-      });
-    }
-    // How to keep this recipe live, decided now from the real result, so Live sync is one click later.
-    if (sources && !target.live) await planLive(target.id, data).catch((e) => console.error("genter: live plan failed:", e.message));
-    return summary;
   }
 
   const toolInfos = new Map();
@@ -377,35 +254,11 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     return triggerTypes.get(toolkit);
   };
 
-  // A recipe's live sync: the same call re-run, its list found in the result (inferList), every item as Markdown;
-  // updated by the triggers a model picks for it, or hourly when none fits.
-  async function planLive(id, data) {
-    const record = await load(id);
-    if (record.kind === "sync") return;
-    const info = await toolInfo(record.tool);
-    const toolkit = info.toolkit?.slug ?? record.tool.split("_")[0].toLowerCase();
-    const shape = inferList({ data });
-    const name = titleOf(record.memory?.description) || info.name || record.tool;
-    const triggers = await pickTriggers({ toolkit, tool: record.tool, args: record.args, description: record.memory?.description }).catch(() => []);
-    record.live = {
-      name,
-      toolkit,
-      description: `Keeps "${name}" up to date`,
-      title: name,
-      scope: {},
-      // Items that never change (messages) carry no version: the list is a window of the latest, keep what leaves it.
-      list: { tool: record.tool, args: record.args, ...shape, ...(shape.version && shape.version === shape.id && { append: true }) },
-      triggers,
-      every: triggers.length ? null : 60,
-    };
-    await save(record);
-    return record.live;
-  }
-
-  // Triggers that fire when this call's result may change, chosen by a model, with config it could fill.
-  async function pickTriggers({ toolkit, tool, args, description }) {
+  // The trigger that fires when this call's result may change, chosen by a model with config it could fill: the
+  // first of [{ slug, config, label }], or null.
+  async function pickTrigger({ toolkit, tool, args, title }) {
     const types = await triggersOf(toolkit);
-    if (!types.length || !openrouterApiKey) return [];
+    if (!types.length || !openrouterApiKey) return null;
     const options = types.map((t) => ({
       slug: t.slug,
       description: String(t.description ?? "").split("\n")[0].slice(0, 140),
@@ -420,11 +273,10 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
           {
             role: "user",
             content:
-              `A recipe runs ${tool} with args ${JSON.stringify(args)}` +
-              `${description ? ` (${String(description).slice(0, 400)})` : ""}. ` +
-              "Which of these triggers fire when its result may change (a new or updated item it would return)? " +
+              `A recipe runs ${tool} with args ${JSON.stringify(args)}${title ? ` ("${String(title).slice(0, 200)}")` : ""}. ` +
+              "Which of these triggers fire when its result may change (a new, updated or deleted item it would return)? " +
               'Reply with JSON only: {"triggers": [{"slug": "...", "config": {...}, "label": "on every new email"}]}. ' +
-              "Fill every required config field from the args; skip a trigger you can not fill. Usually one or two; none fits: [].\n\n" +
+              "Fill every required config field from the args; skip a trigger you can not fill. Usually one; none fits: [].\n\n" +
               JSON.stringify(options),
           },
         ],
@@ -432,28 +284,55 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       20000,
     );
     const picked = JSON.parse(text).triggers ?? [];
-    return picked
-      .filter((t) => {
-        const type = types.find((x) => x.slug === t.slug);
-        // A config the model left as a placeholder ({{container}}) can not be filled for one trigger.
-        return type && !JSON.stringify(t.config ?? {}).includes("{{") && (type.config?.required ?? []).every((k) => t.config?.[k] != null && t.config[k] !== "");
-      })
-      .slice(0, 3)
-      .map((t) => ({ slug: t.slug, config: t.config ?? {}, label: String(t.label || t.slug).slice(0, 60) }));
+    const ok = picked.find((t) => {
+      const type = types.find((x) => x.slug === t.slug);
+      return type && !JSON.stringify(t.config ?? {}).includes("{{") && (type.config?.required ?? []).every((k) => t.config?.[k] != null && t.config[k] !== "");
+    });
+    return ok ? { slug: ok.slug, config: ok.config ?? {}, label: String(ok.label || ok.slug).slice(0, 60) } : null;
   }
 
-  // What a sync recipe keeps, as its result summary: "412 items kept: 380 files, 31 issues and pull requests, about".
-  async function noteSynced(source) {
-    const record = await load(source.recipe_of);
-    const plan = record.kind === "sync" ? record.sync : record.live;
-    if (!plan) return;
-    const parts = plan.parts?.length && source.stats?.parts
-      ? `: ${plan.parts.map((p) => `${source.stats.parts[p.key] ?? 0} ${String(p.name ?? p.key).toLowerCase()}`).join(", ")}`
-      : "";
-    const summary = `${source.stats?.items ?? 0} items kept as embeddings${parts}. Synced ${String(source.synced_at ?? source.last_run?.at ?? "").slice(0, 16).replace("T", " ")}${source.status === "partial" ? ", still syncing" : ""}.`;
-    if (record.summary === summary) return;
-    await save({ ...record, summary });
+  // The slow part of a call, after its result went back: description, vectors, provenance. Merged into what is stored
+  // NOW (a later execute may have bumped checked_at or changed the digest meanwhile: then this description is stale and dropped).
+  async function remember(id, digest, data, { created }) {
+    let record = await load(id);
+    if (!record || record.digest !== digest) return record;
+    const partial = isPartial(data);
+    const named = (await describe(record.tool, record.args, data, { partial })) ?? (await describe(record.tool, record.args, data, { partial }));
+    const info = created ? await toolInfo(record.tool) : null;
+    const toolkit = info?.toolkit?.slug ?? record.scope?.toolkit;
+    // The model sees the first part of a long result; every listed item gets its own line too.
+    const lines = named ? [...new Set([...(named.items ?? []), ...listLines(data)])].slice(0, MAX_ITEMS) : [];
+    let summaryEmbedding;
+    let itemEmbeddings;
+    if (named?.summary) {
+      const vectors = await embedMany([named.summary, ...lines]).catch(() => []);
+      [summaryEmbedding, ...itemEmbeddings] = vectors;
+      itemEmbeddings = itemEmbeddings?.length ? itemEmbeddings.map((e) => e.slice(0, ITEM_DIMS)) : undefined;
+    }
+    record = await load(id);
+    if (!record || record.digest !== digest) return record;
+    record = {
+      ...record,
+      scope: { ...record.scope, toolkit: toolkit ?? record.scope?.toolkit },
+      partial,
+      source: sourceOf({ tool: record.tool, args: record.args, toolkit, data }),
+      ...(named && {
+        title: named.title ?? record.title,
+        short: named.short ?? named.title ?? record.short,
+        summary: named.summary ?? null,
+        items: lines.length ? lines : undefined,
+        summaryEmbedding,
+        itemEmbeddings,
+      }),
+    };
+    await save(record);
+    // The model proposes how to keep it current, once, when the recipe is first saved.
+    if (created && !record.trigger?.recommended) await api.recipes.recommendTrigger(id).catch(() => null);
+    return load(id);
   }
+
+  const toolkitOf = (tool) => String(tool).split("_")[0].toLowerCase();
+  const now = () => new Date().toISOString();
 
   const api = {
     // Returns a Composio link the user opens to connect an app (gmail, github, ...).
@@ -484,22 +363,18 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
     // The English version and bilingual key terms of a non-English query ({ en, terms }), or null.
     translate,
 
-    // Memory first (ready-made calls with args), plain Composio search as fallback.
-    // A non-English query is matched in its language and in English: recipes and summaries are mostly English.
-    // `apps`: the connected toolkits. Those the query names (in its words or in English: "гугл таски" ->
-    // Google Tasks) give their tools first, because a search over all of Composio returns other apps' tools.
-    // `toolkits`: apps to search in anyway (the agent passes those its task named).
-    // `tools`: Composio tools come too even when a recipe fits well (the agent's search_tools looks for a tool, and a
-    // recipe for one part of its task would otherwise hide the tools of every other part).
+    // Saved recipes first (which call to make: the result summary says what it returned once, it is not the current
+    // value), plain Composio tools as fallback. Only fresh, enabled recipes. A non-English query is matched in its
+    // language and in English. `apps`: the connected toolkits; those the query names give their tools first.
+    // `toolkits`: apps to search in anyway. `tools`: Composio tools come too even when a recipe fits well.
     async search({ query, limit = 5, apps = [], toolkits: also = [], tools: withTools = false }) {
       const english = await translate(query);
       const toolkits = [...new Set([...also, ...namedApps(`${query} ${english?.en ?? ""}`, apps)])];
       const vector = await embed(english?.en ? `${query}\n${english.en}` : query).catch(() => null);
       const terms = (english?.terms ?? []).map((t) => t.toLowerCase().trim()).filter((t) => t.length >= 4);
       const memories = vector
-        ? (await store.all())
-            .map((row) => open(row.blob))
-            .filter((r) => r.memory?.embedding && !r.alias && !r.memory.disabled) // a disabled recipe is never offered
+        ? (await everyRecipe())
+            .filter((r) => r.status === "fresh" && !r.disabled && r.summaryEmbedding && (!allow || allow(r)))
             .map((r) => ({ r, ...resultMatch(r, vector, terms) }))
             .filter(({ score }) => score >= minScore)
             .sort((a, b) => b.score - a.score)
@@ -508,27 +383,18 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
               id: r.id,
               tool: r.tool,
               args: r.args,
-              tags: r.memory.tags,
-              description: r.memory.description,
-              short: r.memory.short,
-              ...(r.kind === "sync" && { kind: "sync", toolkit: r.sync.toolkit, scope: r.sync.scope }),
-              live: Boolean(r.live || r.kind === "sync"),
+              title: r.title,
+              short: r.short,
               summary: r.summary,
               ...(matched.length && { matched }),
-              when: r.created_at,
-              status: r.memory.status,
               score: Number(score.toFixed(2)),
+              status: r.status,
+              updated_at: r.updated_at,
+              checked_at: r.checked_at,
+              trigger: { active: Boolean(r.trigger?.active) },
             }))
         : [];
-      // A sync recipe's result is its synced source: which one, and how much it keeps.
-      if (sources && memories.some((m) => m.kind === "sync" || m.live)) {
-        const kept = new Map((await sources.list().catch(() => [])).filter((s) => s.recipe_of).map((s) => [s.recipe_of, s]));
-        for (const m of memories) {
-          const s = kept.get(m.id);
-          if (s) m.source = { id: s.id, status: s.status, items: s.stats?.items ?? 0, synced_at: s.synced_at, watching: s.watching, every: s.every };
-        }
-      }
-      if (!withTools && memories.some((m) => m.status === "valid" && m.score >= strongScore)) return memories;
+      if (!withTools && memories.some((m) => m.score >= strongScore)) return memories;
 
       const search = english?.en ?? query;
       const [own, all] = await Promise.all([
@@ -547,218 +413,175 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       return [...memories, ...found];
     },
 
-    // Run a tool. Pass `id` to repeat a saved recipe (args are merged on top).
-    // `account` picks a connection (from login) when an app is connected several times.
-    // Every successful call becomes a recipe: with the agent's description if given, otherwise Composio's.
-    // remember: false runs it without saving it (an inner step, e.g. reading and committing a file for an edit).
-    // (`remember: keep`: a parameter named remember hid the remember() below, and every saved call threw.)
-    // task: the request the call is made for, in the user's words: a result with nothing for it is not kept as a recipe.
-    async execute({ id, tool, args = {}, account, description, short, tags, task, remember: keep = true }) {
-      const previous = id && (await load(id));
-      if (previous?.kind === "sync") throw new Error(`${id} is a sync recipe: its result is kept as embeddings (search_knowledge); live_sync or Run now refreshes it`);
+    // Run the REAL tool (always: a recipe is never the current value). Pass `id` to repeat a saved recipe (args are
+    // merged on top). `account` picks a connection (from login) when an app is connected several times.
+    // Returns { id, result, created, changed, unchanged, pending, recipe_status }:
+    //   created: a new recipe; changed: the recipe's result is different now (it is described again);
+    //   unchanged: same result, only checked_at moved. pending resolves to the recipe once its description is saved.
+    // A failed call returns { result } (and recipe_status gone / denied, with the id, when it was a known recipe that
+    // the error says is gone or forbidden). remember: false runs it without saving (an inner step).
+    async execute({ id, tool, args = {}, account, remember: keep = true }) {
+      const previous = id ? await load(id) : null;
+      if (id && !previous && !tool) throw new Error(`Unknown recipe: ${id}`);
       if (previous) {
         tool ??= previous.tool;
         args = { ...previous.args, ...args };
-        account ??= previous.memory?.account; // a ready read runs on the account it was made for
+        account ??= previous.scope?.account || undefined; // a recipe runs on the account it was made for
       }
       if (!tool) throw new Error("Pass `tool` or `id`");
       account = await accountId(account); // an alias from login
-      // Dates stay placeholders in the recipe ({{today}}, {{ago.7d}}) and are filled for this run.
-      const result = await composio.tools.execute(tool, {
-        userId,
-        arguments: withDates(args),
-        ...(account && { connectedAccountId: account }),
-        dangerouslySkipVersionCheck: true,
-      });
-      const outdated = previous?.memory && {
-        hint: `If this result does not match the saved description, save recipe ${id} with status "outdated" and say what changed.`,
-      };
-      if (!result.successful) return { result, ...outdated }; // failed calls are not recipes
+      let result;
+      try {
+        // Dates stay placeholders in the recipe ({{today}}, {{ago.7d}}) and are filled for this run.
+        result = await composio.tools.execute(tool, {
+          userId,
+          arguments: withDates(args),
+          ...(account && { connectedAccountId: account }),
+          dangerouslySkipVersionCheck: true,
+        });
+      } catch (e) {
+        // The SDK wraps API errors ("Error executing the tool X"): the cause says what happened (not found, forbidden...).
+        const error = [e.message, e.cause?.message, e.cause?.error?.error?.message].filter((x, i, all) => x && all.indexOf(x) === i).join(": ");
+        result = { successful: false, error, data: null };
+      }
       if (!keep) return { result };
+      const rid = recipeId({ workspaceId, scope: account ?? "", tool, args });
+      const existing = previous?.id === rid ? previous : await load(rid);
+      const at = now();
 
-      // The result goes back now; summary, embedding and the recipe are saved after (see remember).
-      // Repeating a recipe with its own args answers with its id; a new call gets an id of its own right away.
-      const digest = createHash("sha256").update(JSON.stringify(result.data)).digest("hex");
-      const created_at = new Date().toISOString();
-      const repeat = previous && JSON.stringify(previous.args) === JSON.stringify(args);
-      const record = { id: repeat ? previous.id : randomUUID(), tool, args, created_at, digest };
-      if (repeat && previous.digest === digest) {
-        // Re-read when saving: the summary of its first run may still be being written, an old copy would erase it.
-        if (previous.summary || previous.memory) later(load(previous.id).then((now) => save({ ...now, created_at })));
-        return { id: record.id, result, summary: previous.summary, ...outdated };
-      }
-      // A recipe made before it ever ran (a ready read): this first result is its own, kept in place.
-      const first = repeat && !previous.digest && !previous.alias;
-      if (first) Object.assign(record, { ...previous, created_at, digest });
-      else if (repeat) record.id = randomUUID(); // a new result of a known call: a new recipe, merged later if it is the same
-      await save(record, Boolean(record.memory));
-      const summary = remember(record, result.data, { description, short, tags, task });
-      later(summary);
-      return {
-        id: record.id,
-        result,
-        summary: null, // being written; `pending` resolves to it
-        pending: summary.catch(() => null),
-        ...outdated,
-        ...(!description && {
-          note:
-            "Saved as a recipe with Composio's generic description. Optional: improve it with save_recipes " +
-            "(the user's intent in plain words, what it returns, pitfalls, tags in English and Russian).",
-        }),
-      };
-    },
-
-    // Sources: templates(), choices({template, account?}), list(), get(id), create({template, scope, depth?, account?}),
-    // sync({id, budgetMs?}), watch({id, on?}), onTrigger({triggerId}), remove({id}).
-    sources,
-
-    // Triggers that fire when a call's result may change, picked by a model: [{ slug, config, label }].
-    pick_triggers: (args) => pickTriggers(args).catch(() => []),
-
-    // Every tool of an app as Composio describes it ({ slug, description, inputParameters, tags }), cached for an hour:
-    // which of them write at a reference (refs.js writeHints).
-    catalog: ({ toolkit }) => toolsOf([toolkit]),
-
-    // The tools of an app that read, compact, for planning what can be synced: [{ tool, description, args }].
-    async app_tools({ toolkit }) {
-      // GitHub alone has ~900 tools: a lower cap drops its repos, issues and pull requests.
-      const tools = await composio.tools.getRawComposioTools({ toolkits: [toolkit], limit: 2000 });
-      return tools
-        .filter((t) => readsOnly(t.slug, t.tags))
-        .map((t) => ({
-          tool: t.slug,
-          description: String(t.description ?? "").split("\n")[0].slice(0, 140),
-          args: Object.entries(t.inputParameters?.properties ?? {})
-            .slice(0, 12)
-            .map(([k, v]) => `${k}${(t.inputParameters?.required ?? []).includes(k) ? "" : "?"}:${v.type ?? "any"}`)
-            .join(", "),
-        }));
-    },
-
-    // Apps with ready recipes (made at once when an account is connected, no model): [{ toolkit, name }].
-    ready_apps: () => ["github", "gmail", "googlecalendar", "googletasks", "notion"].map((toolkit) => ({ toolkit, name: readyFor(toolkit).name })),
-
-    // The ready recipes of one connected account, saved (or updated: the same project or read keeps its recipe) in
-    // one go, with no model and no sample calls. None has parameters: a sync recipe is kept with live_sync, a read
-    // recipe is one fixed call. Returns { toolkit, made: [{ id, kind, name, short, estimate, ran }] }, or null when the
-    // app has no ready recipes. A read with ran: false has never run: run it once (execute by id) so its result is known.
-    async setup_recipes({ toolkit, account }) {
-      const ready = readyFor(toolkit);
-      if (!ready) return null;
-      const run = async (tool, args, acc) => {
-        const id = await accountId(acc, { strict: false });
-        return composio.tools.execute(tool, { userId, arguments: args, ...(id && { connectedAccountId: id }), dangerouslySkipVersionCheck: true });
-      };
-      const specs = await ready.recipes({ run, account });
-      // Every description embedded in a few calls, not one per recipe.
-      const vectors = [];
-      for (let i = 0; i < specs.length; i += 64) {
-        const batch = specs.slice(i, i + 64).map((x) => `${x.description}\ntags: ${x.tags.join(", ")}\ntool: ${x.tool ?? partsTool(x.recipe)}`);
-        // Without embeddings the recipes are still made; search finds them once they are made again.
-        vectors.push(...(openrouterApiKey ? await embedMany(batch).catch((e) => (console.error("genter: recipe embeddings failed:", e.message), batch.map(() => null))) : batch.map(() => null)));
-      }
-      const created_at = new Date().toISOString();
-      const made = [];
-      for (const [i, x] of specs.entries()) {
-        const id = `${x.kind === "read" ? "read" : "sync"}_${createHash("sha256").update(`${userId}:${toolkit}:${account ?? ""}:${x.key}`).digest("hex").slice(0, 24)}`;
-        const old = await store.get(id).then((row) => row && open(row.blob)).catch(() => null);
-        const memory = {
-          created_at,
-          tags: x.tags,
-          description: x.description,
-          short: x.short,
-          status: "valid",
-          ...(vectors[i] && { embedding: vectors[i] }),
-          ...(old?.memory?.disabled && { disabled: old.memory.disabled }),
-          ...(x.kind === "read" && { account }),
-        };
-        if (x.kind === "read") {
-          // A read keeps its last result (digest, summary) when it is made again.
-          await save({ ...old, id, tool: x.tool, args: x.args, created_at: old?.created_at ?? created_at, memory, ready: toolkit });
-        } else {
-          const recipe = { ...x.recipe, ...(x.estimate && { estimate: x.estimate }), ready: toolkit };
-          await save({ ...(old && { summary: old.summary }), id, kind: "sync", tool: partsTool(recipe), args: {}, sync: recipe, created_at: old?.created_at ?? created_at, memory });
+      if (!result.successful) {
+        // No recipe from a failed call. A known one learns what the error says: gone, or denied.
+        const failure = classifyFailure(result.error);
+        if (existing && failure) {
+          await save({ ...existing, status: failure, checked_at: at });
+          return { id: rid, result, created: false, changed: false, unchanged: false, recipe_status: failure };
         }
-        made.push({ id, kind: x.kind, name: x.name, short: x.short, estimate: x.estimate ?? null, ...(x.kind === "read" && { ran: Boolean(old?.digest) }) });
+        return { result };
       }
-      return { toolkit, made };
-    },
-    setup_sync: (args) => api.setup_recipes(args),
 
-    // Live sync of any recipe in one call: its plan (made when it was saved, or now), a source, a first sync, then
-    // its triggers, or an hourly schedule when there are none (or they can not be turned on here).
-    // once: just sync it now, without triggers or a schedule.
-    async live_sync({ id, budgetMs = 60000, account, once = false }) {
-      if (!sources) throw new Error("Sources are not available here");
-      let record = await load(id);
-      if (record.kind !== "sync" && !record.live) {
-        const res = await composio.tools.execute(record.tool, { userId, arguments: record.args, ...(account && { connectedAccountId: await accountId(account) }), dangerouslySkipVersionCheck: true });
-        if (!res.successful) throw new Error(`${record.tool}: ${JSON.stringify(res.error).slice(0, 300)}`);
-        await planLive(record.id, res.data);
-        record = await load(record.id);
+      const digest = contentHash(result.data);
+      if (existing && existing.digest === digest && (existing.summary || !openrouterApiKey)) {
+        // Same result: nothing is described or embedded again.
+        const next = { ...existing, status: "fresh", checked_at: at };
+        if (existing.status !== "fresh" || existing.checked_at !== at) await save(next);
+        return { id: rid, result, created: false, changed: false, unchanged: true, pending: Promise.resolve(publicRecipe(next)), recipe_status: "fresh" };
       }
-      const plan = record.kind === "sync" ? record.sync : record.live;
-      const source = await sources.create({ template: record.id, scope: {}, account: account ?? plan.account, recipe_of: record.id });
-      const synced = await sources.sync({ id: source.id, budgetMs, reason: once ? "manual" : "live" });
-      if (once || synced.status === "failed") return synced;
-      // Triggers bring changes as they happen; the schedule is a safety net for what they miss (daily with
-      // triggers, the recipe's own pace without them).
-      let watched = null;
-      if (plan.triggers?.length) {
-        watched = await sources.watch({ id: source.id }).catch((e) => ({ watching: [], watch_error: e.message }));
-      }
-      const on = watched?.watching?.length > 0;
-      const scheduled = await sources.schedule({ id: source.id, every: on ? Math.max(plan.every ?? 1440, 1440) : (plan.every ?? 60) });
-      return { ...scheduled, watch_error: watched?.watch_error ?? scheduled.watch_error };
+      const created = !existing;
+      // A recipe of the old model (random id) re-keys here: its knowledge is kept when the result is the same.
+      const legacy = created && previous?.legacy && previous.tool === tool && canonicalJson(previous.args) === canonicalJson(args) ? previous : null;
+      const kept = legacy && legacy.summaryEmbedding && legacy.digest === createHash("sha256").update(JSON.stringify(result.data)).digest("hex") ? legacy : null;
+      const base = existing ?? {
+        id: rid,
+        tool,
+        args: canonicalArgs(args),
+        scope: { account: account ?? "", toolkit: toolkitOf(tool) },
+        created_at: legacy?.created_at ?? at,
+        trigger: legacy?.trigger ?? { active: false, spec: null, id: null },
+        ...(legacy?.disabled && { disabled: legacy.disabled }),
+        ...(kept && { title: kept.title, short: kept.short, summary: kept.summary, items: kept.items, summaryEmbedding: kept.summaryEmbedding, itemEmbeddings: kept.itemEmbeddings, source: kept.source, partial: kept.partial }),
+      };
+      const record = { ...base, digest, status: "fresh", updated_at: at, checked_at: at };
+      // The call as it ran: args kept as written (placeholders included), in canonical form so equal calls look equal.
+      await save(record);
+      if (legacy && legacy.id !== rid) await drop(legacy.id).catch(() => {});
+      const described = kept ? Promise.resolve(publicRecipe(record)) : remember(rid, digest, result.data, { created }).then(publicRecipe);
+      later(described);
+      return { id: rid, result, created, changed: !created, unchanged: false, pending: described.catch(() => null), recipe_status: "fresh" };
     },
 
-    // Saves a live sync recipe (see sync.js) after a test on real data passes; with id, replaces that recipe.
-    // It is found by search like any recipe and used with sources.create({ template: id }).
-    async save_live_sync({ id, recipe, description, short, tags = [], scope = {}, account }) {
-      if (!sources) throw new Error("Sources are not available here");
-      if (!description) throw new Error("description is required: what it syncs, in plain words");
-      const test = await sources.test({ recipe, scope, account });
-      // Triggers must exist and get their required config, or watching the source fails later.
-      for (const t of recipe.triggers ?? []) {
-        for (let cur = t; cur; cur = cur.fallback) {
-          const type = await composio.triggers.getType(cur.slug).catch(() => null);
-          if (!type) test.problems.push(`trigger ${cur.slug} does not exist (list_triggers)`);
-          else {
-            const missing = (type.config?.required ?? []).filter((k) => cur.config?.[k] == null);
-            if (missing.length) test.problems.push(`trigger ${cur.slug} needs config ${missing.join(", ")}`);
+    // Recipes: everything saved, one by one, or a prepared area.
+    recipes: {
+      // Every recipe (any status, without vectors), newest result first.
+      async list() {
+        return (await everyRecipe()).map(publicRecipe).sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
+      },
+      async get(id) {
+        return publicRecipe(await load(id));
+      },
+      // Deletes the recipe (and turns its trigger off).
+      async remove(id) {
+        const record = await load(id);
+        if (!record) return { id, removed: false };
+        if (record.trigger?.id && record.trigger.active) await composio.triggers.disable(record.trigger.id).catch(() => {});
+        await drop(id);
+        return { id, removed: true };
+      },
+      // Runs the saved call again: { recipe, changed, status }. status: fresh | gone | denied | failed (a failure that
+      // says nothing about the recipe: a timeout, a bad argument).
+      async recheck(id) {
+        const record = await loadOrThrow(id);
+        const out = await api.execute({ id, account: record.scope?.account || undefined });
+        if (out.pending) await out.pending;
+        const status = out.recipe_status ?? (out.result?.successful === false ? "failed" : "fresh");
+        return { recipe: publicRecipe(await load(id)), changed: Boolean(out.changed), status, ...(status === "failed" && { error: out.result?.error }) };
+      },
+      // Marks every recipe of a revoked / deleted connection (by account id, or by app) as denied: count.
+      async invalidateAccount({ account, toolkit } = {}) {
+        if (!account && !toolkit) throw new Error("Pass account or toolkit");
+        let count = 0;
+        for (const r of await everyRecipe()) {
+          if (account && r.scope?.account !== account) continue;
+          if (toolkit && r.scope?.toolkit !== toolkit) continue;
+          if (r.status === "denied") continue;
+          await save({ ...r, status: "denied", checked_at: now() });
+          count++;
+        }
+        return { count };
+      },
+      // The object is gone (deleted upstream): the recipe stays but is never retrieved as fresh.
+      async markGone(id) {
+        const record = await loadOrThrow(id);
+        await save({ ...record, status: "gone", checked_at: now() });
+        return publicRecipe(await load(id));
+      },
+      // The trigger spec a model picks for this recipe's app: { slug, config, label }, or null. Cached in
+      // record.trigger.spec (null too: it is asked once).
+      async recommendTrigger(id) {
+        const record = await loadOrThrow(id);
+        if (record.trigger?.spec) return record.trigger.spec;
+        if (record.trigger?.recommended) return null;
+        const spec = await pickTrigger({ toolkit: record.scope?.toolkit ?? toolkitOf(record.tool), tool: record.tool, args: record.args, title: record.title }).catch(() => null);
+        await save({ ...record, trigger: { active: false, id: null, ...record.trigger, spec: spec ?? null, recommended: true } });
+        return spec ?? null;
+      },
+      // Turns "keep this current" on (creates or re-enables the Composio trigger of its spec) or off.
+      async setTrigger({ id, active }) {
+        const record = await loadOrThrow(id);
+        const trigger = { spec: null, id: null, ...record.trigger };
+        if (active) {
+          if (!triggers) throw new Error("Triggers need the hosted backend: Composio events do not reach this process");
+          const spec = trigger.spec ?? (await api.recipes.recommendTrigger(id));
+          if (!spec) throw new Error("No trigger fits this recipe");
+          const fresh = await loadOrThrow(id);
+          trigger.spec = spec;
+          trigger.id = fresh.trigger?.id ?? null;
+          if (trigger.id && composio.triggers.enable) await composio.triggers.enable(trigger.id).catch(() => (trigger.id = null));
+          if (!trigger.id) {
+            const connected = record.scope?.account ? await accountId(record.scope.account, { strict: false }) : undefined;
+            trigger.id = (await composio.triggers.create(userId, spec.slug, { ...(connected && { connectedAccountId: connected }), triggerConfig: spec.config })).triggerId;
           }
+        } else if (trigger.id) {
+          await composio.triggers.disable(trigger.id).catch(() => {});
         }
-      }
-      if (test.problems?.length) test.ok = false;
-      if (!test.ok) return { saved: false, test };
-      if (id) {
-        const old = await load(id);
-        if (old.kind !== "sync") throw new Error(`${id} is not a live sync recipe`);
-      }
-      const record = { id: id ?? randomUUID(), kind: "sync", tool: recipe.list.tool, args: {}, sync: recipe, created_at: new Date().toISOString() };
-      await save(record, false);
-      await api.save_recipes({ recipes: [{ id: record.id, description, short, tags: [...new Set([recipe.toolkit, "sync", "синхронизация", ...tags])] }] });
-      return { saved: true, id: record.id, test };
-    },
-
-    // Composio triggers of an app, for a live sync recipe's triggers: [{ slug, description, config, required, payload }].
-    async trigger_types({ toolkit }) {
-      const list = await composio.triggers.listTypes({ toolkits: [toolkit], limit: 100 });
-      return (list.items ?? list).map((t) => ({
-        slug: t.slug,
-        description: String(t.description ?? "").split("\n")[0].slice(0, 160),
-        config: Object.fromEntries(Object.entries(t.config?.properties ?? {}).map(([k, v]) => [k, `${v.type ?? "any"} ${String(v.description ?? "").slice(0, 80)}`])),
-        required: t.config?.required ?? [],
-        payload: Object.keys(t.payload?.properties ?? {}),
-      }));
-    },
-
-    // Chunks of synced sources closest to a question: [{ source, source_title, title, url, text, score }].
-    async knowledge({ query, limit = 6, source }) {
-      if (!sources) return [];
-      const english = await translate(query);
-      const vector = await embed(english?.en ? `${query}\n${english.en}` : query).catch(() => null);
-      return sources.search({ vector, limit, source });
+        await save({ ...(await loadOrThrow(id)), trigger: { ...trigger, recommended: true, active: Boolean(active) } });
+        return publicRecipe(await load(id));
+      },
+      // The recipes a Composio trigger keeps current (an event names the trigger id).
+      async byTrigger({ triggerId }) {
+        return (await everyRecipe()).filter((r) => r.trigger?.id === triggerId).map(publicRecipe);
+      },
+      // A prepared area: minimal record, so events know it was prepared. No recipe of its own.
+      async prepareScope({ label, toolkit, account = "" }) {
+        if (!scopeStore) throw new Error("No scopes store");
+        const id = `scp_${createHash("sha256").update([workspaceId, toolkit, account, label].join("|")).digest("hex").slice(0, 24)}`;
+        const old = await scopeStore.get(id);
+        const record = { spec: null, ...old, id, label, toolkit, account };
+        await scopeStore.put(record);
+        return record;
+      },
+      async scopes() {
+        return scopeStore ? scopeStore.list() : [];
+      },
     },
 
     // Waits for recipes still being saved (the CLI calls it before exiting).
@@ -766,40 +589,14 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
       await Promise.all([...pending]);
     },
 
+    // Every tool of an app as Composio describes it ({ slug, description, inputParameters, tags }), cached for an hour:
+    // which of them write at a reference (refs.js writeHints).
+    catalog: ({ toolkit }) => toolsOf([toolkit]),
+
     // Full argument schema of a tool, for the agent.
     async schema(tool) {
       const t = await composio.tools.getRawComposioToolBySlug(tool);
       return { tool: t.slug, description: t.description, args: t.inputParameters };
-    },
-
-    // Save reusable recipes for calls: each description is embedded for search.
-    // `short` is a one-line description for lists and cards; the Markdown description is the full one.
-    // Use status "outdated" when a saved recipe no longer does what its description says.
-    async save_recipes({ recipes }) {
-      return Promise.all(
-        recipes.map(async ({ id, description, short, tags = [], status = "valid", auto }) => {
-          const record = await load(id); // an alias resolves to the recipe it was merged into
-          // A recipe is a call whose result is known: one with no summary (not written yet, or the result had nothing
-          // for its request) stays unlisted.
-          if (!record.memory && record.kind !== "sync" && (!record.summary || record.unrelated)) return { id: record.id, status: "not saved: no result summary" };
-          const created_at = new Date().toISOString();
-          const embedding = await embed(
-            `${description}\nresult: ${record.summary ?? ""}\ntags: ${tags.join(", ")}\ntool: ${record.tool}\nargs: ${JSON.stringify(record.args)}`,
-          );
-          const { disabled } = record.memory ?? {};
-          await save({ ...record, memory: { created_at, tags, description, ...(short && { short }), status, embedding, ...(auto && { auto }), ...(disabled && { disabled }) } });
-          return { id: record.id, created_at, tags, description, short, status };
-        }),
-      );
-    },
-
-    // Turn a recipe off (search and the agent skip it, it stays saved) or back on. disabled holds when it was turned off.
-    async disable_recipe({ id, disabled = true }) {
-      const record = await load(id);
-      if (!record?.memory) throw new Error(`No recipe ${id}`);
-      const { disabled: _, ...memory } = record.memory;
-      await save({ ...record, memory: disabled ? { ...memory, disabled: new Date().toISOString() } : memory });
-      return { id: record.id, disabled: Boolean(disabled) };
     },
   };
   return api;
@@ -825,13 +622,12 @@ function pack(record) {
   const out = { ...record };
   for (const key of VECTORS) if (out[key]) out[key] = toB64(out[key]);
   if (out.itemEmbeddings) out.itemEmbeddings = out.itemEmbeddings.map(toI8);
-  if (out.memory?.embedding) out.memory = { ...out.memory, embedding: toB64(out.memory.embedding) };
   return out;
 }
 function unpack(record) {
   for (const key of VECTORS) if (typeof record[key] === "string") record[key] = fromB64(record[key]);
   if (record.itemEmbeddings) record.itemEmbeddings = record.itemEmbeddings.map(fromI8);
-  if (typeof record.memory?.embedding === "string") record.memory.embedding = fromB64(record.memory.embedding);
+  if (typeof record.memory?.embedding === "string") record.memory.embedding = fromB64(record.memory.embedding); // legacy
   return record;
 }
 const toB64 = (v) => (typeof v === "string" ? v : Buffer.from(Float32Array.from(v).buffer).toString("base64"));
@@ -891,20 +687,6 @@ function readsOnly(slug, tags = []) {
   const s = slug.toUpperCase();
   if (/_(SEND|CREATE|DELETE|REMOVE|UPDATE|PATCH|POST|REPLY|FORWARD|MOVE|ARCHIVE|TRASH|ADD|INSERT|UPLOAD|SET|INVITE|MERGE|CLOSE|PUBLISH|SHARE|EXECUTE|RUN|START|STOP|CANCEL|WATCH|PIN|UNPIN|FOLLOW|UNFOLLOW|MODIFY|CLEAR|BATCH_UPDATE|IMPORT|COPY)(_|$)/.test(s)) return false;
   return /_(GET|LIST|FETCH|SEARCH|FIND|READ|RETRIEVE|QUERY|HISTORY|EXPORT|DOWNLOAD)(_|$)/.test(s);
-}
-
-// "### Fetch unread emails\n..." -> "Fetch unread emails".
-const titleOf = (md) => (String(md ?? "").split("\n").find((l) => l.trim()) ?? "").replace(/^#+\s*/, "").replace(/[`*_]/g, "").trim().slice(0, 80);
-
-// A recipe named by its result: "### Open pull requests of Genterai/genter-cli", what it holds, the call.
-function resultRecipe({ title, about }, tool) {
-  return `### ${title}\n\n${about ?? ""}\n\n\`${tool}\``.replace(/\n{3,}/g, "\n\n");
-}
-
-// A recipe in Markdown from Composio's generic tool description.
-function autoRecipe(info, tool, args) {
-  const keys = Object.keys(args).join(", ");
-  return `### ${info?.name || tool}\n\n\`${tool}\` · args: \`{${keys}}\`\n\n${(info?.description ?? "").trim()}`;
 }
 
 // AES-256-GCM. Blob = iv (12 bytes) + auth tag (16 bytes) + ciphertext, base64.
@@ -974,9 +756,6 @@ function cosine(a, b) {
   }
   return dot / Math.sqrt(na * nb);
 }
-
-// The call a sync recipe is named by: its first list (a repository's files for a project).
-const partsTool = (recipe) => (recipe.parts?.find((p) => p.read) ?? recipe.parts?.[0] ?? recipe)?.list?.tool ?? "SYNC";
 
 // Date placeholders of a recipe's args filled for this run: {{now}}, {{today}}, {{tomorrow}}, {{ago.7d}}, {{ahead.30d}}.
 function withDates(args) {

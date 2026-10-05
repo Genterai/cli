@@ -25,7 +25,12 @@ function fakeComposio(data, model) {
       if (reply === null) return new Response("provider error", { status: 502 }); // the model failed
       return json({ choices: [{ message: { content: JSON.stringify(reply) } }] });
     }
-    if (u.includes("/tools/execute/")) return json({ data, successful: true, error: null, log_id: "l1" });
+    if (u.includes("/tools/execute/")) {
+      const sent = JSON.parse(init.body);
+      const out = typeof data === "function" ? data(sent, u) : data;
+      if (out?.__error) return json({ data: {}, successful: false, error: out.__error, log_id: "l1" });
+      return json({ data: out, successful: true, error: null, log_id: "l1" });
+    }
     if (u.includes("/tools/")) return json({ slug: u.split("/").pop().split("?")[0], name: "Tool", description: "", toolkit: { slug: "github", name: "GitHub", logo: "" }, input_parameters: {}, output_parameters: {}, tags: [], version: "1", available_versions: ["1"], scopes: [], no_auth: false, is_deprecated: false, deprecated: { displayName: "", version: "1", available_versions: ["1"], is_deprecated: false, toolkit: { logo: "" } } });
     return json({ items: [] });
   };
@@ -35,11 +40,11 @@ function fakeComposio(data, model) {
 
 const memoryStore = () => {
   const rows = new Map();
-  return { rows, get: async (id) => rows.get(id), put: async (row) => rows.set(row.id, row), all: async () => [...rows.values()] };
+  return { rows, get: async (id) => rows.get(id), put: async (row) => rows.set(row.id, row), all: async () => [...rows.values()].filter((r) => r.remembered), remove: async (id) => rows.delete(id) };
 };
 
 describe("genter.execute", () => {
-  it("G1 a call that is saved as a recipe returns its result and an id (remember is not shadowed)", async () => {
+  it("G1 a call that is saved as a recipe returns its result and a deterministic id", async () => {
     const calls = fakeComposio({ commits: [{ sha: "c1", commit: { message: "m" } }] });
     const store = memoryStore();
     const deferred = [];
@@ -49,6 +54,8 @@ describe("genter.execute", () => {
     assert.deepEqual(out.result.data, { commits: [{ sha: "c1", commit: { message: "m" } }] });
     assert.ok(out.id);
     assert.ok(store.rows.has(out.id));
+    assert.match(out.id, /^rcp_[0-9a-f]{24}$/);
+    assert.equal(out.created, true);
     assert.ok(calls.some((u) => u.includes("/tools/execute/GITHUB_LIST_COMMITS")));
     await Promise.all(deferred);
   });
@@ -61,31 +68,6 @@ describe("genter.execute", () => {
     assert.equal(out.result.successful, true);
     assert.equal(out.id, undefined);
     assert.equal(store.rows.size, 0);
-  });
-
-  // "когда мне убираться" went to Gmail: ("уборка" OR "clean up") found only a GitHub notification, and it was saved
-  // as a recipe "Emails about cleaning" with that notification as its result.
-  it("G3 a result with nothing for the request it was made for is not kept as a recipe", async () => {
-    fakeComposio(
-      { messages: [{ subject: "Fix the recipe page (PR #39)", from: "notifications@github.com" }] },
-      {
-        chat: (prompt) => {
-          assert.match(prompt, /когда мне убираться/); // the request goes to the model that names the result
-          return { title: "Emails about cleaning", summary: "A GitHub notification that PR #39 was merged.", items: ['Email "Fix the recipe page (PR #39)"'], relevant: false };
-        },
-        vector: (t) => (t === "когда мне убираться" ? [1, 0, 0] : [0, 1, 0]), // nothing in it is close to the request
-      },
-    );
-    const store = memoryStore();
-    const deferred = [];
-    const genter = createGenter({ composioApiKey: "k", openrouterApiKey: "o", userId: "u", secret: "s", store, defer: (p) => deferred.push(p) });
-    const out = await genter.execute({ tool: "GMAIL_FETCH_EMAILS", args: { query: '("уборка" OR "clean up")' }, description: "### Emails about cleaning", task: "когда мне убираться" });
-    await Promise.all(deferred);
-    assert.equal(out.result.successful, true);
-    const row = store.rows.get(out.id);
-    assert.equal(row.remembered, false); // search never offers it
-    assert.ok(!(await genter.search({ query: "emails about cleaning" })).some((r) => r.id === out.id));
-    assert.equal((await genter.execute({ id: out.id, remember: false })).result.successful, true); // its id still runs
   });
 
   // "Уборка" was one of ten events in the summary of "Events of the past 7 days": as one vector it scored 0.20 against
@@ -162,36 +144,192 @@ describe("genter.execute", () => {
     assert.ok(recipe.score >= 0.25 && recipe.score < 0.45); // offered, but not so sure that tools are skipped
   });
 
-  // "List all upcoming calendar events" was saved with "No result summary yet": a recipe whose result is unknown
-  // is found by nothing and answers nothing.
-  it("G6 a call whose result could not be summarized is not kept as a recipe, nor made one by save_recipes", async () => {
-    const chats = [];
-    fakeComposio({ items: [{ summary: "Уборка" }] }, { chat: (prompt) => (chats.push(prompt), null), vector: () => [0, 1, 0] });
+});
+
+// Recipe = one successful call with fixed args + knowledge about its result: identity, upsert, change detection.
+describe("recipes", () => {
+  const SUMMARY = (n) => `Open pull requests: ${n}.`;
+  // A model that counts its calls: chat describes the result by how many items it holds, vectors are constant.
+  function counting() {
+    const seen = { chats: [], embeds: 0 };
+    const model = {
+      chat: (prompt) => {
+        seen.chats.push(prompt);
+        const n = (prompt.match(/"title"/g) ?? []).length - 1; // one is the reply format in the prompt
+        return { title: "Open pull requests of o/r", short: "Titles of open pull requests.", summary: SUMMARY(n), items: ["PR fix login"] };
+      },
+      vector: () => {
+        seen.embeds++;
+        return [1, 0, 0];
+      },
+    };
+    return { seen, model };
+  }
+  const prs = (...titles) => ({ items: titles.map((title, i) => ({ id: i + 1, title })) });
+  const setup = (data, extra = {}) => {
+    const { seen, model } = counting();
+    const calls = fakeComposio(data, model);
     const store = memoryStore();
-    const deferred = [];
-    const genter = createGenter({ composioApiKey: "k", openrouterApiKey: "o", userId: "u", secret: "s", store, defer: (p) => deferred.push(p) });
-    const out = await genter.execute({ tool: "GOOGLECALENDAR_EVENTS_LIST", args: { calendarId: "primary" }, description: "### Upcoming events", task: "когда уборка" });
-    const [saved] = await genter.save_recipes({ recipes: [{ id: out.id, description: "### Upcoming events" }] }); // the agent, before the summary
-    await Promise.all(deferred);
-    assert.equal(chats.length, 2); // tried twice
-    assert.equal(saved.status, "not saved: no result summary");
-    assert.equal(store.rows.get(out.id).remembered, false);
+    const genter = createGenter({ composioApiKey: "k", openrouterApiKey: "o", userId: "u", secret: "s", store, ...extra });
+    return { seen, calls, store, genter };
+  };
+  const run = async (genter, input) => {
+    const out = await genter.execute({ tool: "GITHUB_LIST_PULL_REQUESTS", args: { owner: "o", repo: "r" }, ...input });
+    await out.pending;
+    return out;
+  };
+  const wait = (ms = 5) => new Promise((r) => setTimeout(r, ms));
+
+  it("R1 the same call upserts one record, whatever the order of its args", async () => {
+    const { genter, store } = setup(prs("fix login"));
+    const a = await run(genter, { args: { owner: "o", repo: "r", state: "" } }); // "" is no argument
+    const b = await run(genter, { args: { repo: "r", owner: "o" } });
+    assert.equal(a.id, b.id);
+    assert.equal(store.rows.size, 1);
+    assert.equal(a.created, true);
+    assert.equal(b.created, false);
+    assert.equal(b.unchanged, true);
+    const record = await genter.recipes.get(a.id);
+    assert.deepEqual(record.args, { owner: "o", repo: "r" });
+    assert.equal(record.status, "fresh");
+    assert.equal(record.title, "Open pull requests of o/r");
+    assert.equal(record.summary, SUMMARY(1));
+    assert.equal(record.summaryEmbedding, undefined); // vectors never leave the engine
   });
 
-  // gpt-oss-120b once called 40 events with «Уборка» unrelated to "когда мне убираться": the recipe would be lost.
-  it("G7 a result the model calls unrelated is kept when one of its lines is close to the request", async () => {
-    fakeComposio(
-      { items: [{ id: "e1", summary: "Йога" }, { id: "e2", summary: "Уборка" }] },
-      {
-        chat: () => ({ title: "Events", summary: "Yoga and other events.", items: [], relevant: false }),
-        vector: (t) => (t === "когда мне убираться" || t.startsWith("Уборка") ? [1, 0, 0] : [0, 1, 0]),
-      },
-    );
-    const store = memoryStore();
-    const deferred = [];
-    const genter = createGenter({ composioApiKey: "k", openrouterApiKey: "o", userId: "u", secret: "s", store, defer: (p) => deferred.push(p) });
-    const out = await genter.execute({ tool: "GOOGLECALENDAR_EVENTS_LIST", args: { calendarId: "primary" }, task: "когда мне убираться" });
-    await Promise.all(deferred);
-    assert.equal(store.rows.get(out.id).remembered, true);
+  it("R2 an unchanged result calls neither the describing model nor embeddings and only bumps checked_at", async () => {
+    const { genter, seen, calls } = setup(prs("fix login"));
+    const first = await run(genter, {});
+    const before = await genter.recipes.get(first.id);
+    const chats = seen.chats.length;
+    const embeds = calls.filter((u) => u.includes("/embeddings")).length;
+    assert.ok(chats >= 1 && embeds >= 1);
+    await wait();
+    const second = await run(genter, {});
+    assert.equal(second.unchanged, true);
+    assert.equal(second.changed, false);
+    assert.equal(seen.chats.length, chats);
+    assert.equal(calls.filter((u) => u.includes("/embeddings")).length, embeds);
+    const after = await genter.recipes.get(first.id);
+    assert.ok(after.checked_at > before.checked_at);
+    assert.equal(after.updated_at, before.updated_at); // the result did not change
+    assert.equal(after.summary, before.summary);
+    assert.equal(after.digest, before.digest);
+  });
+
+  it("R3 a changed result regenerates the same recipe", async () => {
+    let titles = ["fix login"];
+    const { genter, seen } = setup(() => prs(...titles));
+    const first = await run(genter, {});
+    const before = await genter.recipes.get(first.id);
+    titles = ["fix login", "add billing"];
+    await wait();
+    const second = await run(genter, {});
+    assert.equal(second.id, first.id);
+    assert.equal(second.changed, true);
+    assert.equal(second.created, false);
+    const after = await genter.recipes.get(first.id);
+    assert.equal(after.summary, SUMMARY(2));
+    assert.notEqual(after.digest, before.digest);
+    assert.ok(after.updated_at > before.updated_at);
+    assert.equal((await genter.recipes.list()).length, 1);
+    assert.equal(seen.chats.length, 2);
+  });
+
+  it("R4 a failed call creates no recipe", async () => {
+    const { genter, store } = setup(() => ({ __error: "Something broke" }));
+    const out = await genter.execute({ tool: "GITHUB_LIST_PULL_REQUESTS", args: { owner: "o", repo: "r" } });
+    assert.equal(out.result.successful, false);
+    assert.equal(out.id, undefined);
+    assert.equal(store.rows.size, 0);
+  });
+
+  it("R5 a failure on an existing recipe marks it gone or denied, and search stops offering it", async () => {
+    let failure = null;
+    const { genter } = setup(() => failure ?? prs("fix login"));
+    const gone = await run(genter, { args: { owner: "o", repo: "deleted" } });
+    const denied = await run(genter, { args: { owner: "o", repo: "private" } });
+    assert.ok(await genter.search({ query: "open pull requests" }).then((r) => r.some((x) => x.id === gone.id) && r.some((x) => x.id === denied.id)));
+
+    failure = { __error: "Not Found (404)" };
+    const a = await genter.execute({ id: gone.id });
+    assert.equal(a.recipe_status, "gone");
+    failure = { __error: "403 Forbidden: Resource not accessible" };
+    const b = await genter.execute({ id: denied.id });
+    assert.equal(b.recipe_status, "denied");
+    failure = { __error: "request timed out" };
+    const c = await genter.execute({ id: denied.id });
+    assert.equal(c.recipe_status, undefined); // a timeout says nothing about the recipe
+
+    assert.equal((await genter.recipes.get(gone.id)).status, "gone");
+    assert.equal((await genter.recipes.get(denied.id)).status, "denied");
+    const found = await genter.search({ query: "open pull requests" });
+    assert.ok(!found.some((x) => x.id === gone.id || x.id === denied.id));
+
+    failure = null; // the object is back: the same call makes the recipe fresh again
+    const back = await genter.execute({ id: gone.id });
+    assert.equal(back.recipe_status, "fresh");
+    assert.equal((await genter.recipes.get(gone.id)).status, "fresh");
+  });
+
+  it("R6 two accounts of one app are two recipes, and revoking one denies only its own", async () => {
+    const { genter } = setup(prs("fix login"));
+    const a = await run(genter, { account: "ca_work" });
+    const b = await run(genter, { account: "ca_home" });
+    assert.notEqual(a.id, b.id);
+    assert.equal((await genter.recipes.list()).length, 2);
+    assert.equal((await genter.recipes.get(a.id)).scope.account, "ca_work");
+    assert.deepEqual(await genter.recipes.invalidateAccount({ account: "ca_work" }), { count: 1 });
+    assert.equal((await genter.recipes.get(a.id)).status, "denied");
+    assert.equal((await genter.recipes.get(b.id)).status, "fresh");
+    const found = await genter.search({ query: "open pull requests" });
+    assert.deepEqual(found.filter((x) => x.id).map((x) => x.id), [b.id]);
+  });
+
+  it("R7 a page of a bigger result is partial and its summary is asked to claim only what came back", async () => {
+    const { genter, seen } = setup({ items: [{ title: "a" }], next_page_token: "abc" });
+    const out = await run(genter, {});
+    assert.equal((await genter.recipes.get(out.id)).partial, true);
+    assert.match(seen.chats[0], /only a PAGE or was cut off/);
+    assert.match(seen.chats[0], /claim ONLY what was returned/);
+  });
+
+  it("R8 search returns fresh recipes with their calls, summaries and times, not tool descriptions", async () => {
+    const { genter, seen } = setup(prs("fix login"));
+    const out = await run(genter, {});
+    const [hit] = await genter.search({ query: "open pull requests" });
+    assert.deepEqual(Object.keys(hit).sort(), ["args", "checked_at", "id", "matched", "score", "short", "status", "summary", "title", "tool", "trigger", "updated_at"].filter((k) => k in hit).sort());
+    assert.equal(hit.id, out.id);
+    assert.deepEqual(hit.args, { owner: "o", repo: "r" });
+    assert.deepEqual(hit.trigger, { active: false });
+    assert.equal(hit.status, "fresh");
+    assert.ok(seen.chats.every((p) => !/Composio tool description/.test(p)));
+  });
+
+  it("R9 recheck runs the saved call again; remove, markGone, triggers and scopes", async () => {
+    const scopes = new Map();
+    const scopeStore = { get: async (id) => scopes.get(id), put: async (r) => scopes.set(r.id, r), list: async () => [...scopes.values()], remove: async (id) => scopes.delete(id) };
+    let titles = ["fix login"];
+    const { genter } = setup(() => prs(...titles), { scopes: scopeStore });
+    const out = await run(genter, {});
+    let again = await genter.recipes.recheck(out.id);
+    assert.equal(again.changed, false);
+    assert.equal(again.status, "fresh");
+    titles = ["fix login", "x"];
+    again = await genter.recipes.recheck(out.id);
+    assert.equal(again.changed, true);
+    assert.equal(again.recipe.summary, SUMMARY(2));
+
+    assert.equal(await genter.recipes.recommendTrigger(out.id), null); // no trigger types: asked once, cached as null
+    assert.equal((await genter.recipes.get(out.id)).trigger.spec, null);
+    await assert.rejects(genter.recipes.setTrigger({ id: out.id, active: true }), /hosted backend/);
+    assert.deepEqual(await genter.recipes.byTrigger({ triggerId: "t1" }), []);
+
+    assert.equal((await genter.recipes.markGone(out.id)).status, "gone");
+    const scope = await genter.recipes.prepareScope({ label: "Entire repository o/r", toolkit: "github", account: "ca_1" });
+    assert.match(scope.id, /^scp_/);
+    assert.deepEqual((await genter.recipes.scopes()).map((x) => x.label), ["Entire repository o/r"]);
+    assert.deepEqual(await genter.recipes.remove(out.id), { id: out.id, removed: true });
+    assert.deepEqual(await genter.recipes.list(), []);
   });
 });

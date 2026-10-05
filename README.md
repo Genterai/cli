@@ -1,42 +1,44 @@
 # genter
 
-Composio tools with saved call recipes. An AI agent finds a tool and runs it; every successful call is saved as a recipe: what it does and with which args.
-Each recipe also keeps a short summary of what the call returned (topics, names, ids to open it again),
-so `search` finds a past result by its topic, e.g. an email subject, and the agent knows where to dig.
+Composio tools with saved call recipes. An AI agent finds a tool and runs it; every successful call is remembered as a **Recipe**.
 
-On top of that, an agent does whole tasks fast: before its first LLM call it already has the matching recipes,
-candidate tools with compact arg schemas and the connected apps, so a known task is one tool call, and a result summary
-can answer a question with no call at all. The hosted MCP server exposes only the agent.
+> A Recipe is one successful tool call with fixed, concrete arguments, plus what it actually returned.
+> Semantic memory finds the right call again; the real call is re-executed to keep data current, and the Recipe
+> changes only when its result changes.
+
+A Recipe is not a workflow, a chain or a sync job: an agent that makes 15 calls makes up to 15 Recipes. Orchestration,
+fan-out and reasoning belong to the agent.
 
 ```
-run          → the agent does a task in your apps, recipes first
-find         → read-only agent: answers from past results, reads live data if needed
+run          → the agent does a task in your apps
+find         → read-only agent: picks the calls from memory, reads live data
 continue     → answer a run's question or give a follow-up
 write        → write where an answer's reference [n] (or a link) points: a file, an issue, a thread...
 
-search       → saved recipes first, Composio tools if none is valid
-execute      → runs a tool (or repeats a recipe by id) and saves it as a recipe; description + tags make it easier to find
-save_recipes → improves descriptions of several recipes at once; each description is embedded for search
+search       → which saved call to make (by what its result meant), Composio tools if none fits
+execute      → runs the REAL tool (or repeats a recipe by id) and saves / updates its recipe
+recipes      → list saved recipes; recheck_recipe runs one again; remove_recipe deletes it
 ```
 
-A recipe is one exact call with no parameters, named by its result: "Open pull requests of Genterai/genter-cli",
-then what the result holds. Without a description, `execute` names it from the result itself (the same model call that
-writes the summary), so every step, intermediate ones too, is found next time. The same tool + args is not saved twice.
-Failed calls are not recorded. Dates in args can stay placeholders filled at each run: `{{today}}`, `{{tomorrow}}`,
-`{{now}}`, `{{ago.7d}}`, `{{ahead.30d}}`.
-If a recipe stops matching its description, the agent saves it with `status: "outdated"` and says why.
-Search then falls back to Composio again.
+**Identity.** `id = "rcp_" + sha256(workspaceId | account | tool | canonicalArgs)[0..24]` (`src/recipe.js`). The same call
+upserts the same Recipe; two connected accounts never share one. Dates in args stay placeholders filled at each run:
+`{{today}}`, `{{tomorrow}}`, `{{now}}`, `{{ago.7d}}`, `{{ahead.30d}}`.
 
-Recipes are Markdown, named by the result of their call:
+**Execute.** The tool always runs. A failed call creates nothing (a known recipe whose error says "not found" is marked
+`gone`, "forbidden / revoked" `denied`; neither is found by search again). A successful result is hashed
+(`contentHash`: volatile keys dropped, base64 file content decoded, whitespace normalized):
 
-```md
-### Unread emails in the inbox
-Unread emails in the inbox, newest first: subject, sender, date and text.
-`GMAIL_FETCH_EMAILS`
-```
+- no recipe yet: it is described (title, short, a semantic summary, one line per item) and embedded;
+- same hash: nothing is described or embedded, only `checked_at` moves;
+- other hash: the same recipe is described and embedded again (`updated_at` = when the result last changed).
 
-plus `short`, one line for compact lists (the Markdown is shown when a recipe is opened), and tags in English and Russian.
-The MCP server sends these rules to clients as `instructions`.
+A result that is a page or cut off (next-page token, `has_more`, `truncated`) is marked `partial`; its summary only claims
+what was returned. Retrieval embeds the result summary and items, never the tool's description. A recipe's summary says
+which call to make, not the current value: the agent always executes again.
+
+Recipe record (stored encrypted, raw results never): `{id, tool, args, scope:{account, toolkit}, title, short, summary, items,
+digest, partial, source:{app, path[], url}, created_at, updated_at, checked_at, status: fresh|stale|gone|denied,
+trigger:{active, spec, id}}`. Records of the older model (`memory`, `alias`, `kind: "sync"`) are normalized on read.
 
 ## Install
 
@@ -55,18 +57,17 @@ Without it, `search` uses Composio only.
 | --- | --- | --- |
 | `register_tool` | `{toolkit, alias?}` | `{toolkit, connect_url, connection_id}` — open the URL to connect the app; an app can be connected several times |
 | `login` | `{}` | `{user_id, connected: [{toolkit, account, alias, status}]}` |
-| `search` | `{query, limit?}` | `[{id, tool, args, description, short, summary, when, tags, status}]` |
-| `execute` | `{tool, args}` or `{id, args?}`, optional `{account, description, short, tags}` | `{id, result, summary, saved?, note?}` |
-| `save_recipes` | `{recipes: [{id, description, short?, tags?, status?}]}` | `[{id, created_at, tags, description, short, status}]` |
-| `disable_recipe` | `{id, disabled?}` | `{id, disabled}` — a disabled recipe stays saved but search and the agent skip it; `disabled: false` turns it back on |
+| `search` | `{query, limit?}` | `[{id, tool, args, title, short, summary, matched?, score, status, updated_at, checked_at, trigger:{active}}]` (fresh recipes only), then Composio tools (`id: null`) |
+| `execute` | `{tool, args}` or `{id, args?}`, optional `{account}` | `{id, result, created, changed, unchanged, recipe_status}` |
+| `recipes` | `{}` | every recipe without vectors |
+| `recheck_recipe` | `{id}` | `{recipe, changed, status}` |
+| `remove_recipe` | `{id}` | `{id, removed}` |
 
 ```bash
 genter register_tool '{"toolkit":"gmail"}'
 genter search '{"query":"unread emails from today"}'
-genter execute '{"tool":"GMAIL_FETCH_EMAILS","args":{"query":"is:unread newer_than:1d"},
-  "description":"### Fetch unread emails\n`GMAIL_FETCH_EMAILS` · args: `{query, max_results?}`\nReturns a list of messages. For other filters override `query`.",
-  "short":"Fetch unread emails from the inbox",
-  "tags":["gmail","inbox","почта","письма"]}'
+genter execute '{"tool":"GMAIL_FETCH_EMAILS","args":{"query":"is:unread newer_than:1d"}}'
+genter recipes '{}'
 ```
 
 ## Agent
@@ -79,14 +80,16 @@ genter continue '{"run_id":"...","message":"use my work account"}'
 
 A run ends `done`, `needs_input` (a question), `needs_connection` (a connect link) or `failed`; `continue` picks it up.
 A `done` answer cites its sources as `[n]` and comes with `references` (see below).
-`find` runs only tools that read (by Composio's hint or the verb in the slug). New calls are saved as recipes with
-the agent's description, so the next run finds them. The model is `AGENT_MODEL` on OpenRouter, default `openai/gpt-oss-120b` (see Models).
+`find` runs only tools that read (by Composio's hint or the verb in the slug). Every successful call is saved as a recipe
+automatically; each step of the result says `recipe: {id, created, changed}` and the result lists `saved` and `recipes_used`. The model is `AGENT_MODEL` on OpenRouter, default `openai/gpt-oss-120b` (see Models).
 
 ```js
 import { createAgent } from "genter-cli/agent";
 import { agentTools, agentInstructions, agentResultText } from "genter-cli/tools"; // MCP definitions
 
 const agent = createAgent({ genter, openrouterApiKey, secret, userId, runs }); // runs: get(id), put({id, blob})
+// modes: "run", "find" (read-only), "prepare" (fan out reads over an area with execute_many, finish with counts),
+// "event" (task text carries the event and the affected recipes: recheck_recipe / forget_recipe)
 const out = await agent.start({ task: "my meetings tomorrow", mode: "find" });
 await agent.send({ run_id: out.run_id, message: "only the work calendar" });
 ```
@@ -117,7 +120,7 @@ provider that answers first (`OPENROUTER_SORT=latency`). Set `AGENT_MODEL`, `AGE
 | `google/gemma-4-31b-it` | 5/7: translation and summary time out | 7.2–8.7 s | 62 s | $0.0235 |
 
 Cheaper ones (`inclusionai/ling-3.0-flash`, `qwen/qwen3.7-flash`, `deepseek/deepseek-v4-flash`, `inception/mercury-2.5`)
-miss the 6 s translation or the summary, and `gpt-oss-120b` sorted by price breaks its JSON. The live sync builder
+miss the 6 s translation or the summary, and `gpt-oss-120b` sorted by price breaks its JSON. Trigger recommendation
 keeps `BUILDER_MODEL` (default `google/gemma-4-31b-it`).
 
 ## References and writes
@@ -197,77 +200,29 @@ Composio schemas (`test/fixtures/catalogues.json`: Linear, Slack, Jira, Trello, 
 | P1–P4 | agent, a task of several parts on a recipe of one | `search_tools` gets Composio tools even when a recipe fits; `read_file` with a commit's ref + path reads that path; `""` or the app's name is no account; an execute with no tool moves to the strong model; an empty ending is asked for the answer once |
 | T1 | tool ranking | "the" and other empty words do not pull `..._FOR_THE_AUTHENTICATED_USER` tools up |
 | N1 | no answer | an empty ending is asked once on the strong model; empty again is a failure naming what ran, never "Done." with references |
-| G1–G2 | `genter.execute` itself (Composio answered over fetch) | a saved call returns its result and recipe id; `remember: false` saves nothing |
+| G1–G2, G4–G5 | `genter.execute` itself (Composio answered over fetch) | a saved call returns its result and a deterministic id; `remember: false` saves nothing; a line of a result finds its recipe |
+| R1–R9 | recipes | one record per call whatever the arg order; an unchanged result calls no model and only bumps `checked_at`; a changed one regenerates the same recipe; a failed call creates nothing; gone / denied are never offered; two accounts, two recipes; partial pages; recheck, triggers, scopes |
+| N2–N7 | recipes in the agent | `recipe: {id, created, changed}` on steps, `saved`, `recipes_used`; the prompt; `suggest_prepare`; `execute_many` in a prepare task; event tasks |
+| recipe.test.js | pure `src/recipe.js` | canonical args, ids, content hash, partial detection, failure classes, provenance, legacy records |
 | A8–A10 | refused | a number without its run, an unknown number, a tool of another app, a viewer; `GENTER_WRITE` only where writing is on |
 
-## Ready recipes
+## Preparing an area, triggers
 
-Popular apps get their recipes the moment an account is connected, with no model and no sample calls (`src/ready.js`,
-`setup_recipes`): GitHub lists the account's repositories once and makes a **sync recipe per repository** (the whole
-project: its description, every file on the default branch, every issue and pull request) plus reads such as
-"Issues and pull requests assigned to me" and "Recent commits of <repo>"; Gmail, Google Calendar, Google Tasks and Notion
-get a sync recipe for the account and everyday reads ("Unread emails in the inbox", "Today's events"). Each read runs
-once, so its result is known. Making them again updates the same recipes. Other apps get reads planned by a model from
-the app's read tools in one call (`builder.intents`), run once each.
+If the agent finds a finite area (a repository's files, a Drive folder, a channel) it calls `suggest_prepare({label, why})`
+(no side effects; the result carries `suggestions: [{label}]`). A `prepare` run then fans out reads with
+`execute_many` (up to 100 calls, 4 at a time); each success is an ordinary atomic recipe. `genter.recipes.prepareScope`
+keeps a minimal area record in the optional `scopes` store so events know the area was prepared.
 
-```bash
-genter setup_recipes '{"toolkit":"github"}'
-genter live_sync '{"id":"sync_...","once":true}'   # Run now: keep the whole project as embeddings
-genter knowledge '{"query":"how are recipes deduplicated?"}'
-```
-
-A first sync of a repository downloads its archive once (`bulk`) instead of reading files one by one, and embeds chunks
-in batches; later syncs read only changed files and list issues `{{since}}` the last one. A sync cut short continues
-on the next call or the scheduler a minute later.
-
-## Sources
-
-A source keeps an app's content as searchable knowledge: the files of a GitHub repo, the pages shared with Genter in Notion.
-The agent sees the closest chunks before its first step, so a question about a repo is answered from it right away.
-
-```bash
-genter add_source '{"template":"github","scope":{"owner":"Genterai","repo":"genter-cli"},"depth":"full"}'
-genter sync_source '{"id":"src_..."}'
-genter knowledge '{"query":"how are recipes deduplicated?"}'
-genter run '{"task":"remember the Notion pages about the roadmap, summaries only"}'
-```
-
-The sync engine knows no connector. A **live sync recipe** (plain JSON, `src/sync.js`) maps an app's tools onto roles:
-`list` (pages of items with an id and a version), `read` (an item's text), and optional `choices` (what the user can pick:
-their repos, top-level pages), `setup` (fills scope fields, e.g. the default branch) and `triggers` (Composio events that
-mean "changed"; an event syncs the source). GitHub files and Notion pages are built in. For anything else the agent's
-`build_live_sync` runs a builder (`src/builder.js`, `BUILDER_MODEL`, default `google/gemma-4-31b-it`) that explores the app's
-tools with real sample calls, writes the recipe, tests it on real data (`test_live_sync`) and saves it like any recipe
-(`save_live_sync`), so it is found by search and reused:
-
-```bash
-genter run '{"task":"remember all pull requests of Genterai/genter-backend and keep them up to date"}'
-```
-
-A recipe can have `parts` (several lists: files, issues, description), fixed `vars` instead of scope fields (so it has
-no parameters), `fields` (an item as plain text of these paths) and a list given only as a call: its items, ids,
-versions and pages are found in the first real response.
-
-Each source has its own filters for any app: `include` / `exclude` regexes over id and title, `maxItems`.
-Triggers need a webhook receiver, so they are on only where `createGenter` gets `triggers: true` (the hosted backend).
-A sync lists everything, reads only the items whose version changed and drops the ones that are gone: the first sync
-is a full one, every next one is incremental, and a sync cut short by its time budget continues next time.
-
-| depth | what is kept | cost |
-| --- | --- | --- |
-| `titles` | names, paths and links; nothing is read | one list call per page |
-| `summary` | a 2-4 sentence summary per item | a read and a model call per changed item |
-| `full` | the whole text in chunks (default) | a read and embeddings per changed item |
-
-Changing the depth re-processes the items on the next sync. Chunks are encrypted like everything else.
-Limits: 10000 items and 100 list pages per source, 80 chunks per item; GitHub skips binaries, lockfiles, `node_modules`
-and files over 300 KB.
+A trigger keeps a recipe current: `recipes.recommendTrigger(id)` lets a model pick a Composio trigger spec for the
+recipe's app (cached in `trigger.spec`), `recipes.setTrigger({id, active})` creates or disables it (only where
+`createGenter` gets `triggers: true`, the hosted backend), `recipes.byTrigger({triggerId})` finds the recipes an event
+concerns; the backend wakes the agent in `event` mode with them.
 
 ## Data
 
-- Raw tool results are never stored, only a 1-3 sentence summary written by an LLM through OpenRouter
-  (`SUMMARY_MODEL`, default `openai/gpt-oss-120b`). The same call with the same result is not saved twice.
-- Every record (tool, args, description, summary, embedding) is encrypted with AES-256-GCM before it is stored.
+- Raw tool results are never stored, only a digest, a semantic summary and item lines written by an LLM through OpenRouter
+  (`SUMMARY_MODEL`, default `openai/gpt-oss-120b`). The same call upserts the same recipe; an unchanged result is not described again.
+- Every record (tool, args, summary, items, embeddings) is encrypted with AES-256-GCM before it is stored.
   The store only sees `{id, remembered, blob}`. The CLI keeps its key in `~/.genter/config.json` and data in `~/.genter/calls.json`.
 - Agent runs are encrypted the same way (`~/.genter/runs.json`). Tool results in them are replaced by their summaries
   before they are stored; a follow-up re-runs the recipe when it needs details.
@@ -283,10 +238,12 @@ The agent tools (`GENTER_RUN_TASK`, `GENTER_FIND`, `GENTER_CONTINUE_TASK`, and f
 import { createGenter } from "genter-cli";
 import { tools } from "genter-cli/tools";
 
-const genter = createGenter({ composioApiKey, openrouterApiKey, userId, secret, store, knowledge }); // store: get(id), put(row), all()
-// knowledge (optional, for sources): getSource, putSource, deleteSource, sources, items, putItems, deleteItems, allItems
-// onSync(source, { reason }) (optional): called after every sync run (manual, trigger, schedule, live), e.g. to log it
+const genter = createGenter({ composioApiKey, openrouterApiKey, userId, secret, store }); // store: get(id), put(row), all(), remove?(id)
+// workspaceId (default userId), scopes (get/put/list/remove), triggers: true, allow(record), defer(promise)
 await genter.search({ query: "send a slack message" });
+const out = await genter.execute({ tool: "GMAIL_FETCH_EMAILS", args: { query: "is:unread" } }); // { id, result, created, changed, unchanged, pending }
+await genter.recipes.list(); // get(id), remove(id), recheck(id), invalidateAccount({account|toolkit}), markGone(id),
+                             // recommendTrigger(id), setTrigger({id, active}), byTrigger({triggerId}), prepareScope(...), scopes()
 ```
 
 ## License

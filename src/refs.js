@@ -1,4 +1,4 @@
-import { idKeys, inferList, locatorArgs, pick } from "./sync.js";
+import { idKeys, inferList, locatorArgs, pick } from "./shape.js";
 
 // References: where the facts of an answer come from, and how to write back there.
 // A reference is { n, app, kind, title, url?, path?, where, via, source?, tool?, score? }:
