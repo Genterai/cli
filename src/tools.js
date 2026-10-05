@@ -199,6 +199,7 @@ export function agentResultText(out, { write = false } = {}) {
     status: out.status,
     ...(out.connect_url && { connect_url: out.connect_url }),
     ...(out.steps?.length && { steps: out.steps.map((s) => `${s.ok ? "✓" : "✗"} ${s.tool}${s.recipe ? " (recipe)" : ""}`) }),
+    ...(out.suggestions?.length && { suggestions: out.suggestions }),
     ...(out.credits != null && { credits: out.credits }),
     ...(out.usage?.ms != null && { ms: out.usage.ms }),
     ...(next && { next }),
