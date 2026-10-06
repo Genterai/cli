@@ -3,6 +3,7 @@ import { Composio } from "@composio/core";
 import { addMcpServer, isCustomToolkit, mcpUrl } from "./mcp.js";
 import { canonicalArgs, canonicalJson, classifyFailure, contentHash, isPartial, normalizeLegacy, publicRecipe, recipeId, sourceOf } from "./recipe.js";
 import { fill, inferList, pick } from "./shape.js";
+import { addIntent, chunkCall, fileCall, isSkillTool, LIMITS as SKILL_LIMITS, SCRIPT_NOTE, SKILL_TOOLS } from "./skills.js";
 import { crawl, forgetPage, readPage, siteUrl, underSite } from "./web.js";
 
 // Genter = Composio + recipes of past calls.
@@ -18,7 +19,11 @@ import { crawl, forgetPage, readPage, siteUrl, underSite } from "./web.js";
 // workspaceId: part of every recipe id (default: userId).
 // triggers: true only where Composio's webhook reaches this code (the hosted backend); the CLI can not receive events.
 // allow(record) (optional): false hides a recipe from search (the backend: connections the person may use).
-export function createGenter({ composioApiKey, openrouterApiKey, userId, workspaceId, secret, store, scopes: scopeStore, triggers = false, defer, allow, minScore = 0.25, strongScore = 0.45 }) {
+// skills (optional): the host's store of skills (skills.js, specs/skills.md): { list(): [{ id, name, version, embedding, chunks:
+// [{ id, path, title, headings, refs, see, embedding }], files: [{ path, kind, mime, size }] }], get(id), text(id, path),
+// file(id, path): { text } | { url } }. It lets search offer the pieces of skills and lets two local tools read them:
+// SKILL_READ_CHUNK and SKILL_GET_FILE. A skill is never one Recipe; each read is one call, saved like any other.
+export function createGenter({ composioApiKey, openrouterApiKey, userId, workspaceId, secret, store, scopes: scopeStore, skills, triggers = false, defer, allow, minScore = 0.25, strongScore = 0.45 }) {
   if (!secret) throw new Error("secret is required to encrypt stored calls");
   workspaceId ??= userId;
   const composio = new Composio({ apiKey: composioApiKey });
@@ -179,7 +184,61 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
   }
 
   // Tools that run here, not in Composio: a website's page (web.js).
-  const LOCAL = { WEBSITE_READ_PAGE: readPage };
+  // Skills (skills.js): reading one piece of a skill and handing over one file of it. Genter never runs a script.
+  const skillTools = skills && {
+    // A call fixed to a version: a skill that changed since is "not found" for it, so the recipe goes gone (outdated).
+    async [SKILL_TOOLS.chunk]({ skill, version, chunk } = {}) {
+      const s = await skills.get(skill);
+      if (!s) return { successful: false, error: `Skill not found: ${skill} (deleted)`, data: null };
+      if (s.version !== version) return { successful: false, error: `Skill "${s.name}" at version ${version} not found: it is now at ${s.version}. This recipe is outdated`, data: null };
+      const c = s.chunks.find((x) => x.id === chunk);
+      if (!c) return { successful: false, error: `Section not found in skill "${s.name}": ${chunk}`, data: null };
+      const text = (await skills.text(skill, c.path)) ?? "";
+      const call = (tool, args) => ({ tool, args, id: recipeId({ workspaceId, scope: "", tool, args }) });
+      const kinds = new Map(s.files.map((f) => [f.path, f]));
+      return {
+        successful: true,
+        data: {
+          skill: { id: s.id, name: s.name, version: s.version },
+          section: { id: c.id, path: c.path, title: c.title, headings: c.headings },
+          text: text.slice(c.start, c.end).trim(),
+          // Files this section points to, one call each: the agent takes them with its next calls. Code is labelled as such.
+          related: (c.refs ?? []).map((path) => {
+            const f = kinds.get(path);
+            return { path, kind: f?.kind ?? "artifact", ...(f?.kind === "script" && { executable_code: true, note: SCRIPT_NOTE }), size: f?.size, get: call(SKILL_TOOLS.file, fileCall(skill, version, path).args) };
+          }),
+          see_also: (c.see ?? []).map((id) => {
+            const o = s.chunks.find((x) => x.id === id);
+            return { section: id, title: o?.title, get: call(SKILL_TOOLS.chunk, chunkCall(skill, version, id).args) };
+          }),
+        },
+      };
+    },
+    // One file as it is: text inline when small, a link into the host's storage when large or binary; scripts carry the
+    // "executable code" label and are never run.
+    async [SKILL_TOOLS.file]({ skill, version, path } = {}) {
+      const s = await skills.get(skill);
+      if (!s) return { successful: false, error: `Skill not found: ${skill} (deleted)`, data: null };
+      if (s.version !== version) return { successful: false, error: `Skill "${s.name}" at version ${version} not found: it is now at ${s.version}. This recipe is outdated`, data: null };
+      const f = s.files.find((x) => x.path === path);
+      if (!f) return { successful: false, error: `File not found in skill "${s.name}": ${path}`, data: null };
+      const got = await skills.file(skill, path);
+      if (!got) return { successful: false, error: `File not found in skill "${s.name}": ${path}`, data: null };
+      return {
+        successful: true,
+        data: {
+          skill: { id: s.id, name: s.name, version: s.version },
+          path,
+          kind: f.kind,
+          mime: f.mime,
+          size: f.size,
+          ...(f.kind === "script" && { executable_code: true, note: SCRIPT_NOTE }),
+          ...(got.text != null ? { text: got.text } : { url: got.url, note: `${f.kind === "script" ? `${SCRIPT_NOTE} ` : ""}Too large or binary to return here: fetch the url (needs the same sign-in).`.trim() }),
+        },
+      };
+    },
+  };
+  const LOCAL = { WEBSITE_READ_PAGE: readPage, ...skillTools };
 
   // A connection alias from login -> its account id. Unknown aliases stay as they are (strict) or mean the default.
   async function accountId(account, { strict = true } = {}) {
@@ -366,6 +425,80 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     return load(id);
   }
 
+  // The description of a skill's piece or file is made from the text itself, with no model: where it is, its start, the
+  // words of its headings as keywords. One embedding call. A skill recipe is never about the whole skill.
+  async function rememberSkill(id, digest, data) {
+    let record = await load(id);
+    if (!record || record.digest !== digest) return record;
+    const name = data.skill?.name ?? "Skill";
+    const flat = (t, n) => String(t ?? "").replace(/\s+/g, " ").trim().slice(0, n);
+    let title;
+    let summary;
+    let path;
+    let keywords;
+    if (data.section) {
+      path = [name, ...data.section.headings];
+      title = flat(`${name}: ${data.section.headings.at(-1)}`, 100);
+      summary = flat(`Section "${data.section.headings.join(" › ")}" of the skill "${name}". ${flat(data.text, 700)}`, 1200);
+      keywords = [name, ...data.section.headings, "skill", "instructions", data.section.path];
+    } else {
+      path = [name, data.path];
+      title = flat(`${name}: ${data.path}`, 100);
+      const what = data.executable_code ? "Executable code (Genter does not run it)" : data.kind === "artifact" ? "File" : "File";
+      summary = flat(`${what} "${data.path}" of the skill "${name}" (${data.mime}, ${data.size} bytes). ${data.text != null ? flat(data.text, 600) : "Given as a link: too large or binary."}`, 1200);
+      keywords = [name, data.path, data.kind, "skill", data.executable_code ? "script" : "file"];
+    }
+    keywords = [...new Set(keywords.map((k) => flat(k, 60).toLowerCase()).filter(Boolean))].slice(0, 30);
+    const named = { summary, keywords };
+    const vectors = openrouterApiKey ? await embedMany([summaryText(named)]).catch(() => []) : [];
+    record = await load(id);
+    if (!record || record.digest !== digest) return record;
+    record = {
+      ...record,
+      scope: { ...record.scope, toolkit: "skill" },
+      partial: false,
+      source: { app: "Skill", path: path.slice(0, 6), url: null },
+      title,
+      short: flat(data.section ? flat(data.text, 140) : summary, 140),
+      summary,
+      items: data.section ? [data.section.headings.join(" › ")] : [data.path],
+      keywords,
+      ...(vectors[0] && { summaryEmbedding: vectors[0] }),
+      trigger: { active: false, spec: null, id: null, recommended: true }, // a skill's content changes only by an update
+    };
+    await save(record);
+    return load(id);
+  }
+
+  // Pieces of skills as search candidates: the skill is chosen by its description vector, the piece by its own. Pieces
+  // already saved as recipes come through the recipes (same call = same id), the rest are offered as new calls with
+  // fixed args. { id: null, kind: "skill", tool, args, title, description, skill, score, status: "new" }.
+  async function skillCandidates(vector, limit) {
+    const found = [];
+    for (const s of await skills.list()) {
+      const whole = s.embedding ? cosine(vector, s.embedding) : 0;
+      for (const c of s.chunks) {
+        const own = c.embedding ? cosine(vector.slice(0, c.embedding.length), c.embedding) : 0;
+        const score = Math.max(own, 0.6 * own + 0.4 * whole);
+        if (score < minScore) continue;
+        const call = chunkCall(s.id, s.version, c.id);
+        found.push({
+          id: null,
+          kind: "skill",
+          tool: call.tool,
+          args: call.args,
+          title: `${s.name} › ${c.headings.join(" › ")}`,
+          description: `Reads this section of the skill "${s.name}" (file ${c.path}). Execute it with exactly these args; the result lists the files it points to.`,
+          skill: { id: s.id, name: s.name, version: s.version },
+          recipe_id: recipeId({ workspaceId, scope: "", tool: call.tool, args: call.args }),
+          score: Number(score.toFixed(2)),
+          status: "new",
+        });
+      }
+    }
+    return found.sort((a, b) => b.score - a.score).slice(0, limit);
+  }
+
   // The page recipes of a site (any status).
   const websitePages = async (site) =>
     (await everyRecipe()).filter((r) => r.tool === "WEBSITE_READ_PAGE" && typeof r.args?.url === "string" && underSite(r.args.url, site));
@@ -487,6 +620,14 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
               trigger: { active: Boolean(r.trigger?.active) },
             }))
         : [];
+      // Skills: pieces found by meaning next to the saved recipes (a piece that is already a recipe is not offered twice).
+      if (skills && vector) {
+        const have = new Set(memories.map((m) => m.id));
+        const pieces = (await skillCandidates(vector, limit).catch(() => [])).filter((p) => !have.has(p.recipe_id));
+        memories.push(...pieces);
+        memories.sort((a, b) => b.score - a.score);
+        memories.splice(limit);
+      }
       if (!withTools && memories.some((m) => m.score >= strongScore)) return memories;
 
       const search = english?.en ?? query;
@@ -568,11 +709,14 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       // The vector of the request: the one search() computed; on a cache miss (another process, eviction) embedded once here.
       let asked = task ? askedVectors.get(task) : null;
       if (task && !asked) asked = await embed(task).catch(() => null);
+      // A skill's piece asked for in other words is the same recipe with one more intent key, never a second recipe.
+      const intents = (old) => (isSkillTool(tool) ? addIntent(old?.intents, task) : old?.intents);
       if (existing && existing.digest === digest && (existing.summary || !openrouterApiKey)) {
         // Same result: nothing is described or embedded again.
         const next = { ...existing, status: "fresh", checked_at: at };
         if (asked) next.queryEmbeddings = addQuery(existing.queryEmbeddings, asked, at);
-        if (asked || existing.status !== "fresh" || existing.checked_at !== at) await save(next);
+        if (isSkillTool(tool) && task) next.intents = intents(existing);
+        if (asked || (isSkillTool(tool) && task) || existing.status !== "fresh" || existing.checked_at !== at) await save(next);
         return { id: rid, result, created: false, changed: false, unchanged: true, pending: Promise.resolve(publicRecipe(next)), recipe_status: "fresh" };
       }
       const created = !existing;
@@ -591,10 +735,13 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       };
       const record = { ...base, digest, status: "fresh", updated_at: at, checked_at: at };
       if (asked) record.queryEmbeddings = addQuery(base.queryEmbeddings, asked, at);
+      if (isSkillTool(tool) && task) record.intents = intents(base);
       // The call as it ran: args kept as written (placeholders included), in canonical form so equal calls look equal.
       await save(record);
       if (legacy && legacy.id !== rid) await drop(legacy.id).catch(() => {});
-      const described = kept ? Promise.resolve(publicRecipe(record)) : remember(rid, digest, result.data, { created }).then(publicRecipe);
+      const described = kept
+        ? Promise.resolve(publicRecipe(record))
+        : (isSkillTool(tool) ? rememberSkill(rid, digest, result.data) : remember(rid, digest, result.data, { created })).then(publicRecipe);
       later(described);
       return { id: rid, result, created, changed: !created, unchanged: false, pending: described.catch(() => null), recipe_status: "fresh" };
     },
@@ -697,6 +844,63 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     // Waits for recipes still being saved (the CLI calls it before exiting).
     async flush() {
       await Promise.all([...pending]);
+    },
+
+    // Skills (skills.js). The recipes of skills stay when a skill goes; they are tied to a version.
+    skills: {
+      // The recipes of a skill (any status, newest first), with their intents.
+      async recipes({ skill }) {
+        return (await everyRecipe())
+          .filter((r) => isSkillTool(r.tool) && r.args?.skill === skill)
+          .map(publicRecipe)
+          .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
+      },
+      // The skill changed: its recipes of another version are outdated. Each one whose piece (or file) still exists in the
+      // new version is made again there (a recipe of the new version, its intent keys and past requests carried over, the
+      // old one dropped); the others become gone and stay listed. { carried: [{ from, to }], gone: n }.
+      async update({ skill, version }) {
+        const now_ = now();
+        const current = await skills.get(skill);
+        const carried = [];
+        let gone = 0;
+        for (const r of await everyRecipe()) {
+          if (!isSkillTool(r.tool) || r.args?.skill !== skill || r.args?.version === version) continue;
+          const key = r.args.chunk ?? r.args.path;
+          const exists = current && current.version === version && (r.args.chunk ? current.chunks.some((c) => c.id === key) : current.files.some((f) => f.path === key));
+          if (!exists) {
+            if (r.status !== "gone") {
+              await save({ ...r, status: "gone", checked_at: now_ });
+              gone++;
+            }
+            continue;
+          }
+          const args = { ...r.args, version };
+          const out = await api.execute({ tool: r.tool, args });
+          if (out.pending) await out.pending;
+          if (!out.id) continue;
+          const made = await load(out.id);
+          if (made) {
+            let intents = made.intents ?? [];
+            for (const t of r.intents ?? []) intents = addIntent(intents, t);
+            let queries = made.queryEmbeddings ?? [];
+            for (const q of r.queryEmbeddings ?? []) queries = addQuery(queries, q.e, q.at);
+            await save({ ...made, intents, ...(queries.length && { queryEmbeddings: queries }) });
+          }
+          await drop(r.id);
+          carried.push({ from: r.id, to: out.id });
+        }
+        return { carried, gone };
+      },
+      // The skill is deleted: its recipes are not deleted, they stay (they cannot be read until it comes back).
+      async removed({ skill }) {
+        let count = 0;
+        for (const r of await everyRecipe()) {
+          if (!isSkillTool(r.tool) || r.args?.skill !== skill || r.status === "gone") continue;
+          await save({ ...r, status: "gone", checked_at: now() });
+          count++;
+        }
+        return { count };
+      },
     },
 
     // Every tool of an app as Composio describes it ({ slug, description, inputParameters, tags }), cached for an hour:

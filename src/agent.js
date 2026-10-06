@@ -135,7 +135,7 @@ export function createAgent({
         // A tool of an app that is not connected fails at once ("no connected account"): the model gets the connected
         // apps and their closest tools instead of trying it again or giving up.
         const app = tool && appOf(tool, run.apps);
-        if (error && app && run.apps?.length && !run.apps.includes(app)) {
+        if (error && app && app !== "skill" && run.apps?.length && !run.apps.includes(app)) {
           const similar = await genter.search({ query: `${run.task ?? ""} ${tool.toLowerCase().replace(/_/g, " ")}`, limit: 5, apps: run.apps, tools: true, connected: true }).catch(() => []);
           onEvent({ type: "tool", tool, ok: false, summary: `${app} is not connected` });
           return { content: JSON.stringify({ error: `${tool} is a tool of ${app}, which is not connected. Connected apps: ${run.apps.join(", ")}.`, use_one_of: similar.map(compactFound), hint: "Use a tool of a connected app; only if none can do it, connect_app." }) };
@@ -790,6 +790,8 @@ function compactFound(r, ref) {
       updated_at: r.updated_at, checked_at: r.checked_at, ...(r.partial && { partial: true }), score: r.score,
     };
   }
+  // A piece of a skill not read before: its args are fixed values, not a schema.
+  if (r.kind === "skill") return { tool: r.tool, title: r.title, description: (r.description ?? "").slice(0, 300), args: r.args, score: r.score };
   return { tool: r.tool, description: (r.description ?? "").slice(0, 300), args: compactSchema(r.args) };
 }
 
@@ -950,6 +952,7 @@ A Recipe is one successful tool call with fixed args, remembered together with w
 - Keyword search in apps (Gmail q, Slack, Drive, Notion, GitHub search) matches literal words, and the data is often in another language than the request (English emails, Russian request). Put the key terms in both languages in one query, joined with OR, e.g. Gmail: ("объединенные знания" OR "unified knowledge" OR "merged knowledge"). The first message lists the terms.
 - A failed call is not retried with the same args. "Not Found" from an app means the repo, file or id is wrong, not the tool: find the real one (list the user's repos, search) instead of guessing. After two failures of a tool, answer with what you have.
 - A connected app always has tools: never answer that there is no tool for it. If no candidate fits, search_tools with the app name and what to do (e.g. "Google Tasks list tasks"), then execute.
+- A candidate with kind "skill" (or a recipe of SKILL_READ_CHUNK) is one section of a skill, a written how-to: execute it with exactly its args and follow what it says. The result names the files it points to (related, each with the call that gets it); fetch only those you need. A script is code Genter does not run: read it, never claim it was run.
 - A name you do not know (an org, a project, a repo, a person): look it up in the connected apps first (e.g. the user's GitHub repositories and orgs) and answer about what you found. "Projects" in GitHub usually means repositories: list them (and Projects only if asked).
 - "What's new in <app>" / "что нового в <app>" for a connected app means the user's own latest items there (recently created or updated tasks, issues, emails, files), read with that app's tools, not news about the product.
 - Every fact in the answer comes from a tool result of this run (a recipe's last_result only says what to call). Never answer from general knowledge about a product or company; if nothing was found, say what was checked.
