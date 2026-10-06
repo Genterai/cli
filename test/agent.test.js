@@ -571,7 +571,12 @@ describe("Recipes in the agent", () => {
     const names = model.requests[0].tools.map((t) => t.function.name);
     for (const gone of ["add_source", "build_live_sync", "sync_source", "search_knowledge", "save_recipes"]) assert.ok(!names.includes(gone), gone);
     assert.ok(names.includes("suggest_prepare"));
-    assert.ok(!names.includes("execute_many") && !names.includes("recheck_recipe")); // modes only
+    assert.ok(!names.includes("read_many") && !names.includes("read_each") && !names.includes("recheck_recipe")); // modes only
+    // No tool's name begins with another's: gpt-oss on Groq broke "execute_many" into "execute<|channel|>...".
+    for (const a of names) for (const b of names) assert.ok(a === b || !b.startsWith(a), `${b} begins with ${a}`);
+    // A free-form args object has no type: Groq wrote an object with no listed properties as {}.
+    const execute = model.requests[0].tools.find((t) => t.function.name === "execute").function.parameters.properties.args;
+    assert.equal(execute.type, undefined);
     assert.match(briefingOf(model.requests[0]), /last_result/);
   });
 
@@ -583,7 +588,7 @@ describe("Recipes in the agent", () => {
     assert.equal(genter.executed.length, 0);
   });
 
-  it("N5 a prepare task fans out reads with execute_many (4 at a time, max 100) and finishes with counts; writes are skipped", async () => {
+  it("N5 a prepare task fans out reads with read_many (4 at a time, max 100) and finishes with counts; writes are skipped", async () => {
     let running = 0;
     let peak = 0;
     const genter = fakeGenter({ connected: ["github"], results: { GITHUB_GET_REPOSITORY_CONTENT: ({ path }) => ({ path }) } });
@@ -598,7 +603,7 @@ describe("Recipes in the agent", () => {
     const calls = Array.from({ length: 130 }, (_, i) => ({ tool: "GITHUB_GET_REPOSITORY_CONTENT", args: { owner: "o", repo: "r", path: `f${i}` } }));
     calls.push({ tool: "GITHUB_CREATE_AN_ISSUE", args: {} });
     model = fakeModel([
-      call("execute_many", { calls }),
+      call("read_many", { calls }),
       (body) => {
         const counts = JSON.parse(lastOf(body, "tool"));
         assert.equal(counts.requested, 100);
@@ -615,11 +620,71 @@ describe("Recipes in the agent", () => {
     assert.equal(out.saved.length, 100);
   });
 
-  it("N6 execute_many is refused outside a prepare task", async () => {
+  it("N6 read_many, read_each (and their old names) are refused outside a prepare task", async () => {
     const genter = fakeGenter({ connected: ["github"] });
-    model = fakeModel([call("execute_many", { calls: [{ tool: "GITHUB_LIST_COMMITS" }] }), answer("no")]);
+    model = fakeModel([
+      call("read_many", { calls: [{ tool: "GITHUB_LIST_COMMITS" }] }),
+      call("execute_many", { calls: [{ tool: "GITHUB_LIST_COMMITS" }] }),
+      call("read_each", { list_id: "x", read_tool: "GITHUB_GET_REPOSITORY_CONTENT", item_arg: "path" }),
+      answer("no"),
+    ]);
     await agentWith(genter).start({ task: "x", mode: "run" });
     assert.equal(genter.executed.length, 0);
+  });
+
+  it("N5b read_each reads every item a list call listed, one recipe each, leaving out folders and files with no text", async () => {
+    const tree = { sha: "t", truncated: false, tree: [
+      ...Array.from({ length: 150 }, (_, i) => ({ path: `src/f${i}.js`, type: "blob", sha: `s${i}` })),
+      { path: "src", type: "tree", sha: "d1" }, { path: "img/logo.png", type: "blob", sha: "p" }, { path: "package-lock.json", type: "blob", sha: "l" },
+    ] };
+    const genter = fakeGenter({ connected: ["github"], results: { GITHUB_GET_A_TREE: tree, GITHUB_GET_REPOSITORY_CONTENT: ({ path }) => ({ path, content: "x" }) } });
+    model = fakeModel([
+      call("execute", { tool: "GITHUB_GET_A_TREE", args: { owner: "o", repo: "r", tree_sha: "main", recursive: true } }),
+      (body) => {
+        const listed = JSON.parse(lastOf(body, "tool"));
+        assert.equal(listed.listed, 153);
+        assert.match(listed.next, /read_each/);
+        assert.match(listed.data, /truncated/); // the model sees part of the list; read_each takes all of it
+        // Called through execute, the way gpt-oss does it: it is read_each all the same.
+        return call("execute", { tool: "read_each", args: { list_id: listed.id, read_tool: "GITHUB_GET_REPOSITORY_CONTENT", shared_args: { owner: "o", repo: "r" }, item_arg: "path" } });
+      },
+      (body) => {
+        const counts = JSON.parse(lastOf(body, "tool"));
+        assert.equal(counts.requested, 150);
+        assert.equal(counts.created, 150);
+        return answer("");
+      },
+    ]);
+    const out = await agentWith(genter).start({ task: "Read the whole github repository o/r", mode: "prepare" });
+    const reads = genter.executed.filter((e) => e.tool === "GITHUB_GET_REPOSITORY_CONTENT");
+    assert.equal(reads.length, 150);
+    assert.deepEqual(reads[0].args, { owner: "o", repo: "r", path: "src/f0.js" });
+    assert.ok(!reads.some((r) => /png|lock|^src$/.test(r.args.path)));
+    assert.match(out.answer, /Prepared 150 reads: 150 new recipes/);
+    assert.equal(out.saved.length, 151); // the tree and every file
+  });
+
+  it("N5c read_each with no list, args written as JSON text, and an empty execute in a prepare task get the way to do it", async () => {
+    const genter = fakeGenter({ connected: ["github"], results: { GITHUB_LIST_FILES: { files: [{ id: "a", name: "A" }, { id: "b", name: "B" }] }, GITHUB_GET_FILE: ({ file_id }) => ({ file_id }) } });
+    model = fakeModel([
+      call("read_each", { list_id: "nope", read_tool: "GITHUB_GET_FILE", item_arg: "file_id" }),
+      (body) => {
+        assert.match(JSON.parse(lastOf(body, "tool")).error, /No list to read/);
+        return call("execute", { tool: "GITHUB_LIST_FILES", args: '{"folder_id": "f1"}' });
+      },
+      (body) => {
+        assert.equal(JSON.parse(lastOf(body, "tool")).listed, 2);
+        return call("execute", {});
+      },
+      (body) => {
+        assert.match(JSON.parse(lastOf(body, "tool")).hint, /read_each/);
+        return call("read_each", { list_id: "whatever", read_tool: "GITHUB_GET_FILE", shared_args: "{}", item_arg: "file_id" });
+      },
+      answer(""),
+    ]);
+    await agentWith(genter).start({ task: "Read the whole folder f1", mode: "prepare" });
+    assert.deepEqual(genter.executed[0].args, { folder_id: "f1" }); // JSON text read as the object it says
+    assert.deepEqual(genter.executed.slice(1).map((e) => e.args), [{ file_id: "a" }, { file_id: "b" }]); // items without file_id: their id
   });
 
   it("N7 an event task rechecks only the affected recipes and forgets what was deleted; it never writes", async () => {

@@ -92,7 +92,7 @@ import { createAgent } from "genter-cli/agent";
 import { agentTools, agentInstructions, agentResultText } from "genter-cli/tools"; // MCP definitions
 
 const agent = createAgent({ genter, openrouterApiKey, secret, userId, runs }); // runs: get(id), put({id, blob})
-// modes: "run", "find" (read-only), "prepare" (fan out reads over an area with execute_many, finish with counts),
+// modes: "run", "find" (read-only), "prepare" (list an area, read every item with read_each / read_many, finish with counts),
 // "event" (task text carries the event and the affected recipes: recheck_recipe / forget_recipe)
 const out = await agent.start({ task: "my meetings tomorrow", mode: "find" });
 await agent.send({ run_id: out.run_id, message: "only the work calendar" });
@@ -206,7 +206,7 @@ Composio schemas (`test/fixtures/catalogues.json`: Linear, Slack, Jira, Trello, 
 | N1 | no answer | an empty ending is asked once on the strong model; empty again is a failure naming what ran, never "Done." with references |
 | G1–G2, G4–G5 | `genter.execute` itself (Composio answered over fetch) | a saved call returns its result and a deterministic id; `remember: false` saves nothing; a line of a result finds its recipe |
 | R1–R9 | recipes | one record per call whatever the arg order; an unchanged result calls no model and only bumps `checked_at`; a changed one regenerates the same recipe; a failed call creates nothing; gone / denied are never offered; two accounts, two recipes; partial pages; recheck, triggers, scopes |
-| N2–N7 | recipes in the agent | `recipe: {id, created, changed}` on steps, `saved`, `recipes_used`; the prompt; `suggest_prepare`; `execute_many` in a prepare task; event tasks |
+| N2–N7 | recipes in the agent | `recipe: {id, created, changed}` on steps, `saved`, `recipes_used`; the prompt (no tool name begins with another's, free-form args have no type); `suggest_prepare`; `read_many` and `read_each` in a prepare task (every listed file, folders and binaries left out; called through execute too; args as JSON text); event tasks |
 | recipe.test.js | pure `src/recipe.js` | canonical args, ids, content hash, partial detection, failure classes, provenance, legacy records |
 | C1–C4 | the agent's tool search (`connected: true`) | only tools of connected apps: "What's on my calendar today" gets Google Calendar's, never another app's calendar tool (Clarify); an app meant by a word ("calendar", "meetings", "drive"); without `connected` Composio's search over all apps is as before |
 | H1–H4 | gpt-oss calls as text | a call written as harmony text (`to=functions.execute json{…}`) is made, not shown; the final channel is the answer, reasoning alone is sent back once then fails; a slug called as a function is an execute; a tool of an app that is not connected names the connected apps and their tools |
@@ -215,9 +215,19 @@ Composio schemas (`test/fixtures/catalogues.json`: Linear, Slack, Jira, Trello, 
 ## Preparing an area, triggers
 
 If the agent finds a finite area (a repository's files, a Drive folder, a channel) it calls `suggest_prepare({label, why})`
-(no side effects; the result carries `suggestions: [{label}]`). A `prepare` run then fans out reads with
-`execute_many` (up to 100 calls, 4 at a time); each success is an ordinary atomic recipe. `genter.recipes.prepareScope`
-keeps a minimal area record in the optional `scopes` store so events know the area was prepared.
+(no side effects; the result carries `suggestions: [{label}]`). A `prepare` run lists the area with the app's list tool
+(a repository: its whole tree) and then calls `read_each {list_id, read_tool, shared_args, item_arg}`: the engine makes
+one read per item that list call listed (`shared_args` plus the item's value in `item_arg`, e.g. `path`; folders and
+files with no text, images, archives, lock files, left out; 4 at a time, up to 300), so the model never writes the calls
+out (it cut a hundred short, and saw a long tree only in part). `read_many` takes calls the model writes itself (up to 100).
+Each success is an ordinary atomic recipe. `genter.recipes.prepareScope` keeps a minimal area record in the optional
+`scopes` store so events know the area was prepared.
+
+Two things about gpt-oss on Groq (the quickest provider, OpenRouter's pick by latency) shape the tool list: no tool's name
+begins with another's (`execute_many` came out as `execute<|channel|>...` and Groq refused the call: hence `read_many`,
+`read_each`; the old names are still understood), and a free-form `args` has no `type` (Groq wrote an object with no
+listed properties as `{}`, so calls went out without their args). A call of one of the agent's own tools written as
+`execute {tool: "read_each", args}` is that tool.
 
 Every recipe knows the area its call reads in, `scope.area = {id, label, kind, where}` (`areaOf` in `src/recipe.js`): the
 container its args name (`owner` + `repo` is a repository, `calendarId` a calendar, `channel` a channel, `folder_id` a

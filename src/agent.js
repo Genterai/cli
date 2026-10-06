@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { cipher, namedApps } from "./genter.js";
 import { appOf, applyEdits, citedRefs, fileEditor, needsCatalogue, refFromUrl, refLabel, refsOfResult, shapeRef, writeHints } from "./refs.js";
-import { locatorArgs } from "./shape.js";
+import { inferList, locatorArgs, pick } from "./shape.js";
 import { logCost, usageFields } from "./cost.js";
 
 // The task agent: an LLM loop over genter (search -> execute -> save), tuned for speed.
@@ -79,6 +79,15 @@ export function createAgent({
   // One tool call from the model. Returns { content, keep?, pause? }:
   // content goes back to the model now, keep is what is stored instead (no raw results), pause stops the run.
   async function call(run, name, input) {
+    // Args written as JSON text (the schema leaves their type open) are read as the object they say.
+    if ("args" in (input ?? {})) input = { ...input, args: argsObject(input.args) };
+    if (Array.isArray(input?.calls)) input = { ...input, calls: input.calls.map((c) => (c && "args" in c ? { ...c, args: argsObject(c.args) } : c)) };
+    // One of these tools called through execute ({tool: "read_each", args: {...}}, as gpt-oss does after a run of executes)
+    // is that tool with those args.
+    if (name === "execute" && input.tool !== "execute" && TOOL_NAMES.has(String(input.tool ?? ""))) {
+      const { tool, args, ...rest } = input;
+      return call(run, tool, { ...rest, ...args });
+    }
     switch (name) {
       case "search_tools": {
         // A model that keeps searching instead of running something: after a few searches it must execute.
@@ -104,7 +113,10 @@ export function createAgent({
         if (!tool && !input.id) {
           run.failures.execute = (run.failures.execute ?? 0) + 1;
           onEvent({ type: "tool", tool: "execute", ok: false, summary: "no tool or id" });
-          return { content: JSON.stringify({ error: "Pass tool (a slug from the first message or search results) and args, or id of a saved recipe." }) };
+          // A prepare task with a list in hand: the empty call was meant to read its items.
+          const list = run.mode === "prepare" && Object.keys(run.lists ?? {}).at(-1);
+          const each = list && `To read every listed item, call execute {tool: "read_each", args: {list_id: "${list}", read_tool: <the tool that reads ONE item>, shared_args: {...}, item_arg: <e.g. path>}}.`;
+          return { content: JSON.stringify({ error: "Pass tool (a slug from the first message or search results) and args, or id of a saved recipe.", ...(each && { hint: each }) }) };
         }
         if (READ_ONLY_MODES.includes(run.mode) && tool && !isReadOnly(tool)) {
           return { content: `Not allowed: ${tool} changes data and this is a read-only ${run.mode}. Only read, or tell the user to use run_task.` };
@@ -150,6 +162,8 @@ export function createAgent({
         if (ok && tool && !isReadOnly(tool)) run.wrote = true;
         const data = ok ? (out.result?.data ?? null) : null;
         const empty = ok && isEmpty(data);
+        // A prepare task keeps what a list call listed (in memory only, never stored), so read_each can read each item.
+        const listed = ok && !empty && run.mode === "prepare" && out.id ? keepList(run, out.id, data) : 0;
         const recipe = ok && out.id ? { id: out.id, created: Boolean(out.created), changed: Boolean(out.changed) } : null;
         if (recipe) (run.touched ??= {})[recipe.id] = { ...(run.touched?.[recipe.id]), ...recipe, created: Boolean(run.touched?.[recipe.id]?.created || recipe.created), changed: Boolean(run.touched?.[recipe.id]?.changed || recipe.changed) };
         run.steps.push({ tool: tool ?? input.id, from_recipe: input.id ?? null, recipe, ok, summary: out.summary ?? null, saved: out.id ?? null, ...(out.recipe_status && out.recipe_status !== "fresh" && { recipe_status: out.recipe_status }), ...(out.account && { account: out.account }) });
@@ -173,7 +187,10 @@ export function createAgent({
           ? `What these args point to does not exist (wrong owner, repo, path or id?)${out.tried > 1 ? `, on any of the ${out.tried} connected accounts` : ""}. Do not guess again: find the real name with a list or search tool first, or answer without it.`
           : undefined;
         // Found on another connection of the app than the default: the answer says on which.
-        const short = { ref: cited.ref ?? undefined, id: out.id, successful: ok, account: out.account, summary: out.summary ?? undefined, error: ok ? undefined : out.result?.error, hint: retry ?? missing ?? out.hint };
+        const short = {
+          ref: cited.ref ?? undefined, id: out.id, successful: ok, account: out.account, summary: out.summary ?? undefined, error: ok ? undefined : out.result?.error, hint: retry ?? missing ?? out.hint,
+          ...(listed && { listed, next: `${listed} items listed: read every one in one call, execute {tool: "read_each", args: {list_id: "${out.id}", read_tool, shared_args, item_arg}}` }),
+        };
         const text = ok ? JSON.stringify(cited.data) : "";
         // Stored without the data: the items it listed stay citable by their numbers.
         const items = run.refs.filter((r) => cited.items.includes(r.n)).map((r) => [r.n, String(r.title).slice(0, 80)]);
@@ -222,10 +239,19 @@ export function createAgent({
         if (label && !(run.suggestions ??= []).some((x) => x.label === label)) run.suggestions.push({ label, ...(input.why && { why: String(input.why).slice(0, 300) }) });
         return { content: JSON.stringify({ noted: Boolean(label) }) };
       }
+      // Named so that no tool's name begins with another's: gpt-oss on Groq broke every call of "execute_many" into
+      // "execute<|channel|>..." and the provider refused it. The old names are still understood.
+      case "read_many":
       case "execute_many": {
         if (!canExecute) return { content: "Not allowed: this user can search but not run tools." };
-        if (run.mode !== "prepare") return { content: "execute_many is only for a prepare task. Use execute." };
+        if (run.mode !== "prepare") return { content: "read_many is only for a prepare task. Use execute." };
         return executeMany(run, input);
+      }
+      case "read_each":
+      case "execute_each": {
+        if (!canExecute) return { content: "Not allowed: this user can search but not run tools." };
+        if (run.mode !== "prepare") return { content: "read_each is only for a prepare task. Use execute." };
+        return executeEach(run, input);
       }
       case "recheck_recipe": {
         if (!canExecute) return { content: "Not allowed: this user can search but not run tools." };
@@ -378,7 +404,7 @@ export function createAgent({
     run.status = result.status;
     run.updated_at = new Date().toISOString();
     // Stored without raw tool results: each one is replaced by its summary.
-    const stored = { ...run, timing: undefined, seen: undefined, messages: run.messages.map(({ keep, ...m }) => (keep ? { ...m, content: keep } : m)) };
+    const stored = { ...run, timing: undefined, seen: undefined, lists: undefined, messages: run.messages.map(({ keep, ...m }) => (keep ? { ...m, content: keep } : m)) };
     await runs.put({ id: run.id, blob: seal(stored) });
     const out = {
       run_id: run.id,
@@ -537,6 +563,33 @@ export function createAgent({
   async function executeMany(run, input) {
     const calls = (Array.isArray(input.calls) ? input.calls : []).filter((c) => c && c.tool).slice(0, MAX_MANY);
     if (!calls.length) return { content: JSON.stringify({ error: "Pass calls: [{tool, args, account?}]" }) };
+    return fanOut(run, calls, "read_many");
+  }
+
+  // The same fan-out over the items a list call of this run listed (a repository's tree, a folder's files, a calendar's
+  // events): one call of `tool` per item, `args` with the item's value in `item_arg`, so the model never writes the calls
+  // out (a hundred of them it cuts short, and a long list it only sees in part). Folders and what holds no text (images,
+  // archives, fonts, lock files) are left out. Generic: the items, their id and the arg are whatever the list and the model say.
+  async function executeEach(run, input) {
+    // Its own arg names (list_id, read_tool, shared_args): with execute's tool and args the model wrote execute instead.
+    const from = String(input.list_id ?? input.from ?? "").trim();
+    const tool = input.read_tool ?? input.tool;
+    const shared = argsObject(input.shared_args ?? input.args);
+    const list = run.lists?.[from] ?? Object.values(run.lists ?? {}).at(-1); // a wrong id: the last list of the run
+    if (!list) return { content: JSON.stringify({ error: "No list to read: first execute the call that lists the area's items (its whole tree, all its files), then pass its id as from." }) };
+    if (!tool || !input.item_arg) return { content: JSON.stringify({ error: "Pass read_tool (the call that reads ONE item), shared_args (what every call shares) and item_arg (the arg each item's value goes in)." }) };
+    const field = String(input.item_field || (list.items.some((i) => i[input.item_arg] != null) ? input.item_arg : list.id));
+    const values = [...new Set(list.items.filter((i) => !isContainer(i) && !noText(i[field])).map((i) => i[field]).filter((v) => v != null && v !== ""))];
+    if (!values.length) return { content: JSON.stringify({ error: `None of the ${list.items.length} listed items has a ${field} to read (folders and files with no text are left out).` }) };
+    const calls = values.slice(0, MAX_EACH).map((v) => ({ tool, args: { ...shared, [input.item_arg]: v }, account: input.account }));
+    const out = await fanOut(run, calls, "read_each");
+    if (values.length <= MAX_EACH) return out;
+    const more = `${values.length - MAX_EACH} more items were not read (at most ${MAX_EACH} per area).`;
+    lastNote = `${lastNote} ${more}`;
+    return { content: JSON.stringify({ ...JSON.parse(out.content), not_read: values.length - MAX_EACH, note: lastNote }) };
+  }
+
+  async function fanOut(run, calls, name) {
     const started = Date.now();
     const counts = { requested: calls.length, ok: 0, created: 0, changed: 0, unchanged: 0, failed: 0, skipped: 0 };
     const failures = [];
@@ -576,7 +629,7 @@ export function createAgent({
     run.prepared = ["requested", "ok", "created", "changed", "unchanged", "failed", "skipped"].reduce((t, k) => ({ ...t, [k]: (run.prepared?.[k] ?? 0) + counts[k] }), {});
     const note = `Prepared ${run.prepared.ok} reads: ${run.prepared.created} new recipes, ${run.prepared.changed} updated, ${run.prepared.unchanged} unchanged, ${run.prepared.failed} failed${run.prepared.skipped ? `, ${run.prepared.skipped} skipped (not reads)` : ""}.`;
     lastNote = note;
-    onEvent({ type: "tool", tool: "execute_many", ok: counts.ok > 0 || !counts.failed, summary: note });
+    onEvent({ type: "tool", tool: name, ok: counts.ok > 0 || !counts.failed, summary: note });
     return { content: JSON.stringify({ ...counts, ...(failures.length && { failures }), note }) };
   }
 
@@ -695,6 +748,36 @@ function fileRef(run, input) {
 }
 
 const MAX_FILE_TEXT = 20000;
+
+// What a list call listed, kept for read_each in this run only: { id, items } (scalars of each item, at most MAX_LISTED).
+// Returns how many items it listed (0: not a list).
+function keepList(run, id, data) {
+  const shape = inferList(data);
+  if (shape.single) return 0;
+  const items = pick(data, shape.items);
+  if (!Array.isArray(items) || items.length < 2) return 0;
+  const flat = items.slice(0, MAX_LISTED).map((i) => Object.fromEntries(Object.entries(i ?? {}).filter(([, v]) => v == null || typeof v !== "object")));
+  (run.lists ??= {})[id] = { id: shape.id, items: flat };
+  return items.length;
+}
+
+// A folder among listed items: a tree or a directory, by its type or mime type.
+const isContainer = (item) => /^(tree|dir|directory|folder)$|\.folder$/i.test(String(item?.type ?? item?.mimeType ?? item?.mime_type ?? item?.kind ?? ""));
+// A file that holds no text worth a recipe, by its name: images, media, archives, fonts, binaries, lock files.
+const noText = (value) =>
+  typeof value === "string" && /(\.(png|jpe?g|gif|webp|ico|bmp|tiff?|heic|psd|mp[34]|mov|avi|wav|ogg|webm|zip|gz|tgz|tar|rar|7z|jar|woff2?|ttf|otf|eot|exe|dll|so|dylib|bin|class|pyc|wasm|lock)|(^|\/)(package-lock\.json|pnpm-lock\.yaml))$/i.test(value);
+
+// A tool's args as an object: as given, or parsed from JSON text; anything else is none.
+function argsObject(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value;
+  if (typeof value === "string" && value.trim().startsWith("{")) {
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+    } catch {}
+  }
+  return {};
+}
 
 const errorText = (e) => (typeof e === "string" ? e : JSON.stringify(e ?? "failed")).slice(0, 300);
 
@@ -906,6 +989,8 @@ const MAX_TOOL_FAILURES = 3;
 const MAX_SEARCHES = 3;
 const READ_ONLY_MODES = ["find", "prepare", "event"];
 const MAX_MANY = 100;
+const MAX_EACH = 300; // calls one read_each makes: an area bigger than that is read in part, and the note says how much is left
+const MAX_LISTED = 2000;
 const MANY_CONCURRENCY = 4;
 const STRONG_RECIPE = 0.45; // a recipe this close to the task is known ground: the fast model is enough
 
@@ -934,10 +1019,10 @@ const MODE_NOTES = {
   run: "Mode: run (do the task).",
   prepare:
     "Mode: prepare. The task names an area (a repository, a folder, a calendar, a channel, a list) and the args that point at it. Your only job is to read ALL of it, one recipe per item: " +
-    "first list every item with the app's list tool and those args (a repository: its whole file tree, recursively; a folder: its files; a calendar: its events of the last and the next months; a channel: its messages), " +
-    "then read each item with its own call (the tool that returns that one item's full content, e.g. one file of the repository) in execute_many " +
-    "(up to 100 calls each, 4 at a time; several rounds if it is bigger; read-only calls only). read_file saves nothing: do not use it for the reads. Leave out what holds no text (images, binaries, lock files). " +
-    "Every successful read is saved as its own recipe automatically. Do not summarize the content: finish with the counts execute_many returned.",
+    "first list every item with the app's list tool and those args, in one call if it can (a repository: its whole file tree, recursively; a folder: its files; a calendar: its events of the last and the next months; a channel: its messages). " +
+    "Then read every listed item with read_each {list_id: <the id the list call returned>, read_tool: <the tool that returns ONE item's full content, e.g. one file of the repository>, shared_args: <what every read shares, e.g. owner and repo>, item_arg: <the arg that takes each item, e.g. path>}: " +
+    "it makes one read per item for you (folders and files with no text are left out), so never write those calls out. read_many is only for a few extra calls you write yourself (a list that came in pages). " +
+    "read_file saves nothing: do not use it. Every successful read is saved as its own recipe automatically. Do not summarize the content: finish with the counts you got.",
   event:
     "Mode: event. The task carries an event from an app and the recipes it may have changed. Re-read ONLY those recipes with recheck_recipe (all in one step). A recipe whose object was deleted: forget_recipe. " +
     "Create new recipes (execute with the real read tool) for NEW objects only when the event is inside an area that was prepared (the task says so); otherwise do not. Finish with one line: what changed, what was forgotten.",
@@ -978,6 +1063,10 @@ A Recipe is one successful tool call with fixed args, remembered together with w
 Always end with an answer built from what you found, even partial; never "I can't" while a tool could still be tried.
 Final answer: short and concrete, in the user's language. Include the names, ids and links needed to open or continue the result. Say what was done, not how.`;
 
+// A tool's args, whatever they are. No `type`: a provider that decodes tool calls by the schema (Groq, the quickest for
+// gpt-oss) writes an object with no listed properties as {} whatever the model meant, so every call went out without its args.
+const FREE_ARGS = { description: 'The tool\'s arguments as a JSON object, e.g. {"owner": "o", "repo": "r", "path": "README.md"}' };
+
 const TOOLS = [
   {
     name: "execute",
@@ -987,7 +1076,7 @@ const TOOLS = [
       properties: {
         id: { type: "string", description: "Saved recipe id" },
         tool: { type: "string", description: "Tool slug, e.g. GMAIL_FETCH_EMAILS" },
-        args: { type: "object", additionalProperties: true },
+        args: FREE_ARGS,
         account: { type: "string", description: "Connection alias or id when the app is connected several times" },
       },
     },
@@ -1057,7 +1146,7 @@ const TOOLS = [
     },
   },
   {
-    name: "execute_many",
+    name: "read_many",
     description: "Prepare task only: run up to 100 independent READ calls, 4 at a time. Each success is saved as its own recipe. Returns counts and the first failures, not data.",
     parameters: {
       type: "object",
@@ -1067,12 +1156,30 @@ const TOOLS = [
           maxItems: 100,
           items: {
             type: "object",
-            properties: { tool: { type: "string" }, args: { type: "object", additionalProperties: true }, account: { type: "string" } },
+            properties: { tool: { type: "string" }, args: FREE_ARGS, account: { type: "string" } },
             required: ["tool"],
           },
         },
       },
       required: ["calls"],
+    },
+  },
+  {
+    name: "read_each",
+    description:
+      "Prepare task only: read every item a list call of this run listed, one READ call per item (folders and files with no text left out, 4 at a time, up to 300). " +
+      "Each success is saved as its own recipe. Returns counts and the first failures, not data.",
+    parameters: {
+      type: "object",
+      properties: {
+        list_id: { type: "string", description: "The id the list call returned (its recipe id)" },
+        read_tool: { type: "string", description: "The tool that reads ONE item, e.g. GITHUB_GET_REPOSITORY_CONTENT" },
+        shared_args: { description: 'The args every read shares, as a JSON object, e.g. {"owner": "o", "repo": "r"}' },
+        item_arg: { type: "string", description: "The arg each item's value goes in, e.g. path, file_id, event_id" },
+        item_field: { type: "string", description: "The item's field that holds that value, when it is not named like item_arg (e.g. id)" },
+        account: { type: "string" },
+      },
+      required: ["list_id", "read_tool", "item_arg"],
     },
   },
   {
@@ -1092,8 +1199,8 @@ const TOOLS = [
   },
 ].map(({ name, description, parameters }) => ({ type: "function", function: { name, description, parameters } }));
 
-// Which tools a mode offers: execute_many only prepares an area, recheck / forget only answer an event.
-const MODE_ONLY = { execute_many: ["prepare"], recheck_recipe: ["event"], forget_recipe: ["event"] };
+// Which tools a mode offers: read_many and read_each only prepare an area, recheck / forget only answer an event.
+const MODE_ONLY = { read_many: ["prepare"], read_each: ["prepare"], recheck_recipe: ["event"], forget_recipe: ["event"] };
 const TOOLSETS = Object.fromEntries(["run", "find", "prepare", "event"].map((mode) => [mode, TOOLS.filter((t) => !MODE_ONLY[t.function.name] || MODE_ONLY[t.function.name].includes(mode))]));
 const toolsFor = (mode) => TOOLSETS[mode] ?? TOOLSETS.run;
 const TOOL_NAMES = new Set(TOOLS.map((t) => t.function.name));
