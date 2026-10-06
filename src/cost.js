@@ -4,7 +4,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 // of its cost in USD and who/what it was for. Only metadata: never prompts, texts, results or keys.
 //
 // Where it goes: one JSON line on stdout (the platform's log drain ships it to BetterStack, the way the other logs go),
-// and, when BETTERSTACK_INGEST_URL + BETTERSTACK_SOURCE_TOKEN are set, straight to a BetterStack source over HTTP.
+// and, when BETTERSTACK_INGEST_URL and a token (BETTERSTACK_SOURCE_TOKEN, else the existing BETTERSTACK_API_KEY) are set, straight to a BetterStack source over HTTP.
 // GENTER_COST_LOG=0 turns the stdout line off (the CLI sets it, so a terminal stays quiet).
 
 // USD per 1M tokens: { in, out }. The one place to update prices. COST_PRICES (JSON, same shape) overrides or adds models.
@@ -49,7 +49,7 @@ export const setCostSink = (fn) => (sink = fn);
 
 function ingest(event) {
   const url = process.env.BETTERSTACK_INGEST_URL;
-  const token = process.env.BETTERSTACK_SOURCE_TOKEN;
+  const token = process.env.BETTERSTACK_SOURCE_TOKEN || process.env.BETTERSTACK_API_KEY; // the key already synced from Infisical
   if (!url || !token) return;
   fetch(url, {
     method: "POST",
