@@ -8,6 +8,8 @@ import { createAgent } from "../src/agent.js";
 import { createGenter } from "../src/genter.js";
 import { agentResultText, agentTools, tools } from "../src/tools.js";
 
+process.env.GENTER_COST_LOG ??= "0"; // cost events are for servers (stdout -> log drain); a terminal stays quiet unless asked
+
 const dir = join(homedir(), ".genter");
 const read = (file) => (existsSync(join(dir, file)) ? JSON.parse(readFileSync(join(dir, file), "utf8")) : {});
 const write = (file, data) => {
