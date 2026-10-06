@@ -1156,7 +1156,8 @@ const MODE_NOTES = {
     "Mode: recipes (read-only; only execute tools that read data). Write NO answer for the user: they get the raw results of the recipes you name and read them themselves. " +
     "Your job is to find and run the calls whose current results hold exactly what the task asks for, so each is saved as a recipe: execute the saved recipes that fit by id (override only the args that differ), " +
     "otherwise the read tools that return that data, with the filters, dates and names of the task (read a repository file with read_file). Prefer one call that returns what is asked over broad listings; " +
-    "a call made only to find a name or an id is not one to name. Then, instead of the final answer the system prompt asks for, end with ONLY the ids of those recipes (the id of each execute or read_file result), " +
+    "a call made only to find a name or an id is not one to name. A task that joins several things (a guide and the project it is for: 'how do I write good docs for Evallens'; a person and a topic) needs what each of them holds: run the recipes of each, not only of the closest one. " +
+    "Then, instead of the final answer the system prompt asks for, end with ONLY the ids of those recipes (the id of each execute or read_file result), " +
     "most relevant first, one per line, nothing else. If no call holds anything for the task, end with one line saying what you checked.",
   run: "Mode: run (do the task).",
   prepare:

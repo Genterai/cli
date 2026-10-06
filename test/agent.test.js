@@ -756,6 +756,7 @@ describe("Mode recipes (MCP GENTER_FIND): the run hands over raw results of reci
     assert.deepEqual(out.references.map((x) => x.n), [1, 2]);
     assert.match(briefingOf(model.requests[0]), /Mode: recipes/);
     assert.match(briefingOf(model.requests[0]), /Write NO answer/);
+    assert.match(briefingOf(model.requests[0]), /joins several things .* run the recipes of each/);
     const stored = JSON.stringify(cipher("s:u:runs").open(runs.rows.get(out.run_id).blob));
     assert.doesNotMatch(stored, /sign by Friday/);
     assert.equal(r.data.messages[1].snippet, "Please sign by Friday");
