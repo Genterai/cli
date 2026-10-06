@@ -2,7 +2,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:
 import { Composio } from "@composio/core";
 import { logCost, roughTokens, usageFields, withCost } from "./cost.js";
 import { addMcpServer, isCustomToolkit, mcpUrl } from "./mcp.js";
-import { canonicalArgs, canonicalJson, classifyFailure, contentHash, isPartial, normalizeLegacy, publicRecipe, recipeId, sourceOf } from "./recipe.js";
+import { areaOf, canonicalArgs, canonicalJson, classifyFailure, contentHash, isPartial, normalizeLegacy, publicRecipe, recipeId, sourceOf } from "./recipe.js";
 import { fill, inferList, pick } from "./shape.js";
 import { addIntent, chunkCall, fileCall, isSkillTool, LIMITS as SKILL_LIMITS, SCRIPT_NOTE, SKILL_TOOLS } from "./skills.js";
 import { crawl, forgetPage, readPage, siteUrl, underSite } from "./web.js";
@@ -742,9 +742,11 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       if (task && !asked) asked = await embed(task, "recipe_embed").catch(() => null);
       // A skill's piece asked for in other words is the same recipe with one more intent key, never a second recipe.
       const intents = (old) => (isSkillTool(tool) ? addIntent(old?.intents, task) : old?.intents);
+      // The area the call reads in (a repository, a folder, a calendar), so a project can be offered for it.
+      const area = areaOf({ args, data: result.data });
       if (existing && existing.digest === digest && (existing.summary || !openrouterApiKey)) {
         // Same result: nothing is described or embedded again.
-        const next = { ...existing, status: "fresh", checked_at: at };
+        const next = { ...existing, scope: withArea(existing.scope, area), status: "fresh", checked_at: at };
         if (asked) next.queryEmbeddings = addQuery(existing.queryEmbeddings, asked, at);
         if (isSkillTool(tool) && task) next.intents = intents(existing);
         if (asked || (isSkillTool(tool) && task) || existing.status !== "fresh" || existing.checked_at !== at) await save(next);
@@ -764,7 +766,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         ...(legacy?.disabled && { disabled: legacy.disabled }),
         ...(kept && { title: kept.title, short: kept.short, summary: kept.summary, items: kept.items, summaryEmbedding: kept.summaryEmbedding, itemEmbeddings: kept.itemEmbeddings, source: kept.source, partial: kept.partial }),
       };
-      const record = { ...base, digest, status: "fresh", updated_at: at, checked_at: at };
+      const record = { ...base, scope: withArea(base.scope, area), digest, status: "fresh", updated_at: at, checked_at: at };
       if (asked) record.queryEmbeddings = addQuery(base.queryEmbeddings, asked, at);
       if (isSkillTool(tool) && task) record.intents = intents(base);
       // The call as it ran: args kept as written (placeholders included), in canonical form so equal calls look equal.
@@ -965,6 +967,12 @@ const ITEM_STRONG = 0.45;
 // of the stored one; when full, the least frequent and then the oldest goes. No backfill: they pile up from now on.
 const MAX_QUERIES = 8;
 const QUERY_DUP = 0.95;
+
+// A recipe's scope with the area its last result was in (areaOf), or without one when that call is in none.
+const withArea = (scope = {}, area) => {
+  const { area: _old, ...rest } = scope ?? {};
+  return area ? { ...rest, area } : rest;
+};
 export function addQuery(list = [], vector, at = new Date().toISOString()) {
   if (!vector?.length) return list;
   const e = Array.from(vector.slice(0, ITEM_DIMS));

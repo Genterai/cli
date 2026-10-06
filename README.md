@@ -37,7 +37,7 @@ what was returned. Retrieval embeds the result summary (with its keywords: the a
 in the data's language, so "почта" finds "Unread emails from today") and items, never the tool's description. A recipe's summary says
 which call to make, not the current value: the agent always executes again.
 
-Recipe record (stored encrypted, raw results never): `{id, tool, args, scope:{account, toolkit}, title, short, summary, items,
+Recipe record (stored encrypted, raw results never): `{id, tool, args, scope:{account, toolkit, area?}, title, short, summary, items,
 keywords, digest, partial, source:{app, path[], url}, created_at, updated_at, checked_at, status: fresh|stale|gone|denied,
 trigger:{active, spec, id}}`. Records of the older model (`memory`, `alias`, `kind: "sync"`) are normalized on read.
 
@@ -218,6 +218,11 @@ If the agent finds a finite area (a repository's files, a Drive folder, a channe
 (no side effects; the result carries `suggestions: [{label}]`). A `prepare` run then fans out reads with
 `execute_many` (up to 100 calls, 4 at a time); each success is an ordinary atomic recipe. `genter.recipes.prepareScope`
 keeps a minimal area record in the optional `scopes` store so events know the area was prepared.
+
+Every recipe knows the area its call reads in, `scope.area = {id, label, kind, where}` (`areaOf` in `src/recipe.js`): the
+container its args name (`owner` + `repo` is a repository, `calendarId` a calendar, `channel` a channel, `folder_id` a
+folder...), else the one folder every item of its result sits in (Drive's `parents`); none for a call over the whole app.
+Arg and field names only, no connector code. The hosted backend uses it to offer a project for that area.
 
 **Websites** need no app. `prepare_website({url, depth?})` is a prepared area: a local crawl (`src/web.js`) finds the
 address and the pages it links to on the same site, up to two links deep (at most 120 pages, robots.txt respected,
