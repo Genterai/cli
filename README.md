@@ -84,7 +84,12 @@ genter continue '{"run_id":"...","message":"use my work account"}'
 A run ends `done`, `needs_input` (a question), `needs_connection` (a connect link) or `failed`; `continue` picks it up.
 A `done` answer cites its sources as `[n]` and comes with `references` (see below).
 `find` runs only tools that read (by Composio's hint or the verb in the slug). Every successful call is saved as a recipe
-automatically; each step of the result says `recipe: {id, created, changed}` and the result lists `saved` and `recipes_used`. The model is `AGENT_MODEL` on OpenRouter, default `openai/gpt-oss-120b` (see Models).
+automatically; each step of the result says `recipe: {id, created, changed}` and the result lists `saved` and `recipes_used`.
+Each reference names the recipe whose call showed it (`recipe`), and a `done` result lists `answer_recipes`: the recipes its
+references came from (mode `recipes`: those handed over), not the calls made only to find a name or an id. The request is
+kept on those recipes, and only on them, once the run is done (`genter.recipes.asked({ ids, task })`: its vector, and a
+skill's piece takes it as an intent), so the same request, or one close to it, finds all of them again (modes `run`, `find`,
+`recipes`; a `prepare` or `event` task is an instruction and is kept nowhere). The model is `AGENT_MODEL` on OpenRouter, default `openai/gpt-oss-120b` (see Models).
 The agent is offered only tools of connected apps (`genter.search({ connected: true })`), and a call gpt-oss writes as
 text instead of making it (its harmony channels came back unparsed) is made as a call, never shown as the answer.
 An answer that falls into a loop (gpt-oss at temperature 0 now and then writes one piece until its token limit:
@@ -218,6 +223,7 @@ Composio schemas (`test/fixtures/catalogues.json`: Linear, Slack, Jira, Trello, 
 | R1–R5 | agent, reading files | `read_file` by owner, repo and path in a find: the text, a file reference, no recipe; a folder's entries; a missing file is an error; "no tool to read files" is sent back once on the strong model, never twice; a viewer cannot read |
 | P1–P4 | agent, a task of several parts on a recipe of one | `search_tools` gets Composio tools even when a recipe fits; `read_file` with a commit's ref + path reads that path; `""` or the app's name is no account; an execute with no tool moves to the strong model; an empty ending is asked for the answer once |
 | T1 | tool ranking | "the" and other empty words do not pull `..._FOR_THE_AUTHENTICATED_USER` tools up |
+| R1–R3 (answer's recipes) | the recipes an answer rests on | references carry `recipe`; `answer_recipes` are the cited ones (mode `recipes`: those handed over) and only they keep the request; a prepare keeps none |
 | N1 | no answer | an empty ending is asked once on the strong model; empty again is a failure naming what ran, never "Done." with references |
 | G1–G2, G4–G5 | `genter.execute` itself (Composio answered over fetch) | a saved call returns its result and a deterministic id; `remember: false` saves nothing; a line of a result finds its recipe |
 | R1–R9 | recipes | one record per call whatever the arg order; an unchanged result calls no model and only bumps `checked_at`; a changed one regenerates the same recipe; a failed call creates nothing; gone / denied are never offered; two accounts, two recipes; partial pages; recheck, triggers, scopes |

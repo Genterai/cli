@@ -705,6 +705,37 @@ describe("Recipes in the agent", () => {
   });
 });
 
+describe("The recipes an answer rests on: its references name them, and only they keep the request", () => {
+  const results = { GITHUB_LIST_REPOSITORIES: [{ name: "genter-cli", full_name: "Genterai/genter-cli" }], GITHUB_LIST_COMMITS: [{ sha: "a1", message: "Fix paging" }, { sha: "b2", message: "Add search" }] };
+  const twoCalls = (text) => [call("execute", { tool: "GITHUB_LIST_REPOSITORIES", args: {} }), call("execute", { tool: "GITHUB_LIST_COMMITS", args: { owner: "Genterai", repo: "genter-cli" } }), answer(text)];
+
+  it("R1 each reference carries the recipe whose call showed it; answer_recipes are the cited ones, and only they keep the request", async () => {
+    const genter = fakeGenter({ connected: ["github"], results });
+    model = fakeModel(twoCalls("Latest: **Fix paging** [2], before it Add search [3]."));
+    const out = await agentWith(genter).start({ task: "recent commits of genter-cli", mode: "find" });
+    assert.equal(out.status, "done");
+    assert.deepEqual(out.references.map((r) => [r.n, r.recipe]), [[2, "rcp_2"], [3, "rcp_2"]]);
+    assert.deepEqual(out.answer_recipes, ["rcp_2"]); // the repository list only found the name
+    assert.deepEqual(genter.asked, [{ ids: ["rcp_2"], task: "recent commits of genter-cli" }]);
+    assert.ok(genter.executed.every((e) => e.task === undefined), "no call files the request by itself");
+  });
+
+  it("R2 mode recipes: the results handed over are the answer's recipes", async () => {
+    const genter = fakeGenter({ connected: ["github"], results });
+    model = fakeModel(twoCalls("rcp_2"));
+    const out = await agentWith(genter).start({ task: "recent commits of genter-cli", mode: "recipes" });
+    assert.deepEqual(out.answer_recipes, ["rcp_2"]);
+    assert.deepEqual(genter.asked, [{ ids: ["rcp_2"], task: "recent commits of genter-cli" }]);
+  });
+
+  it("R3 a prepare run keeps no request: its task is an instruction, not a question", async () => {
+    const genter = fakeGenter({ connected: ["github"], results });
+    model = fakeModel(twoCalls("Read 2 [2]."));
+    await agentWith(genter).start({ task: "Read every file of Genterai/genter-cli", mode: "prepare" });
+    assert.deepEqual(genter.asked, []);
+  });
+});
+
 describe("Mode recipes (MCP GENTER_FIND): the run hands over raw results of recipes, no written answer", () => {
   const MAIL = { messages: [{ id: "m1", subject: "Contract draft", from: "anna@x.com" }, { id: "m2", subject: "Re: contract", from: "anna@x.com", snippet: "Please sign by Friday" }] };
   const results = { GMAIL_FETCH_EMAILS: MAIL, GITHUB_LIST_REPOSITORIES: [{ name: "genter-cli" }], GITHUB_LIST_COMMITS: [{ sha: "a1", message: "Fix paging" }], GMAIL_SEND_EMAIL: { id: "sent" } };

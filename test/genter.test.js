@@ -551,6 +551,19 @@ describe("queryEmbeddings", () => {
     assert.ok((await genter.search({ query: "clumsy way to ask it" })).some((r) => r.tool === call.tool));
   });
 
+  it("Q4 asked keeps a request on the recipes an answer used, after the calls, and only on them", async () => {
+    const { genter } = setup();
+    const answerCall = await genter.execute(call);
+    const lookup = await genter.execute({ tool: "GITHUB_LIST_REPOSITORIES", args: { owner: "o" } });
+    await Promise.all([answerCall.pending, lookup.pending]);
+    await genter.search({ query: "old question about waiting reviews" });
+    assert.deepEqual(await genter.recipes.asked({ ids: [answerCall.id, "rcp_missing"], task: "old question about waiting reviews" }), { filed: 1 });
+    const found = (await genter.search({ query: "clumsy way to ask it" })).filter((r) => r.id);
+    assert.deepEqual(found.map((r) => r.id), [answerCall.id]);
+    assert.ok(found[0].score >= 0.9);
+    assert.deepEqual(await genter.recipes.asked({ ids: [answerCall.id], task: "  " }), { filed: 0 });
+  });
+
   it("Q3 without a request on the call nothing is kept and the behaviour is as before", async () => {
     const { genter } = setup();
     const out = await genter.execute(call);
