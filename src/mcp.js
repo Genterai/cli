@@ -48,7 +48,7 @@ async function composioApi(apiKey, method, path, body) {
     data = null;
   }
   const why = [data?.error?.message ?? data?.message ?? text.slice(0, 200), ...(data?.error?.errors ?? [])].join("; ");
-  if (!res.ok) throw Object.assign(new Error(`Composio ${res.status}: ${why}`), { status: res.status });
+  if (!res.ok) throw Object.assign(new Error(`Adding the server failed (${res.status}): ${why}`), { status: res.status });
   return data;
 }
 
@@ -131,7 +131,7 @@ export async function addMcpServer({ apiKey, url: raw, name, api_key_header }) {
     // when the answer timed out: the toolkit as it is, if it is there.
     if (e.status !== 409 && e.name !== "TimeoutError") throw e;
     const t = await composioApi(apiKey, "GET", `/api/v3/toolkits/CUSTOM_${slug}`).catch(() => null);
-    if (!t) throw e.name === "TimeoutError" ? new Error(`Composio took too long to add ${url}; try again in a minute`) : e;
+    if (!t) throw e.name === "TimeoutError" ? new Error(`Adding ${url} took too long; try again in a minute`) : e;
     return { toolkit: t.slug.toLowerCase(), auth: t.auth_config_details?.[0]?.mode ?? scheme.mode, url };
   }
 }

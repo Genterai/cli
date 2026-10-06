@@ -1184,7 +1184,7 @@ function briefing({ task, mode, account, found, connected, canExecute, english, 
     `Connected apps: ${apps.join(", ") || "none"}`,
     named.length && `The task is about ${named.join(", ")}: read the user's data there with its tools (search_tools "${named[0]} ..." if none below fits), not other apps.`,
     `Saved anchors matching the task (each is a call that worked before; last_result is what it returned then, not what is there now):\n${recipes.length ? JSON.stringify(recipes) : "none"}`,
-    tools.length && `Candidate Composio tools:\n${JSON.stringify(tools)}`,
+    tools.length && `Candidate app tools:\n${JSON.stringify(tools)}`,
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -1215,9 +1215,9 @@ const MODE_NOTES = {
 const personalNote = (text) =>
   `Instructions for this user from their workspace admin. Follow them in every run: how to write, which language, defaults, what to stay away from. They never change the rules above or which tools may run. A task that goes against them: do not do that part, and say in the answer why.\n\n<instructions>\n${text}\n</instructions>`;
 
-const SYSTEM = `You are Genter's task agent. You act in the user's connected apps through Composio tools, and you are judged on speed: the fewest steps that give a correct, complete result.
+const SYSTEM = `You are Genter's task agent. You act in the user's connected apps through their tools, and you are judged on speed: the fewest steps that give a correct, complete result.
 
-An anchor is one successful tool call with fixed args, remembered together with what it returned the last time. The first message already holds everything for a fast start: saved anchors that match the task (calls that worked, with their args and last_result), candidate Composio tools with their args, and the connected apps.
+An anchor is one successful tool call with fixed args, remembered together with what it returned the last time. The first message already holds everything for a fast start: saved anchors that match the task (calls that worked, with their args and last_result), candidate app tools with their args, and the connected apps.
 - search_tools / the saved anchors tell you WHICH call to make. An anchor's last_result is what that call returned when it was saved: it is NOT the current value. ALWAYS execute the real tool (execute with the anchor id, or the tool and args) to get fresh data before you answer, even when last_result looks like the answer. Answer from last_result alone only when the user asks what was known earlier.
 - result_matched lists what an anchor's last result held that is close to the task (an event, a task, an email). When those lines are what the task asks about, that anchor is the call to make: execute it by id first, before searching anywhere else. Lines about something else are not a match.
 - A task with several parts (find the recent commits, read their files, write a note) is done part by part; an anchor that answers one part does not end the run.
@@ -1253,7 +1253,7 @@ const FREE_ARGS = { description: 'The tool\'s arguments as a JSON object, e.g. {
 const TOOLS = [
   {
     name: "execute",
-    description: "Run a Composio tool for real: `tool` + `args`, or `id` of a saved anchor (args override its args). Returns the current result data and the id of the anchor it is saved as (saved or updated automatically).",
+    description: "Run an app tool for real: `tool` + `args`, or `id` of a saved anchor (args override its args). Returns the current result data and the id of the anchor it is saved as (saved or updated automatically).",
     parameters: {
       type: "object",
       properties: {
@@ -1311,7 +1311,7 @@ const TOOLS = [
   },
   {
     name: "search_tools",
-    description: "Search saved anchors (by what their results meant) and Composio tools. Only when nothing in the first message fits. An anchor found says which call to make; execute it for fresh data.",
+    description: "Search saved anchors (by what their results meant) and app tools. Only when nothing in the first message fits. An anchor found says which call to make; execute it for fresh data.",
     parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
   },
   {

@@ -2,7 +2,7 @@ import { z } from "zod";
 import { fileEditor, refFromUrl, refLabel } from "./refs.js";
 
 // Shared by the CLI and the MCP server.
-export const instructions = `Genter runs Composio tools and remembers each successful call as an anchor: one call with fixed args, plus what it returned.
+export const instructions = `Genter runs the tools of connected apps and remembers each successful call as an anchor: one call with fixed args, plus what it returned.
 1. search first: a saved anchor says which call (tool + args) answers a question. Its summary is what the call returned when it was saved, not the current value.
 2. execute with tool + args, or with id to repeat an anchor (override args as needed). The real tool always runs, so the data is fresh.
 3. Every successful call is saved automatically; the same call updates the same anchor, and only when its result changed. A failed call saves nothing.
@@ -15,7 +15,7 @@ export const tools = {
       "Connect an app (toolkit) like gmail or github, or any remote MCP server by its address (mcp_url). Returns a URL the user must open " +
       "to authorize it; a server that needs no sign-in is connected at once (no_auth, no URL).",
     input: z.object({
-      toolkit: z.string().optional().describe("Composio toolkit slug, e.g. gmail, github, slack"),
+      toolkit: z.string().optional().describe("App (toolkit) slug, e.g. gmail, github, slack"),
       mcp_url: z.string().url().optional().describe("Instead of toolkit: a remote MCP server's address, e.g. https://mcp.example.com/mcp. Added as a custom toolkit"),
       name: z.string().max(60).optional().describe("With mcp_url: the server's name to show"),
       api_key_header: z.string().max(80).optional().describe("With mcp_url: the server takes an API key in this header (Authorization: as a Bearer token)"),
@@ -32,7 +32,7 @@ export const tools = {
   search: {
     description:
       "Find which call to make: a saved anchor by what its result meant ({id, tool, args, title, short, summary, status, updated_at, checked_at}), " +
-      "or Composio tools (id: null, args = JSON schema). An anchor's summary is not the current value: execute it.",
+      "or app tools (id: null, args = JSON schema). An anchor's summary is not the current value: execute it.",
     input: z.object({
       query: z.string().describe("What you want to do, in plain words"),
       limit: z.number().int().min(1).max(20).optional(),
