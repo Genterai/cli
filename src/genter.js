@@ -360,10 +360,6 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     return { score, matched };
   }
 
-  // Vectors of the requests searched lately, by their text: execute({ task }) files the one it was made for on the
-  // recipe (queryEmbeddings) without embedding it again.
-  const askedVectors = new Map();
-  const MAX_ASKED = 50;
 
   const toolInfos = new Map();
   const toolInfo = (tool) => {
@@ -1047,6 +1043,10 @@ export function addQuery(list = [], vector, at = new Date().toISOString()) {
 }
 const decrypted = new Map(); // "<user>:<blob prefix>" -> record, shared by every genter in the process
 const translations = new Map(); // query -> Promise<{ en, terms } | null>
+// Vectors of the requests searched lately, by their text, shared by every genter in the process (a backend makes one per
+// request): execute({ task }) and recipes.asked() file the one search() made for a recipe without embedding it again.
+const askedVectors = new Map();
+const MAX_ASKED = 200;
 
 // Embeddings are stored as base64 float32 (8 KB instead of ~30 KB of JSON numbers each); older records keep arrays.
 const VECTORS = ["summaryEmbedding"];
