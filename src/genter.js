@@ -821,6 +821,9 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       // says nothing about the recipe: a timeout, a bad argument).
       async recheck(id) {
         const record = await loadOrThrow(id);
+        // Checking runs the call again, so only a call that may only read: a saved send, create or delete is never run again
+        // to check it (by the hourly sweep, a digest, an event or "Check now").
+        if (changesData(record.tool)) return { recipe: publicRecipe(record), changed: false, status: "failed", error: `${record.tool} changes something in the app: it is not run again to check it` };
         const out = await api.execute({ id, account: record.scope?.account || undefined });
         if (out.pending) await out.pending;
         const status = out.recipe_status ?? (out.result?.successful === false ? "failed" : "fresh");
@@ -1148,9 +1151,13 @@ export function rankTools(tools, query, limit, semantic = null) {
 // A tool that only reads, by Composio's hint or the verb in its slug.
 function readsOnly(slug, tags = []) {
   if (tags.includes("readOnlyHint")) return true;
-  const s = slug.toUpperCase();
-  if (/_(SEND|CREATE|DELETE|REMOVE|UPDATE|PATCH|POST|REPLY|FORWARD|MOVE|ARCHIVE|TRASH|ADD|INSERT|UPLOAD|SET|INVITE|MERGE|CLOSE|PUBLISH|SHARE|EXECUTE|RUN|START|STOP|CANCEL|WATCH|PIN|UNPIN|FOLLOW|UNFOLLOW|MODIFY|CLEAR|BATCH_UPDATE|IMPORT|COPY)(_|$)/.test(s)) return false;
-  return /_(GET|LIST|FETCH|SEARCH|FIND|READ|RETRIEVE|QUERY|HISTORY|EXPORT|DOWNLOAD)(_|$)/.test(s);
+  if (changesData(slug)) return false;
+  return /_(GET|LIST|FETCH|SEARCH|FIND|READ|RETRIEVE|QUERY|HISTORY|EXPORT|DOWNLOAD)(_|$)/.test(slug.toUpperCase());
+}
+
+// A tool whose slug says it changes something (sends, creates, deletes, updates ...).
+export function changesData(slug) {
+  return /_(SEND|CREATE|DELETE|REMOVE|UPDATE|PATCH|POST|REPLY|FORWARD|MOVE|ARCHIVE|TRASH|ADD|INSERT|UPLOAD|SET|INVITE|MERGE|CLOSE|PUBLISH|SHARE|EXECUTE|RUN|START|STOP|CANCEL|WATCH|PIN|UNPIN|FOLLOW|UNFOLLOW|MODIFY|CLEAR|BATCH_UPDATE|IMPORT|COPY)(_|$)/.test(String(slug ?? "").toUpperCase());
 }
 
 // AES-256-GCM. Blob = iv (12 bytes) + auth tag (16 bytes) + ciphertext, base64.

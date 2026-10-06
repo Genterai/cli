@@ -41,6 +41,9 @@ export function createAgent({
   maxTokens = Number(process.env.AGENT_MAX_TOKENS) || 16_384,
   canExecute = true,
   canConnect = true,
+  // Only reading, whatever is asked (MCP below Enterprise): every run is read-only (a "run" goes as a find, a run continued
+  // here goes on as one), write() refuses, and no tool that changes something runs.
+  readOnly = false,
   instructions,
   onEvent = () => {},
 }) {
@@ -98,6 +101,8 @@ export function createAgent({
       const { tool, args, ...rest } = input;
       return call(run, tool, { ...rest, ...args });
     }
+    // A tool its mode does not offer (a model can still name one): recheck_recipe would run a saved call again, a write too.
+    if (MODE_ONLY[name] && !MODE_ONLY[name].includes(run.mode)) return { content: `Not allowed: ${name} is not a tool of a ${run.mode} task.` };
     switch (name) {
       case "search_tools": {
         // A model that keeps searching instead of running something: after a few searches it must execute.
@@ -129,8 +134,11 @@ export function createAgent({
           const each = list && `To read every listed item, call execute {tool: "read_each", args: {list_id: "${list}", read_tool: <the tool that reads ONE item>, shared_args: {...}, item_arg: <e.g. path>}}.`;
           return { content: JSON.stringify({ error: "Pass tool (a slug from the first message or search results) and args, or id of a saved recipe.", ...(each && { hint: each }) }) };
         }
-        if (READ_ONLY_MODES.includes(run.mode) && tool && !isReadOnly(tool)) {
-          return { content: `Not allowed: ${tool} changes data and this is a read-only ${run.mode}. Only read, or tell the user to use run_task.` };
+        // A read-only run checks the call it would make: a recipe id it did not meet is looked up first (a saved recipe can
+        // be a send or a delete), and a call whose tool is not known does not run.
+        const ran = tool ?? (READ_ONLY_MODES.includes(run.mode) && input.id ? await genter.recipes?.get?.(input.id).then((r) => r?.tool, () => null) : null);
+        if (READ_ONLY_MODES.includes(run.mode) && (!ran || !isReadOnly(ran))) {
+          return { content: notAllowed(ran ?? `recipe ${input.id}`, run.mode) };
         }
         // A call that already failed is not run again: the model gets the error back and must change course.
         const key = `${tool ?? input.id} ${JSON.stringify(input.args ?? {})}`;
@@ -241,7 +249,7 @@ export function createAgent({
       }
       case "edit_file": {
         if (!canExecute) return { content: "Not allowed: this user can search but not change files." };
-        if (READ_ONLY_MODES.includes(run.mode)) return { content: `Not allowed: editing a file changes it and this is a read-only ${run.mode}. Tell the user to use run_task.` };
+        if (READ_ONLY_MODES.includes(run.mode)) return { content: notAllowed("editing a file", run.mode) };
         if ((run.failures.edit_file ?? 0) >= MAX_TOOL_FAILURES) return { content: JSON.stringify({ error: `edit_file failed ${MAX_TOOL_FAILURES} times in this run.`, hint: "Answer with what you have and say what did not work." }) };
         const place = fileRef(run, input);
         if (!place) return { content: JSON.stringify({ error: input.ref != null ? `No reference [${input.ref}] in this run` : "Pass ref (the file's reference number) or owner, repo and path" }) };
@@ -487,6 +495,8 @@ export function createAgent({
     // Start a task. Recipes, candidate tools and connections are fetched in parallel before the first LLM call.
     // target (write): a reference to write at, with its write tools; the briefing ends with it.
     async start({ task, mode = "run", account, target }) {
+      if (readOnly && target) throw new Error(READ_ONLY_ERROR);
+      if (readOnly && !READ_ONLY_MODES.includes(mode)) mode = "find";
       onEvent({ type: "step", tool: "search_recipes", input: { query: task } });
       const searched = Date.now();
       const connecting = genter.login().then((l) => l.connected ?? []).catch(() => []);
@@ -535,6 +545,7 @@ export function createAgent({
       const run = await load(run_id);
       run.steps = [];
       run.writing = false; // only a write round (write, start with a target) must write
+      if (readOnly && !READ_ONLY_MODES.includes(run.mode)) run.mode = "find"; // a run started elsewhere goes on read-only here
       run.messages.push({ role: "user", content: message });
       return loop(run);
     },
@@ -544,6 +555,7 @@ export function createAgent({
     // tools in front of it. With tool + args: that exact call, the reference's args under the given ones, no model step.
     // With edits (a file): the file is read, the edits applied and the result committed once, no model step.
     async write({ run_id, ref, change, tool, args, edits, message, account }) {
+      if (readOnly) throw new Error(READ_ONLY_ERROR);
       const run = run_id ? await load(run_id) : null;
       const target = targetOf(run, ref);
       if (!target && !tool) throw new Error("Pass ref: a reference number [n] from run_id's result, or a link to the place");
@@ -971,6 +983,7 @@ function writeNote(place, change) {
       ? `${editor ? "To create a new file instead" : "Write tools for it"}, args already filled (pass them as they are, add only the rest):\n${hints.map((h) => `- ${h.tool} ${JSON.stringify(h.args)}${h.needs.length ? ` + ${h.needs.join(", ")}` : ""} — ${h.does}`).join("\n")}`
       : `No write tool is known for it yet: search_tools "${place.app} ${place.kind} update" (or "comment", "add"), then execute with the args above.`,
     `Change: ${change}`,
+    "Text the change gives (a reply, a comment, a section, a line of a file) goes there word for word: write no text of your own, do not rewrite, shorten or add to it.",
     "Write only there, in as few steps as possible. Then answer with what was written and its link.",
   ]
     .filter(Boolean)
@@ -1122,6 +1135,9 @@ const NOT_AN_ANSWER =
 const MAX_TOOL_FAILURES = 3;
 const MAX_SEARCHES = 3;
 const READ_ONLY_MODES = ["find", "recipes", "prepare", "event"];
+const READ_ONLY_ERROR = "Read-only: this workspace can find, not change things in its apps (actions come with the Enterprise plan)";
+// What a read-only run is told when it tries to change something: say so, never claim it was done.
+const notAllowed = (what, mode) => `Not allowed: ${what} may change data and this is a read-only ${mode}. Only read; say in the answer what was not done.`;
 // Modes whose task is a person's request (not a prepare or event instruction): it is kept on the recipes the answer used.
 const ASKED_MODES = ["run", "find", "recipes"];
 const MAX_MANY = 100;

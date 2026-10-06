@@ -69,93 +69,107 @@ export const tools = {
 };
 
 // MCP surface: only agent tools. Each one starts or continues a fast server-side agent that works from recipes first.
+// GENTER_FIND and GENTER_CONTINUE_TASK only read; GENTER_RUN_TASK and GENTER_WRITE change things and come only with actions.
 // Names carry the GENTER_ prefix so they stay recognizable in clients that flatten tools from many servers.
 const APPS =
   "Gmail, Google Calendar, Drive, Sheets, Docs, Slack, GitHub, Notion, Linear, Jira, HubSpot, Salesforce, Outlook, Teams, " +
   "Telegram, Discord, Asana, Trello, Figma, Stripe, Shopify, Airtable, Zoom and 500+ more";
 
-export const agentInstructions = `Genter connects the user's apps (${APPS}) in one place and works in them with a fast agent that remembers what worked:
+// What Genter does and what the client's own model does: Genter finds the user's data (and, with actions on, carries out
+// an action the client has fully decided); the client's model reads, thinks and writes every text itself. Genter never
+// writes, rewrites, summarizes or translates anything for it.
+export const agentInstructions = `Genter connects the user's apps (${APPS}) in one place and finds what is in them, fast:
 every successful call becomes a recipe (one call with fixed args), found next time by what it returned; the real call is always re-run for fresh data.
-- GENTER_FIND: any question about the user's own data (emails, events, files, issues, messages, contacts). Read-only. Returns raw data:
+Genter finds; you think and write. Genter returns the raw data from the user's apps and never writes, rewrites, summarizes, translates or drafts anything:
+do all of that yourself from the data it returns. Never ask Genter to change, rewrite, improve, shorten or compose a text.
+- GENTER_FIND: any question about the user's own data (emails, events, files, issues, messages, contacts, docs, pages). Read-only. Returns raw data:
   the live results of the recipes that hold the answer (a saved one that fits, or new ones a fast agent finds and saves), each under a line naming its call. Answer from them yourself.
-- GENTER_RUN_TASK: anything that does something in an app: send, reply, create, update, schedule, post, move, multi-app workflows.
-- GENTER_CONTINUE_TASK: answer a run's question, continue after the user connected an app, or a follow-up on the same result.
+  Ask only for what to find (who, what, when, which app), never for what to do with it: for "rewrite the intro of our README", find "the README of <repo>" and rewrite it yourself.
+- GENTER_CONTINUE_TASK: answer a run's question, continue after the user connected an app, or narrow or widen the same search.
 Call them whenever the user mentions or implies an app, an account or their own data. Never say you have no access before trying.
-Pass the whole task with every known detail in one call, in the user's words; do not split it or call app tools step by step.
+Pass every known detail (names, dates, apps, accounts) in one call, in the user's words.
 Show connect links to the user as Markdown links.
-GENTER_RUN_TASK answers cite their sources as [n]; References (also under GENTER_FIND's results, whose items carry _ref: n) say what each is and where: a path, a link, the ids that point to it.
+References under GENTER_FIND's results (whose items carry _ref: n) say what each is and where: a path, a link, the ids that point to it.
 A reference's "read" line is the GENTER_FIND call that reads that place in full (an email's body, a whole file, a skill's section, a page): make it when the answer needs more than the result shows.`;
 
-// Temporary: writing at a reference over MCP (GENTER_WRITE), added to the instructions where it is on.
-export const writeInstructions = `- GENTER_WRITE: write where a result pointed: run_id + ref (the [n] of its References) + the change. Each reference's "write" line names the app's write tools for that exact place, args already known. A file: pass edits ([{find, replace}], exact pieces of its text) and message: one commit, only those pieces change.`;
+// Added to the instructions where actions are on (Enterprise): the tools that change something in the user's apps.
+export const actionInstructions = `Actions (this workspace may change things in its apps):
+- GENTER_RUN_TASK: carry out an action you have fully decided: send, reply, create, update, schedule, post, move. Pass the exact final text
+  (an email's body, a message, a comment, a title) word for word: Genter puts it there as given and writes nothing of its own.
+- GENTER_WRITE: write where a result pointed: run_id + ref (the [n] of its References) + the exact text. Each reference's "write" line names the app's write tools for that exact place, args already known.
+  A file: pass edits ([{find, replace}], exact pieces of its current text and the new text you wrote) and message: one commit, only those pieces change.
+Write every text yourself first (from what GENTER_FIND returned), then hand it over; never ask Genter to write or rewrite it.`;
 
 // connected: [{ toolkit, alias? }] — listed in descriptions so clients prefer apps the user already has.
-// write: also GENTER_WRITE (temporary: writing at a reference of a result).
-export function agentTools({ connected = [], write = false } = {}) {
+// actions: also GENTER_RUN_TASK and GENTER_WRITE, the tools that change something (MCP: Enterprise only; everyone else reads).
+export function agentTools({ connected = [], actions = false } = {}) {
   const apps = [...new Set(connected.map((c) => c.toolkit))];
   const have = apps.length ? `\nConnected for this user: ${apps.join(", ")}. Prefer these when the request does not name an app.` : "";
   const account = z.string().optional().describe("Which connection to use when an app is connected several times, e.g. work or personal");
   return {
-    GENTER_RUN_TASK: {
-      description:
-        `Do things in the user's apps: ${APPS}, all connected in one place. ` +
-        "Give the task in plain words; a fast agent picks the tools, fills the args, runs them and returns the result.\n" +
-        "Always call this whenever the user asks to do something in an external app, account, inbox, calendar, repo, document, " +
-        "ticket, chat or CRM — never say \"I don't have access to X\" before calling it. " +
-        "It is faster and more reliable than calling app tools yourself: it starts from recipes of past calls that already worked, " +
-        "so a known task takes one step.\n" +
-        "Use for: send or reply to an email or message, create or update an issue, event, doc, row or deal, post, schedule, " +
-                "and workflows across apps (e.g. \"turn today's support emails into Linear issues and post a summary to #support\").\n" +
-        "Pass the full task with every known detail (names, dates, ids, which account) in one call. " +
-        "If the result has status needs_connection, show the connect link to the user, " +
-        "then call GENTER_CONTINUE_TASK with run_id." +
-        have,
-      input: z.object({
-        task: z.string().describe("The whole task in plain words, with every known detail, e.g. \"reply to Anna's last email: Thursday 3pm works\""),
-        account,
-      }),
-      annotations: { title: "Run a task in your apps", readOnlyHint: false, destructiveHint: false, openWorldHint: true },
-    },
     GENTER_FIND: {
       description:
-        "Find anything in the user's apps and past results: emails, messages, meetings, files, docs, issues, PRs, contacts, deals, invoices. " +
-        "Read-only and safe — nothing is sent or changed.\n" +
+        "Find anything in the user's apps: emails, messages, meetings, files, docs, pages, issues, PRs, contacts, deals, invoices. " +
+        "Read-only and safe: nothing is sent or changed.\n" +
         "Returns raw data, not a written answer: the live results of the recipes (saved calls with fixed args) that hold what was asked, " +
         "best first, each under a line naming its call (recipe id, tool, args), then a JSON line. Read them and answer the user yourself.\n" +
+        "Genter only finds. It never writes, rewrites, summarizes or translates: ask it for the data, then do that yourself. " +
+        "Say what to find, not what to do with it: \"the README of genter-cli\", not \"rewrite the README of genter-cli\"; " +
+        "\"Anna's last email about the contract\", not \"draft a reply to Anna\".\n" +
         "A saved recipe that clearly fits runs at once; otherwise a fast agent finds the right calls in the apps and saves them as recipes, " +
         "so the next such question takes one step. The data is always read live from the apps, so it is current.\n" +
         "Call it before answering any question about the user's own data instead of guessing or saying you can't see it: " +
         "\"what did Anna write about the contract\", \"my meetings tomorrow\", \"PRs waiting for my review\", \"the invoice from March\"." +
         have,
       input: z.object({
-        question: z.string().describe("What to find, in plain words, with any known names, dates or apps"),
+        question: z.string().describe("What to find, in plain words, with any known names, dates or apps. Only what to find, never what to do with it"),
         account,
       }),
       annotations: { title: "Find in your apps", readOnlyHint: true, openWorldHint: true },
     },
     GENTER_CONTINUE_TASK: {
       description:
-        "Continue a Genter run by run_id (from GENTER_RUN_TASK or GENTER_FIND): send the user's answer to its question, " +
-        "say the app is connected now, correct it (\"use my work account\"), or give a follow-up on the same result " +
-        "(\"now reply to that email\", \"put these in a sheet\"). Keeps the run's context, so it is faster than a new task.",
+        `Continue a Genter run by run_id (from GENTER_FIND${actions ? " or GENTER_RUN_TASK" : ""}): send the user's answer to its question, ` +
+        "say the app is connected now, or narrow or widen the same search (\"only last week\", \"use my work account\", \"the whole thread\"). " +
+        "Keeps the run's context, so it is faster than a new search.\n" +
+        (actions
+          ? "A run of GENTER_FIND stays read-only. Never ask it to write, rewrite or summarize: do that yourself."
+          : "Read-only: nothing is sent or changed. Never ask it to write, rewrite or summarize: do that yourself."),
       input: z.object({
-        run_id: z.string().describe("run_id returned by GENTER_RUN_TASK or GENTER_FIND"),
-        message: z.string().describe("The user's answer, correction or next instruction"),
+        run_id: z.string().describe(`run_id returned by GENTER_FIND${actions ? " or GENTER_RUN_TASK" : ""}`),
+        message: z.string().describe("The user's answer, or what else to find"),
       }),
-      annotations: { title: "Continue a task", readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+      annotations: { title: "Continue a search", readOnlyHint: !actions, destructiveHint: false, openWorldHint: true },
     },
-    ...(write && {
+    ...(actions && {
+      GENTER_RUN_TASK: {
+        description:
+          `Carry out an action in the user's apps (${APPS}): send, reply, create, update, schedule, post, move, ` +
+          "or several of them across apps.\n" +
+          "Only for an action you have fully decided. Genter does not write: every text the action needs (an email's body, a message, " +
+          "a comment, an issue's title and description) is written by you and passed word for word, and is put there as given. " +
+          "Not for finding things (use GENTER_FIND), and never for writing, rewriting, summarizing or translating a text.\n" +
+          "Pass the whole action with every detail (who, where, when, which account, the exact text) in one call, e.g. " +
+          "\"reply to Anna's last email with exactly: Thursday 3pm works for me.\" A fast agent picks the tools, fills the args and runs them. " +
+          "If the result has status needs_connection, show the connect link to the user, then call GENTER_CONTINUE_TASK with run_id." +
+          have,
+        input: z.object({
+          task: z.string().describe("The action with every known detail and the exact final text to put there, e.g. \"reply to Anna's last email with exactly: Thursday 3pm works for me.\""),
+          account,
+        }),
+        annotations: { title: "Do an action in your apps", readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+      },
       GENTER_WRITE: {
         description:
           "Write at a place a Genter result pointed to: a file, folder, issue, pull request, page, email thread, event, task, " +
-          "ticket, card, record or chat message in any connected app, or at a link to it (temporary).\n" +
+          "ticket, card, record or chat message in any connected app, or at a link to it.\n" +
           "Every GENTER_FIND / GENTER_RUN_TASK answer cites [n] and lists References: what each is, its link, `where` (the ids " +
           "that point to it) and `write` (the app's write tools for that exact place, their args already known).\n" +
-          "Pass run_id + ref (n) + change in plain words: a fast agent calls the right write tool with the reference's args and " +
-          "answers with the link. A file: pass edits (exact pieces of its current text and what goes instead) + message instead: it is " +
-          "read and committed in one commit with only those pieces changed, no agent step, nothing to write out whole. Or pass " +
-          "tool + args from the write line for an exact call with no agent step: the reference's args are filled in, give only the " +
-          "rest (a comment's body).\n" +
+          "Genter does not write the text: you do, from what GENTER_FIND returned, and it goes there word for word. " +
+          "A file: pass edits (exact pieces of its current text and the new text you wrote) + message: it is read and committed in one " +
+          "commit with only those pieces changed, no agent step. An exact call: tool + args from the write line, the reference's args " +
+          "filled in, give only the rest (a comment's body); no agent step. Otherwise run_id + ref (n) + change: the exact text and " +
+          "where it goes (\"reply with exactly: ...\", \"comment exactly: ...\", \"move it to 3pm\").\n" +
           "Use for: edit or add a file in a repo, comment on or update an issue, PR, ticket or card, add to a Notion page, reply in an " +
           "email or Slack thread, change an event or a task, update a CRM record.",
         input: z.object({
@@ -164,12 +178,12 @@ export function agentTools({ connected = [], write = false } = {}) {
             .union([z.number().int(), z.string()])
             .optional()
             .describe("Which place: its reference number [n] in that result, or a link to it (GitHub file, folder, issue or PR; Notion page; Gmail thread; Calendar event)"),
-          change: z.string().optional().describe("What to write there, in plain words or the exact text, e.g. \"add a Troubleshooting section about proxy errors\", \"reply: Thursday 3pm works\""),
+          change: z.string().optional().describe("The exact text to put there, written by you, and where it goes, e.g. \"reply with exactly: Thursday 3pm works\", \"move it to 3pm\". Never a request to write or rewrite something"),
           edits: z
             .array(
               z.object({
                 find: z.string().optional().describe("Exact current text of the file, a few whole lines, found once"),
-                replace: z.string().optional().describe("What goes instead (empty deletes it)"),
+                replace: z.string().optional().describe("What goes instead, written by you (empty deletes it)"),
                 append: z.string().optional().describe("Instead of find/replace: text added at the end"),
               }),
             )
@@ -194,7 +208,7 @@ const PAUSED = {
 const nextOf = (out, refs, write) =>
   PAUSED[out.status] ??
   (write && out.run_id && refs.some((r) => r.write?.length)
-    ? "To write at a reference: GENTER_WRITE {run_id, ref: n, change}; a file: {run_id, ref, edits: [{find, replace}], message}, one commit with only those pieces changed; an exact call: tool + args from its write line (the reference's args are filled in)."
+    ? "To write at a reference, with a text you wrote yourself (it goes there word for word): GENTER_WRITE {run_id, ref: n, change}; a file: {run_id, ref, edits: [{find, replace}], message}, one commit with only those pieces changed; an exact call: tool + args from its write line (the reference's args are filled in)."
     : undefined);
 
 // The agent's result as MCP tool text: the answer first, its References (what each [n] is, where, and with write on,

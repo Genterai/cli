@@ -413,6 +413,18 @@ describe("recipes", () => {
     assert.deepEqual(await genter.recipes.remove(out.id), { id: out.id, removed: true });
     assert.deepEqual(await genter.recipes.list(), []);
   });
+
+  it("R10 recheck never runs again a saved call that changes something (a sent email is not sent again)", async () => {
+    const calls = fakeComposio({ id: "m1" });
+    const genter = createGenter({ composioApiKey: "k", userId: "u", secret: "s", store: memoryStore() });
+    const sent = await genter.execute({ tool: "GMAIL_SEND_EMAIL", args: { to: "anna@x.com", body: "hi" } });
+    assert.ok(sent.id);
+    const before = calls.filter((u) => u.includes("/tools/execute/GMAIL_SEND_EMAIL")).length;
+    const again = await genter.recipes.recheck(sent.id);
+    assert.equal(again.status, "failed");
+    assert.match(again.error, /not run again/);
+    assert.equal(calls.filter((u) => u.includes("/tools/execute/GMAIL_SEND_EMAIL")).length, before);
+  });
 });
 
 describe("triggers of many recipes", () => {

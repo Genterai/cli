@@ -186,6 +186,8 @@ genter write '{"run_id":"...","ref":3,"tool":"GMAIL_REPLY_TO_THREAD","args":{"me
 genter write '{"ref":"https://github.com/Genterai/genter-cli/issues/42","change":"comment: fixed in #43"}'
 ```
 
+The text a write puts somewhere is the caller's, never the agent's: `change` carries the exact text and where it goes
+(the agent is told to put it there word for word and write nothing of its own), `edits` the exact pieces and the new text.
 With `change`, the run goes on (it knows what it found, a find goes on as a run) with the place and its write tools,
 args filled in, in front of the model. With `tool` + `args`, that exact call runs at once with the reference's args
 under the given ones: no model step. A link works without a run: GitHub files, folders, issues, pull requests and
@@ -229,13 +231,14 @@ Composio schemas (`test/fixtures/catalogues.json`: Linear, Slack, Jira, Trello, 
 | R1–R3 (answer's recipes) | the recipes an answer rests on | references carry `recipe`; `answer_recipes` are the cited ones (mode `recipes`: those handed over) and only they keep the request; a prepare keeps none |
 | N1 | no answer | an empty ending is asked once on the strong model; empty again is a failure naming what ran, never "Done." with references |
 | G1–G2, G4–G5 | `genter.execute` itself (Composio answered over fetch) | a saved call returns its result and a deterministic id; `remember: false` saves nothing; a line of a result finds its recipe |
-| R1–R9 | recipes | one record per call whatever the arg order; an unchanged result calls no model and only bumps `checked_at`; a changed one regenerates the same recipe; a failed call creates nothing; gone / denied are never offered; two accounts, two recipes; partial pages; recheck, triggers, scopes |
+| R1–R10 | recipes | one record per call whatever the arg order; an unchanged result calls no model and only bumps `checked_at`; a changed one regenerates the same recipe; a failed call creates nothing; gone / denied are never offered; two accounts, two recipes; partial pages; recheck, triggers, scopes; recheck never runs again a call that changes something (a saved send is not sent again) |
 | N2–N7 | recipes in the agent | `recipe: {id, created, changed}` on steps, `saved`, `recipes_used`; the prompt (no tool name begins with another's, free-form args have no type); `suggest_prepare`; `read_many` and `read_each` in a prepare task (every listed file, folders and binaries left out; called through execute too; args as JSON text); event tasks |
 | recipe.test.js | pure `src/recipe.js` | canonical args, ids, content hash, partial detection, failure classes, provenance, legacy records |
 | C1–C4 | the agent's tool search (`connected: true`) | only tools of connected apps: "What's on my calendar today" gets Google Calendar's, never another app's calendar tool (Clarify); an app meant by a word ("calendar", "meetings", "drive"); without `connected` Composio's search over all apps is as before |
 | H1–H4 | gpt-oss calls as text | a call written as harmony text (`to=functions.execute json{…}`) is made, not shown; the final channel is the answer, reasoning alone is sent back once then fails; a slug called as a function is an execute; a tool of an app that is not connected names the connected apps and their tools |
 | L1–L3, loop.test.js | an answer that falls into a loop | written again once (temperature 1, told the piece it repeated, the loop not sent back); looping again, cut where it starts; all loop: asked for the answer; tables, code rules and short repeats are no loop |
 | A8–A10 | refused | a number without its run, an unknown number, a tool of another app, a viewer; `GENTER_WRITE` only where writing is on |
+| R1–R7 | read-only MCP (`readOnly`) | without actions the MCP tools are `GENTER_FIND` and `GENTER_CONTINUE_TASK`, and every description says Genter finds and the client writes; a read-only agent runs a task as a find, refuses `write()`, continues a run started elsewhere read-only; a read-only run looks up a recipe id it did not meet before running it (a saved send does not run) and refuses a tool its mode does not offer (`recheck_recipe` outside an event); a write's change goes there word for word |
 
 ## Preparing an area, triggers
 
@@ -286,8 +289,12 @@ what changed.
 
 ## Hosted MCP
 
-The agent tools (`GENTER_RUN_TASK`, `GENTER_FIND`, `GENTER_CONTINUE_TASK`, and for now `GENTER_WRITE`) run as a remote MCP server with OAuth (Google or email) in
-[genter-backend](https://github.com/Genterai/genter-backend).
+The agent tools run as a remote MCP server with OAuth (Google or email) in
+[genter-backend](https://github.com/Genterai/genter-backend). Genter finds; the client's own model thinks and writes:
+`agentTools()` is `GENTER_FIND` and `GENTER_CONTINUE_TASK` (read-only), and `agentTools({ actions: true })` adds
+`GENTER_RUN_TASK` and `GENTER_WRITE`, which carry out an action the client has decided, with the exact text it wrote
+(`agentInstructions`, plus `actionInstructions` where actions are on). `createAgent({ readOnly: true })` is the agent
+behind the read-only tools: every run is a find, a run continued there goes on as one, `write()` refuses.
 
 ## Library
 

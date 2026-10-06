@@ -79,7 +79,7 @@ try {
   };
   if (agentCommands[name]) {
     const { tool, start } = agentCommands[name];
-    const input = agentTools({ write: true })[tool].input.parse(args);
+    const input = agentTools({ actions: true })[tool].input.parse(args);
     const agent = createAgent({
       genter,
       openrouterApiKey: process.env.OPENROUTER_API_KEY || config.openrouter_api_key,

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import { createAgent } from "../src/agent.js";
 import { cipher } from "../src/genter.js";
-import { agentInstructions, agentResultText, agentTools, readable, readQuestion, recipesResultText } from "../src/tools.js";
+import { actionInstructions, agentInstructions, agentResultText, agentTools, readable, readQuestion, recipesResultText } from "../src/tools.js";
 import { answer, briefingOf, call, catalogues, fakeGenter, fakeModel, lastOf, memoryRuns } from "./helpers.js";
 
 let model;
@@ -247,9 +247,9 @@ describe("Writes that are refused", () => {
     await assert.rejects(agent.write({ run_id: found.run_id, ref: 1, tool: "GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS", args: { message: "m", content: "c" } }), /can search but not run tools/);
   });
 
-  it("A10 GENTER_WRITE is in the MCP tools only where writing is on", () => {
+  it("A10 GENTER_WRITE is in the MCP tools only where actions are on", () => {
     assert.ok(!("GENTER_WRITE" in agentTools()));
-    const tool = agentTools({ write: true }).GENTER_WRITE;
+    const tool = agentTools({ actions: true }).GENTER_WRITE;
     assert.equal(tool.annotations.readOnlyHint, false);
     assert.deepEqual(tool.input.parse({ run_id: "r", ref: 3, change: "x" }), { run_id: "r", ref: 3, change: "x" });
     assert.deepEqual(tool.input.parse({ ref: "https://github.com/a/b/issues/1", tool: "GITHUB_CREATE_AN_ISSUE_COMMENT", args: { body: "hi" } }).args, { body: "hi" });
@@ -1022,5 +1022,82 @@ describe("readQuestion: the request that reads a reference in full", () => {
     assert.equal(readQuestion({ app: "gmail", kind: "email", title: "Invoice", where: { thread_id: "t1" } }), 'Read the gmail email "Invoice" in full {"thread_id":"t1"}');
     assert.equal(readQuestion({ app: "skill", title: "docs-writing", where: { chunk: "SKILL.md#install" } }), "Read the docs-writing skill: SKILL.md#install");
     assert.equal(readQuestion(null), null);
+  });
+});
+
+describe("Read-only MCP (below Enterprise): Genter finds, the client writes", () => {
+  const SEND = { id: "rcp_send", tool: "GMAIL_SEND_EMAIL", args: { to: "anna@x.com", body: "hi" }, title: "Email to Anna", status: "fresh", score: 0.5 };
+  const mail = { messages: [{ messageId: "1", threadId: "t1", subject: "Contract", snippet: "Please sign" }] };
+
+  it("R1 without actions the MCP tools only read; with them RUN_TASK and WRITE come too", () => {
+    assert.deepEqual(Object.keys(agentTools()).sort(), ["GENTER_CONTINUE_TASK", "GENTER_FIND"]);
+    assert.equal(agentTools().GENTER_CONTINUE_TASK.annotations.readOnlyHint, true);
+    assert.deepEqual(Object.keys(agentTools({ actions: true })).sort(), ["GENTER_CONTINUE_TASK", "GENTER_FIND", "GENTER_RUN_TASK", "GENTER_WRITE"]);
+    // Every tool and the instructions say Genter only finds: the client's own model writes and rewrites.
+    assert.match(agentInstructions, /Genter finds; you think and write/);
+    assert.doesNotMatch(agentInstructions, /GENTER_RUN_TASK|GENTER_WRITE/);
+    assert.match(agentTools().GENTER_FIND.description, /never writes, rewrites, summarizes or translates/);
+    assert.match(agentTools({ actions: true }).GENTER_RUN_TASK.description, /passed word for word/);
+    assert.match(actionInstructions, /never ask Genter to write or rewrite it/);
+  });
+
+  it("R2 a task asked of a read-only agent runs as a find: a tool that sends does not run", async () => {
+    const genter = fakeGenter({ connected: ["gmail"], results: { GMAIL_FETCH_EMAILS: mail, GMAIL_SEND_EMAIL: { id: "m1" } } });
+    model = fakeModel([call("execute", { tool: "GMAIL_SEND_EMAIL", args: { to: "anna@x.com", body: "hi" } }), answer("Not sent: this is read-only.")]);
+    const out = await agentWith(genter, { readOnly: true }).start({ task: "email Anna: hi" });
+    assert.match(briefingOf(model.requests[0]), /Mode: find/);
+    assert.deepEqual(genter.executed, []);
+    assert.match(lastOf(model.requests[1], "tool"), /Not allowed: GMAIL_SEND_EMAIL may change data/);
+    assert.equal(out.status, "done");
+  });
+
+  it("R3 a read-only agent never writes: write() and a start with a target refuse", async () => {
+    const genter = fakeGenter({ connected: ["github"], results: { GITHUB_CREATE_AN_ISSUE_COMMENT: { id: 5 } } });
+    const agent = agentWith(genter, { readOnly: true });
+    await assert.rejects(agent.write({ ref: "https://github.com/a/b/issues/1", tool: "GITHUB_CREATE_AN_ISSUE_COMMENT", args: { body: "x" } }), /Read-only/);
+    await assert.rejects(agent.start({ task: "x", target: { app: "github", kind: "issue", where: { owner: "a", repo: "b", issue_number: 1 } } }), /Read-only/);
+    assert.deepEqual(genter.executed, []);
+  });
+
+  it("R4 a run started elsewhere (mode run) goes on read-only when continued by a read-only agent", async () => {
+    const genter = fakeGenter({ connected: ["gmail"], results: { GMAIL_FETCH_EMAILS: mail, GMAIL_SEND_EMAIL: { id: "m1" } } });
+    const runs = memoryRuns();
+    model = fakeModel([call("execute", { tool: "GMAIL_FETCH_EMAILS", args: {} }), answer("Anna asks to sign [1].")]);
+    const first = await agentWith(genter, { runs }).start({ task: "Anna's last email" });
+    model.restore();
+    genter.executed.length = 0;
+    model = fakeModel([call("execute", { tool: "GMAIL_SEND_EMAIL", args: { to: "anna@x.com", body: "ok" } }), answer("Not sent.")]);
+    await agentWith(genter, { runs, readOnly: true }).send({ run_id: first.run_id, message: "now reply: ok" });
+    assert.deepEqual(genter.executed, []);
+  });
+
+  it("R5 a read-only run looks up a recipe id it did not meet: a saved send does not run, a saved read does", async () => {
+    const genter = fakeGenter({ connected: ["gmail"], results: { GMAIL_FETCH_EMAILS: mail, GMAIL_SEND_EMAIL: { id: "m1" } } });
+    genter.recipes.get = async (id) => ({ rcp_send: SEND, rcp_read: { id: "rcp_read", tool: "GMAIL_FETCH_EMAILS" } })[id];
+    model = fakeModel([call("execute", { id: "rcp_send" }), call("execute", { id: "rcp_unknown" }), answer("Nothing sent.")]);
+    await agentWith(genter).start({ task: "Anna's emails", mode: "find" });
+    assert.deepEqual(genter.executed, []);
+    assert.match(lastOf(model.requests[1], "tool"), /Not allowed: GMAIL_SEND_EMAIL/);
+    assert.match(lastOf(model.requests[2], "tool"), /Not allowed: recipe rcp_unknown/);
+    model.restore();
+    model = fakeModel([call("execute", { id: "rcp_read" }), answer("Anna asks to sign [1].")]);
+    await agentWith(genter).start({ task: "Anna's emails", mode: "find" });
+    assert.deepEqual(genter.executed.map((e) => e.id), ["rcp_read"]);
+  });
+
+  it("R6 a tool another mode offers is refused: recheck_recipe (a saved call run again) only answers an event", async () => {
+    const genter = fakeGenter({ connected: ["gmail"] });
+    model = fakeModel([call("recheck_recipe", { id: "rcp_send" }), call("execute", { tool: "forget_recipe", args: { id: "rcp_x" } }), answer("Nothing found.")]);
+    await agentWith(genter).start({ task: "Anna's emails", mode: "find" });
+    assert.deepEqual(genter.rechecked, []);
+    assert.deepEqual(genter.gone, []);
+    assert.match(lastOf(model.requests[1], "tool"), /Not allowed: recheck_recipe is not a tool of a find task/);
+  });
+
+  it("R7 a write with a change asks the agent to put its text there word for word", async () => {
+    const genter = fakeGenter({ connected: ["github"], results: { GITHUB_CREATE_AN_ISSUE_COMMENT: { id: 5 } } });
+    model = fakeModel([answer("Done.")]);
+    await agentWith(genter).write({ ref: "https://github.com/a/b/issues/1", change: "comment exactly: on it" }).catch(() => null);
+    assert.match(lastOf(model.requests[0], "user"), /word for word: write no text of your own/);
   });
 });
