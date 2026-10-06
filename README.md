@@ -34,8 +34,9 @@ upserts the same Recipe; two connected accounts never share one. Dates in args s
 
 A result that is a page or cut off (next-page token, `has_more`, `truncated`) is marked `partial`; its summary only claims
 what was returned. Retrieval embeds the result summary (with its keywords: the app, the kind of thing, synonyms and names, in English and
-in the data's language, so "почта" finds "Unread emails from today") and items, never the tool's description. A recipe's summary says
-which call to make, not the current value: the agent always executes again.
+in the data's language, so "почта" finds "Unread emails from today") and items, never the tool's description. A request that names a
+site the workspace reads ("Evallens" for evallens.io) gets that site's closest pages first, up to half the places, whatever their
+score by meaning; the tool search still runs. A recipe's summary says which call to make, not the current value: the agent always executes again.
 
 Recipe record (stored encrypted, raw results never): `{id, tool, args, scope:{account, toolkit, area?}, title, short, summary, items,
 keywords, digest, partial, source:{app, path[], url}, created_at, updated_at, checked_at, status: fresh|stale|gone|denied,

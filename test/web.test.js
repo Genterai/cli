@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { mcpSlug, mcpUrl } from "../src/mcp.js";
 import { privateAddress } from "../src/net.js";
 import { createGenter } from "../src/genter.js";
-import { htmlText, siteUrl, underSite } from "../src/web.js";
+import { htmlText, namesSite, siteName, siteUrl, underSite } from "../src/web.js";
 
 // A site served over fetch (a public IP literal, so no DNS), OpenRouter answering every description, Composio nothing.
 const SITE = "https://93.184.215.14/docs/";
@@ -92,6 +92,21 @@ describe("Websites", () => {
     assert.ok(!underSite("https://docs.dev/blog/a", "docs.dev/guide/"));
     for (const ip of ["10.0.0.1", "127.0.0.1", "169.254.169.254", "192.168.1.5", "::1", "fd00::1", "::ffff:7f00:1"]) assert.ok(privateAddress(ip), ip);
     for (const ip of ["8.8.8.8", "104.20.23.154", "2606:4700::1"]) assert.ok(!privateAddress(ip), ip);
+  });
+});
+
+describe("Site names", () => {
+  it("W5 a site is called by the name its domain is registered under, and a request names it by that word", () => {
+    assert.equal(siteName("https://www.evallens.io/team"), "evallens");
+    assert.equal(siteName("https://docs.acme.co.uk/start"), "acme");
+    assert.equal(siteName("https://acme.github.io/"), "acme");
+    assert.equal(siteName("https://blog.eval-lens.com/"), "evallens");
+    assert.equal(siteName(SITE), null); // an IP address has no name
+    assert.equal(siteName("https://x.ai/"), null); // too short to tell from a word
+    assert.ok(namesSite("Код продуктовнер в Evallens?", "https://evallens.io/"));
+    assert.ok(namesSite("pricing on EvalLens.io", "https://www.evallens.io/pricing"));
+    assert.ok(namesSite("who is behind Eval Lens", "https://evallens.io/"));
+    assert.ok(!namesSite("evallensbot logs", "https://evallens.io/"));
   });
 });
 
