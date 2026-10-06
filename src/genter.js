@@ -892,7 +892,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       await Promise.all([...pending]);
     },
 
-    // Skills (skills.js). The recipes of skills stay when a skill goes; they are tied to a version.
+    // Skills (skills.js). The recipes of a skill are tied to a version, and go when the skill goes.
     skills: {
       // The recipes of a skill (any status, newest first), with their intents.
       async recipes({ skill }) {
@@ -937,13 +937,12 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         }
         return { carried, gone };
       },
-      // The skill is deleted: its recipes are not deleted, they stay (they cannot be read until it comes back).
+      // The skill is deleted: its recipes of every version are deleted with it (a recipe goes with its source). { count }
       async removed({ skill }) {
         let count = 0;
         for (const r of await everyRecipe()) {
-          if (!isSkillTool(r.tool) || r.args?.skill !== skill || r.status === "gone") continue;
-          await save({ ...r, status: "gone", checked_at: now() });
-          count++;
+          if (!isSkillTool(r.tool) || r.args?.skill !== skill) continue;
+          if ((await api.recipes.remove(r.id)).removed) count++;
         }
         return { count };
       },

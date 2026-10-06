@@ -229,16 +229,15 @@ describe("versions", () => {
     assert.equal((await genter.recipes.get(rollback.id)).status, "gone");
   });
 
-  it("S9 deleting a skill keeps its recipes (gone, never retrieved as fresh)", async () => {
+  it("S9 deleting a skill deletes its recipes", async () => {
     net();
     const { genter, h, skill, flush } = setup();
     const a = await genter.execute({ tool: SKILL_TOOLS.chunk, args: chunkArgs(skill, "Install") });
     await flush();
     h.skills.delete("sk1");
     assert.deepEqual(await genter.skills.removed({ skill: "sk1" }), { count: 1 });
-    const rec = await genter.recipes.get(a.id);
-    assert.equal(rec.status, "gone");
-    assert.ok((await genter.recipes.list()).some((r) => r.id === a.id));
+    assert.equal(await genter.recipes.get(a.id), null);
+    assert.ok(!(await genter.recipes.list()).some((r) => r.id === a.id));
   });
 });
 
