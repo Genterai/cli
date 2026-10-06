@@ -9,7 +9,7 @@ import { crawl, forgetPage, namesSite, readPage, siteUrl, underSite } from "./we
 
 // Genter = Composio + anchors of past calls.
 // An anchor is ONE successful tool call with fixed args plus knowledge about its actual result (see recipe.js and
-// docs: specs/recipes.md). Its id is deterministic (workspace, account, tool, canonical args): the same call upserts the
+// docs: specs/anchors.md). Its id is deterministic (workspace, account, tool, canonical args): the same call upserts the
 // same record. The raw result is never stored: only a digest, a semantic summary, one line per item and their vectors.
 // execute() runs the REAL tool every time. Unchanged result (same digest): only checked_at moves, no model is called.
 // Changed result: the same anchor is described and embedded again. Failed call: no anchor; one that exists is marked

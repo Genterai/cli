@@ -130,7 +130,7 @@ export function sourceOf({ tool = "", args = {}, toolkit, data } = {}) {
   return { app: slug ? appName(slug) : null, path: path.slice(0, 6), url };
 }
 
-// ---- The area a call reads in (specs/recipes.md "Suggesting a project") ----
+// ---- The area a call reads in (specs/anchors.md "Suggesting a project") ----
 
 // Containers an arg can name, outermost first, each with what such a container is called. A call is inside an area when
 // its args name one of them: the innermost one named is the area, the ones around it and the owner / organization /
