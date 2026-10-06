@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import { createAgent } from "../src/agent.js";
 import { cipher } from "../src/genter.js";
-import { agentResultText, agentTools, readable, recipesResultText } from "../src/tools.js";
+import { agentInstructions, agentResultText, agentTools, readable, readQuestion, recipesResultText } from "../src/tools.js";
 import { answer, briefingOf, call, catalogues, fakeGenter, fakeModel, lastOf, memoryRuns } from "./helpers.js";
 
 let model;
@@ -34,6 +34,8 @@ describe("GitHub file: find, see the cited paths, write there", () => {
     const text = agentResultText(out, { write: true });
     assert.match(text, /References:\n\[1\] github file Genterai\/genter-cli\/src\/sync\.js\n/);
     assert.match(text, /where \{"owner":"Genterai","repo":"genter-cli","path":"src\/sync\.js","branch":"main"\}/);
+    // A follow-up that reads the place in full, for the client's model (as Search asks when a source is clicked).
+    assert.match(text, /\n    read  GENTER_FIND \{"question":"Read the github file \\"Genterai\/genter-cli\/src\/sync\.js\\" in full/);
     assert.match(text, /edit  \{edits: \[\{find, replace\}\], message\}: one commit, only those pieces change\n    write GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS\(message, content\)/);
     assert.match(text, /GENTER_WRITE \{run_id, ref: n, change\}/);
     assert.doesNotMatch(agentResultText(out), /write GITHUB_/); // without GENTER_WRITE: references only
@@ -760,6 +762,10 @@ describe("Mode recipes (MCP GENTER_FIND): the run hands over raw results of reci
     const stored = JSON.stringify(cipher("s:u:runs").open(runs.rows.get(out.run_id).blob));
     assert.doesNotMatch(stored, /sign by Friday/);
     assert.equal(r.data.messages[1].snippet, "Please sign by Friday");
+    // Each email of the list can be read in full with the call its reference names; the list itself is here already.
+    const text = recipesResultText(out);
+    assert.match(text, /\[1\] gmail \S+ Contract draft\n(    where .*\n)?    read  GENTER_FIND \{"question":"Read the gmail \S+ \\"Contract draft\\" in full/);
+    assert.match(agentInstructions, /"read" line is the GENTER_FIND call that reads that place in full/);
   });
 
   it("M2 a call made only to find a name is left out when the model names the one that answers", async () => {
@@ -1007,5 +1013,14 @@ describe("An answer that falls into a loop is never shown", () => {
     const out = await agentWith(genter).start({ task: "recent commits of o/r", mode: "find" });
     assert.equal(out.answer, "One commit [1].");
     assert.match(lastOf(model.requests[3], "user"), /You ended without an answer/);
+  });
+});
+
+describe("readQuestion: the request that reads a reference in full", () => {
+  it("names what it is and where: a link, else the ids; a skill's piece as Search asks it", () => {
+    assert.equal(readQuestion({ app: "website", kind: "page", title: "Pricing", url: "https://evallens.io/pricing" }), 'Read the page "Pricing" in full: https://evallens.io/pricing');
+    assert.equal(readQuestion({ app: "gmail", kind: "email", title: "Invoice", where: { thread_id: "t1" } }), 'Read the gmail email "Invoice" in full {"thread_id":"t1"}');
+    assert.equal(readQuestion({ app: "skill", title: "docs-writing", where: { chunk: "SKILL.md#install" } }), "Read the docs-writing skill: SKILL.md#install");
+    assert.equal(readQuestion(null), null);
   });
 });

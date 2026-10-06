@@ -159,11 +159,14 @@ Paging stops at the first page shorter than the page size [1].
 References:
 [1] github file Genterai/genter-cli/src/sync.js — https://github.com/Genterai/genter-cli/blob/main/src/sync.js
     where {"owner":"Genterai","repo":"genter-cli","path":"src/sync.js","branch":"main"}
+    read  GENTER_FIND {"question":"Read the github file \"Genterai/genter-cli/src/sync.js\" in full: https://github.com/Genterai/genter-cli/blob/main/src/sync.js"}
     edit  {edits: [{find, replace}], message}: one commit, only those pieces change
     write GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS(message, content)
 ```
 
-`where` is what points to the place, named the way the app's write tools name it; `write` lists those tools with what
+`read` is the follow-up a client's model makes to read the place in full (`readQuestion`: an email's body, a whole file, a
+skill's section, a page; as Search asks when a source is clicked); GENTER_FIND's raw results give it to the items of a list,
+not to a result that is one source (it is there in full). `where` is what points to the place, named the way the app's write tools name it; `write` lists those tools with what
 they still need. Synced items keep their `where` (the args of the list call that point somewhere, and the item's id
 fields), so a knowledge hit knows its path, issue number, thread or task list. Popular apps have known write tools:
 GitHub files, folders, issues, pull requests, repositories and commits, Gmail, Google Calendar, Google Tasks, Notion

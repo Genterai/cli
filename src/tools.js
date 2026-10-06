@@ -83,7 +83,8 @@ every successful call becomes a recipe (one call with fixed args), found next ti
 Call them whenever the user mentions or implies an app, an account or their own data. Never say you have no access before trying.
 Pass the whole task with every known detail in one call, in the user's words; do not split it or call app tools step by step.
 Show connect links to the user as Markdown links.
-GENTER_RUN_TASK answers cite their sources as [n]; References (also under GENTER_FIND's results, whose items carry _ref: n) say what each is and where: a path, a link, the ids that point to it.`;
+GENTER_RUN_TASK answers cite their sources as [n]; References (also under GENTER_FIND's results, whose items carry _ref: n) say what each is and where: a path, a link, the ids that point to it.
+A reference's "read" line is the GENTER_FIND call that reads that place in full (an email's body, a whole file, a skill's section, a page): make it when the answer needs more than the result shows.`;
 
 // Temporary: writing at a reference over MCP (GENTER_WRITE), added to the instructions where it is on.
 export const writeInstructions = `- GENTER_WRITE: write where a result pointed: run_id + ref (the [n] of its References) + the change. Each reference's "write" line names the app's write tools for that exact place, args already known. A file: pass edits ([{find, replace}], exact pieces of its text) and message: one commit, only those pieces change.`;
@@ -211,7 +212,7 @@ export function agentResultText(out, { write = false } = {}) {
     ...(out.usage?.ms != null && { ms: out.usage.ms }),
     ...(next && { next }),
   };
-  const listed = refs.length ? `\n\nReferences:\n${refs.map((r) => referenceText(r, write)).join("\n")}` : "";
+  const listed = refs.length ? `\n\nReferences:\n${refs.map((r) => referenceText(r, write, { read: true })).join("\n")}` : "";
   return `${out.answer ?? ""}${listed}\n\n${JSON.stringify(meta)}`;
 }
 
@@ -242,7 +243,8 @@ export function recipesResultText(out, { write = false, instructions } = {}) {
     ...(out.usage?.ms != null && { ms: out.usage.ms }),
     ...(next && { next }),
   };
-  const listed = refs.length ? `References:\n${refs.map((r) => referenceText(r, write)).join("\n")}` : "";
+  // A result that is one source (a file, a page) is here in full: only the items of a list get a "read" line.
+  const listed = refs.length ? `References:\n${refs.map((r) => referenceText(r, write, { read: r.via !== "call" })).join("\n")}` : "";
   return [note, ...blocks, listed, JSON.stringify(meta)].filter(Boolean).join("\n\n");
 }
 
@@ -266,12 +268,34 @@ export function readable(data) {
 
 // [3] github file Genterai/genter-cli/src/agent.js — https://github.com/...
 //     where {"owner":"Genterai","repo":"genter-cli","path":"src/agent.js","branch":"main"}
+//     read  GENTER_FIND {"question":"Read the github file \"Genterai/genter-cli/src/agent.js\" in full: https://github.com/..."}
 //     edit  {edits: [{find, replace}], message}: one commit, only those pieces change
 //     write GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS(message, content)
-export function referenceText(r, write = false) {
+// read: with the follow-up that reads the place in full (readQuestion), for a client's model to make when it needs more.
+export function referenceText(r, write = false, { read = false } = {}) {
   const lines = [`[${r.n}] ${[r.app, r.kind].filter(Boolean).join(" ")} ${refLabel(r)}${r.url ? ` — ${r.url}` : ""}`];
   if (r.where && Object.keys(r.where).length) lines.push(`    where ${JSON.stringify(r.where)}`);
+  const question = read && readQuestion(r);
+  if (question) lines.push(`    read  GENTER_FIND ${JSON.stringify({ question })}`);
   if (write && fileEditor(r)) lines.push("    edit  {edits: [{find, replace}], message}: one commit, only those pieces change");
   if (write && r.write?.length) lines.push(`    write ${r.write.map((h) => `${h.tool}(${h.needs.join(", ")})`).join(" · ")}`);
   return lines.join("\n");
+}
+
+// The request that reads a reference in full, as Search asks it when a source is clicked: what it is, its name, and where it
+// is (a link, else the ids that point to it), so the agent makes the one call that reads it (a saved recipe of it runs
+// at once). A skill's piece: "Read the docs-writing skill: SKILL.md#install".
+export function readQuestion(r) {
+  if (!r) return null;
+  const w = r.where ?? {};
+  if (r.app === "skill") {
+    const piece = w.chunk ?? w.id ?? w.path ?? r.path;
+    const name = r.title && r.title !== piece ? r.title : null;
+    return `Read the ${name ? `${name} skill` : "skill"}${piece ? `: ${piece}` : ""}`;
+  }
+  const what = [r.app === "website" ? null : r.app, r.kind].filter(Boolean).join(" ") || "item";
+  const label = refLabel(r);
+  const name = label && label !== r.kind ? ` "${label}"` : "";
+  if (r.url) return `Read the ${what}${name} in full: ${r.url}`;
+  return `Read the ${what}${name} in full${Object.keys(w).length ? ` ${JSON.stringify(w)}` : ""}`;
 }
