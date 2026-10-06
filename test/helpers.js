@@ -36,11 +36,14 @@ export function fakeGenter({ connected = [], recipes = [], results = {}, catalog
   const executed = [];
   const rechecked = [];
   const gone = [];
+  const asked = [];
   return {
     executed,
     rechecked,
     gone,
+    asked,
     recipes: {
+      asked: async ({ ids, task }) => (asked.push({ ids, task }), { filed: ids.length }),
       recheck: async (id) => (rechecked.push(id), { recipe: { id, title: "t" }, changed: id.endsWith("changed"), status: "fresh" }),
       markGone: async (id) => (gone.push(id), { id, status: "gone" }),
     },
