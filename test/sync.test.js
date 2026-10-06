@@ -95,3 +95,47 @@ describe("Knowledge hits say where they are", () => {
     assert.deepEqual(writeHints(ref)[0], { ...writeHints(ref)[0], tool: "GOOGLETASKS_PATCH_TASK", args: { tasklist_id: "list1", task_id: "task9" } });
   });
 });
+
+describe("Source depth: full and titles; the removed summary means full", () => {
+  const setup = async () => {
+    const recipe = (await READY.googletasks.recipes({})).find((r) => r.kind === "sync").recipe;
+    return sourcesWith(
+      {
+        GOOGLETASKS_LIST_TASK_LISTS: { items: [{ id: "list1", title: "Home" }] },
+        GOOGLETASKS_LIST_TASKS: { items: [{ id: "task9", title: "Pay rent", updated: "2026-10-01" }] },
+      },
+      { tasks: recipe },
+    );
+  };
+
+  it("S21 depth summary in a request is full; full is the default; titles still works", async () => {
+    const sources = await setup();
+    assert.equal((await sources.create({ template: "tasks", scope: {} })).depth, "full");
+    assert.equal((await sources.create({ template: "tasks", scope: {}, depth: "summary" })).depth, "full");
+    assert.equal((await sources.create({ template: "tasks", scope: {}, depth: "titles" })).depth, "titles");
+    await assert.rejects(sources.create({ template: "tasks", scope: {}, depth: "bogus" }), /titles, full/);
+  });
+
+  it("S22 a source saved with depth summary is read as full and re-indexed as full on the next sync", async () => {
+    const store = memoryKnowledge();
+    const recipe = (await READY.googletasks.recipes({})).find((r) => r.kind === "sync").recipe;
+    const make = () =>
+      createSources({
+        run: async (tool) => ({ successful: true, data: tool === "GOOGLETASKS_LIST_TASK_LISTS" ? { items: [{ id: "list1", title: "Home" }] } : { items: [{ id: "task9", title: "Pay rent", updated: "2026-10-01" }] } }),
+        embedMany: async (texts) => texts.map(vectorOf),
+        seal: (v) => JSON.stringify(v),
+        open: (b) => JSON.parse(b),
+        store,
+        recipes: { get: async (id) => (id === "tasks" ? recipe : null), list: async () => [] },
+      });
+    const sources = make();
+    const created = await sources.create({ template: "tasks", scope: {} });
+    await sources.sync({ id: created.id, budgetMs: 10_000 });
+    const row = await store.getSource(created.id);
+    await store.putSource({ ...row, blob: JSON.stringify({ ...JSON.parse(row.blob), depth: "summary" }) }); // the old stored shape
+    assert.equal((await make().get(created.id)).depth, "full");
+    await make().sync({ id: created.id, budgetMs: 10_000 });
+    const kept = (await store.items(created.id)).map((r) => JSON.parse(r.blob));
+    assert.ok(kept.length && kept.every((i) => (i.depth ?? "full") === "full"), JSON.stringify(kept));
+  });
+});

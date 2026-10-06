@@ -100,11 +100,11 @@ export const tools = {
   add_source: {
     description:
       "Remember an app's content as searchable knowledge: github {owner, repo, branch?, path?}, notion {query?}. " +
-      "depth: titles (names and links only), summary (a short summary per item) or full (whole text, default). Run sync_source next.",
+      "depth: titles (names and links only) or full (whole text, default). Run sync_source next.",
     input: z.object({
       template: z.string().describe("github, notion or the id of a saved live sync recipe"),
       scope: z.record(z.string(), z.string()).optional(),
-      depth: z.enum(["titles", "summary", "full"]).optional(),
+      depth: z.enum(["titles", "full"]).optional(),
       filter: z
         .object({ include: z.string().optional(), exclude: z.string().optional(), maxItems: z.number().int().positive().optional() })
         .optional()

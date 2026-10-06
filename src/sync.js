@@ -12,9 +12,8 @@ import { jsonToMarkdown } from "./markdown.js";
 // Texts are split into chunks, embedded, encrypted and stored per item: rows { source_id, key, blob }.
 // Depth, the same for every connector:
 //   titles  — only what list returns (titles, paths, links); nothing is read. Cheap; finds by name, the agent opens live.
-//   summary — every item is read, only a short summary is kept and embedded.
 //   full    — the whole text, in chunks.
-// Changing a source's depth re-processes its items on the next sync.
+// A source saved with the removed depth "summary" is read as full. Changing a source's depth re-processes its items on the next sync.
 //
 // choices (optional): what can be picked to sync (a user's repos, top-level pages), each mapped to scope fields,
 //   so nobody types owner/repo by hand.
@@ -157,11 +156,13 @@ const LIMITS = { maxItems: 10000, maxPages: 100, maxChunks: 80, chunkSize: 1600,
 // store: getSource(id), putSource({id, blob}), deleteSource(id), sources() -> [{id, blob}],
 //        items(sourceId) -> [{source_id, key, blob}], putItems(rows), deleteItems(sourceId, keys), allItems() -> rows
 // namespace: the user or workspace, so ids and running syncs never mix between them.
-export const DEPTHS = ["titles", "summary", "full"];
+export const DEPTHS = ["titles", "full"];
+// "summary" was removed (it lost detail and cost a model call per item): old sources and requests that still say it mean full.
+const depthOf = (d) => (d === "titles" ? "titles" : "full");
 
 // triggers (optional): create(slug, config, account) -> trigger id (re-enables the same one if it exists), disable(id), remove(id).
 // recipes (optional): saved live sync recipes, get(id) -> recipe | null, list() -> [{ id, recipe }].
-export function createSources({ run, embedMany, summarize, triggers, recipes, seal, open, store, namespace = "", onSync }) {
+export function createSources({ run, embedMany, triggers, recipes, seal, open, store, namespace = "", onSync }) {
   const loadSource = async (id) => {
     const row = await store.getSource(id);
     if (!row) throw new Error(`Unknown source: ${id}`);
@@ -428,7 +429,7 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
       if (gone.length) await store.deleteItems(source.id, gone.map((k) => k.key));
       for (const k of gone) known.delete(k.id);
       stats.removed = gone.length;
-      const depth = source.depth ?? "full";
+      const depth = depthOf(source.depth);
       const todo = listed.filter((i) => known.get(i.id)?.version !== i.version || known.get(i.id)?.depth !== depth || !i.version);
       stats.unchanged = listed.length - todo.length;
 
@@ -466,7 +467,6 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
           try {
             if (depth === "titles") return { item, chunks: [`${item.title}${item.url ? `\n${item.url}` : ""}`] };
             const text = await textOf(item);
-            if (depth === "summary" && text.trim()) return { item, chunks: [(await summarize?.(item.title, text)) || text.slice(0, 600)] };
             return { item, chunks: chunk(text) };
           } catch (e) {
             stats.failed++;
@@ -622,6 +622,7 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
     // Same template + scope again: the existing source, with the new depth if one is given.
     // filter (optional): { include, exclude, maxItems } — regexes over "<id> <title>", e.g. include "^docs/".
     async create({ template, scope = {}, account, depth, filter, recipe_of }) {
+      if (depth === "summary") depth = "full";
       if (depth && !DEPTHS.includes(depth)) throw new Error(`depth is one of ${DEPTHS.join(", ")}`);
       const t = await recipeOf(template);
       const clean = cleanScope(t, scope);
@@ -629,7 +630,7 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
       const existing = await store.getSource(id);
       if (existing) {
         const source = open(existing.blob);
-        const changed = (depth && depth !== source.depth) || (filter && JSON.stringify(cleanFilter(filter)) !== JSON.stringify(source.filter ?? {}));
+        const changed = (depth && depth !== depthOf(source.depth)) || (filter && JSON.stringify(cleanFilter(filter)) !== JSON.stringify(source.filter ?? {}));
         if (changed) await saveSource(Object.assign(source, { ...(depth && { depth }), ...(filter && { filter: cleanFilter(filter) }), status: "partial" }));
         return publicSource(source);
       }
@@ -640,7 +641,7 @@ export function createSources({ run, embedMany, summarize, triggers, recipes, se
         title: fill(t.title, clean),
         scope: clean,
         account,
-        depth: depth ?? "full",
+        depth: depthOf(depth),
         filter: filter ? cleanFilter(filter) : undefined,
         recipe_of,
         status: "new",
@@ -1078,7 +1079,7 @@ const publicSource = ({ id, template, toolkit, title, scope, depth, filter, stat
   toolkit,
   title,
   scope,
-  depth: depth ?? "full",
+  depth: depthOf(depth),
   filter: filter ?? {},
   status: status === "syncing" && Date.now() - new Date(sync_started_at).getTime() > 600_000 ? "partial" : status,
   created_at,

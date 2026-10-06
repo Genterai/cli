@@ -188,19 +188,6 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, secret,
         disable: (id) => composio.triggers.disable(id),
         remove: (id) => composio.triggers.delete(id),
       },
-      summarize: (title, text) =>
-        chat({
-          model: process.env.SUMMARY_MODEL || "openai/gpt-oss-120b",
-          reasoning: { effort: "low" },
-          messages: [
-            {
-              role: "user",
-              content:
-                `Summarize "${title}" in 2-4 sentences so it can be found later: what it is about, key names, terms and decisions. ` +
-                `Write in the language of the text. No passwords, tokens or keys.\n\n${text.slice(0, 20000)}`,
-            },
-          ],
-        }).catch(() => null),
       // Live sync recipes saved by the agent are records of kind "sync" in the recipe store.
       recipes: {
         get: async (id) => {

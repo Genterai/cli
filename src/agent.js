@@ -834,7 +834,7 @@ const TEMPLATE_HELP =
   'template: a live sync recipe — built in: github (files of a repository), notion (a page and every page under it, or all pages ' +
   "shared with Genter) — or the id of a saved one (search shows them as live_sync). " +
   "Pass pick (the repo or page name as the user said it) or scope. It is kept up to date on every change unless watch is false. " +
-  'depth: "titles" (names and links only, fast), "summary" (a short summary per item), "full" (whole text, default).';
+  'depth: "titles" (names and links only, fast), "full" (whole text, default).';
 
 function briefing({ task, mode, account, found, connected, canExecute, english, sources = [], knowledge = [], named = [], recipeRef = () => undefined, hitRef = () => undefined }) {
   const recipes = found.filter((r) => r.id).map((r) => compactFound(r, recipeRef(r)));
@@ -1015,7 +1015,7 @@ const TOOLS = [
         pick: { type: "string", description: "Name of the repo or top-level page as the user said it, e.g. genter-cli or Roadmap; found among the connection's repos/pages" },
         scope: { type: "object", additionalProperties: true, description: "Template fields when known exactly, e.g. {owner, repo}" },
         watch: { type: "boolean", description: "Keep it up to date on every change (default true)" },
-        depth: { type: "string", enum: ["titles", "summary", "full"] },
+        depth: { type: "string", enum: ["titles", "full"] },
         account: { type: "string", description: "Connection alias or id when the app is connected several times" },
       },
       required: ["template"],
@@ -1031,7 +1031,7 @@ const TOOLS = [
       properties: {
         goal: { type: "string", description: "What to remember, with every known detail, e.g. 'all pull requests of Genterai/genter-backend: title and description'" },
         toolkit: { type: "string", description: "App slug, e.g. github, linear, gmail" },
-        depth: { type: "string", enum: ["titles", "summary", "full"] },
+        depth: { type: "string", enum: ["titles", "full"] },
         watch: { type: "boolean" },
         account: { type: "string" },
       },

@@ -256,10 +256,9 @@ is a full one, every next one is incremental, and a sync cut short by its time b
 | depth | what is kept | cost |
 | --- | --- | --- |
 | `titles` | names, paths and links; nothing is read | one list call per page |
-| `summary` | a 2-4 sentence summary per item | a read and a model call per changed item |
 | `full` | the whole text in chunks (default) | a read and embeddings per changed item |
 
-Changing the depth re-processes the items on the next sync. Chunks are encrypted like everything else.
+A source saved with the removed `summary` depth (or a request that still says it) is treated as `full`. Changing the depth re-processes the items on the next sync. Chunks are encrypted like everything else.
 Limits: 10000 items and 100 list pages per source, 80 chunks per item; GitHub skips binaries, lockfiles, `node_modules`
 and files over 300 KB.
 
