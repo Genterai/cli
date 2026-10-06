@@ -902,6 +902,34 @@ describe("MCP raw recipes text", () => {
     assert.equal(readable(list), list);
   });
 
+  it("GENTER_FIND takes an optional goal, described as for skills only, with an example", () => {
+    const tool = agentTools().GENTER_FIND;
+    assert.equal(tool.input.safeParse({ question: "q" }).success, true);
+    assert.equal(tool.input.safeParse({ question: "q", goal: "writing docs" }).success, true);
+    assert.equal(tool.input.safeParse({ goal: "writing docs" }).success, false); // question stays required
+    assert.match(tool.description, /Optional `goal`/);
+    assert.match(tool.description, /Skills for the goal/);
+    assert.match(agentInstructions, /Optional goal/);
+  });
+
+  it("skills picked by the goal come in their own section after the data, listed apart from the recipes", () => {
+    const skill = { id: "rcp_s1", tool: "SKILL_READ_CHUNK", args: { skill: "docs-writing", chunk: "SKILL.md#intro" }, title: "docs-writing: intro", score: 0.8, data: { text: "Write short." } };
+    const text = recipesResultText({ status: "done", direct: true, results: [result()], skills: [skill] });
+    const parts = text.split("\n\n");
+    assert.match(parts[0], /^Recipe 1: rcp_1/);
+    assert.match(parts[1], /^Skills for the goal \(guides on how to do it, not data/);
+    assert.equal(parts[2], 'Skill 1: rcp_s1 · SKILL_READ_CHUNK {"skill":"docs-writing","chunk":"SKILL.md#intro"} — docs-writing: intro\n{"text":"Write short."}');
+    const meta = JSON.parse(parts.at(-1));
+    assert.deepEqual(meta.recipes, [{ id: "rcp_1", tool: "GMAIL_FETCH_EMAILS", created: true }]);
+    assert.deepEqual(meta.skills, [{ id: "rcp_s1", tool: "SKILL_READ_CHUNK", score: 0.8 }]);
+  });
+
+  it("without skills the text is as before: no section, no skills in the JSON", () => {
+    const text = recipesResultText({ status: "done", results: [result()], skills: [] });
+    assert.doesNotMatch(text, /Skills for the goal/);
+    assert.equal("skills" in JSON.parse(text.slice(text.lastIndexOf("\n") + 1)), false);
+  });
+
   it("GENTER_FIND says it returns raw data to answer from", () => {
     assert.match(agentTools().GENTER_FIND.description, /raw data, not a written answer/);
   });

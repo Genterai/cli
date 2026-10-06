@@ -81,6 +81,11 @@ genter find '{"question":"what did Anna write about the contract?"}'
 genter continue '{"run_id":"...","message":"use my work account"}'
 ```
 
+Over MCP, `GENTER_FIND` takes `{question, account?, goal?}`. `goal` is optional: what the task is for, in a few words
+(`"writing product documentation"`), while `question` stays what to find. `goal` only brings the user's matching skills and
+guides, in a separate "Skills for the goal" section of the result (`skills` in its JSON line) after the data recipes; they
+never take a slot of the data recipes, and a skill shown once is not shown again in the same session. Without `goal` nothing changes.
+
 A run ends `done`, `needs_input` (a question), `needs_connection` (a connect link) or `failed`; `continue` picks it up.
 A `done` answer cites its sources as `[n]` and comes with `references` (see below).
 `find` runs only tools that read (by Composio's hint or the verb in the slug). Every successful call is saved as a recipe
