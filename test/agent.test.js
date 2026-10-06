@@ -969,3 +969,42 @@ describe("gpt-oss calls that come as text, and tools of apps that are not connec
     assert.ok(searched.every((s) => s.connected === true), "every tool search of the agent is of connected apps");
   });
 });
+
+describe("An answer that falls into a loop is never shown", () => {
+  const good = "- **Пишите правду из продукта** [1]\n- **Один тип страницы — одна цель**: каждый документ должен быть либо учебником, ";
+  const looped = `${good}как-то${"-как".repeat(2000)}`;
+  const skill = { id: "rcp_docs", tool: "GITHUB_GET_REPOSITORY_CONTENT", title: "Docs skill", summary: "How to write docs", status: "fresh", score: 0.8 };
+
+  it("L1 a looped answer is written again once, sampled and told where it looped; the loop is not sent back", async () => {
+    const genter = fakeGenter({ connected: ["github"], recipes: [skill] });
+    model = fakeModel([answer(looped), answer(`${good}справочником или объяснением.`)]);
+    const out = await agentWith(genter).start({ task: "Как делать документацию, читаемую людьми?", mode: "find" });
+    assert.equal(out.status, "done");
+    assert.equal(out.answer, `${good}справочником или объяснением.`);
+    const [first, again] = model.requests;
+    assert.equal(first.temperature, 0);
+    assert.equal(first.max_tokens, 16_384);
+    assert.equal(again.temperature, 1);
+    assert.equal(again.frequency_penalty, 0.3);
+    assert.match(lastOf(again, "user"), /fell into a loop: it wrote "-как" again and again/);
+    assert.ok(!again.messages.some((m) => m.role === "assistant" && /как-как/.test(m.content ?? "")));
+  });
+
+  it("L2 looping again, the answer is cut where the loop starts", async () => {
+    const genter = fakeGenter({ connected: ["github"], recipes: [skill] });
+    model = fakeModel([answer(looped), answer(looped)]);
+    const out = await agentWith(genter).start({ task: "Как делать документацию, читаемую людьми?", mode: "find" });
+    assert.equal(out.status, "done");
+    assert.equal(out.answer, "- **Пишите правду из продукта** [1]\n- **Один тип страницы — одна цель**: каждый документ должен быть либо учебником…");
+    assert.equal(model.requests.length, 2);
+  });
+
+  it("L3 an answer that is all loop is no answer: the model is asked for one", async () => {
+    const genter = fakeGenter({ connected: ["github"], results: { GITHUB_LIST_COMMITS: [{ sha: "a" }] } });
+    const all = "как-".repeat(500);
+    model = fakeModel([call("execute", { tool: "GITHUB_LIST_COMMITS", args: { owner: "o", repo: "r" } }), answer(all), answer(all), answer("One commit [1].")]);
+    const out = await agentWith(genter).start({ task: "recent commits of o/r", mode: "find" });
+    assert.equal(out.answer, "One commit [1].");
+    assert.match(lastOf(model.requests[3], "user"), /You ended without an answer/);
+  });
+});

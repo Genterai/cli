@@ -92,6 +92,10 @@ skill's piece takes it as an intent), so the same request, or one close to it, f
 `recipes`; a `prepare` or `event` task is an instruction and is kept nowhere). The model is `AGENT_MODEL` on OpenRouter, default `openai/gpt-oss-120b` (see Models).
 The agent is offered only tools of connected apps (`genter.search({ connected: true })`), and a call gpt-oss writes as
 text instead of making it (its harmony channels came back unparsed) is made as a call, never shown as the answer.
+An answer that falls into a loop (gpt-oss at temperature 0 now and then writes one piece until its token limit:
+"…либо учебником, как-то-как-как-как-…") is never shown either: it is written again once at temperature 1, told where
+it looped, and cut where the loop starts if it loops again (`genter-cli/loop`). A model call writes at most
+`AGENT_MAX_TOKENS` (16384), so a loop ends in seconds.
 
 ```js
 import { createAgent } from "genter-cli/agent";
@@ -227,6 +231,7 @@ Composio schemas (`test/fixtures/catalogues.json`: Linear, Slack, Jira, Trello, 
 | recipe.test.js | pure `src/recipe.js` | canonical args, ids, content hash, partial detection, failure classes, provenance, legacy records |
 | C1–C4 | the agent's tool search (`connected: true`) | only tools of connected apps: "What's on my calendar today" gets Google Calendar's, never another app's calendar tool (Clarify); an app meant by a word ("calendar", "meetings", "drive"); without `connected` Composio's search over all apps is as before |
 | H1–H4 | gpt-oss calls as text | a call written as harmony text (`to=functions.execute json{…}`) is made, not shown; the final channel is the answer, reasoning alone is sent back once then fails; a slug called as a function is an execute; a tool of an app that is not connected names the connected apps and their tools |
+| L1–L3, loop.test.js | an answer that falls into a loop | written again once (temperature 1, told the piece it repeated, the loop not sent back); looping again, cut where it starts; all loop: asked for the answer; tables, code rules and short repeats are no loop |
 | A8–A10 | refused | a number without its run, an unknown number, a tool of another app, a viewer; `GENTER_WRITE` only where writing is on |
 
 ## Preparing an area, triggers

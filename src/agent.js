@@ -3,6 +3,7 @@ import { cipher, namedApps } from "./genter.js";
 import { appOf, applyEdits, citedRefs, fileEditor, needsCatalogue, refFromUrl, refLabel, refsOfResult, shapeRef, writeHints } from "./refs.js";
 import { inferList, locatorArgs, pick } from "./shape.js";
 import { logCost, usageFields } from "./cost.js";
+import { UNLOOP, cutLoop, loopIn, loopNote } from "./loop.js";
 
 // The task agent: an LLM loop over genter (search -> execute -> save), tuned for speed.
 // Before the first LLM call it already has, in parallel: the saved recipes matching the task (found by
@@ -35,6 +36,9 @@ export function createAgent({
   // What it finds becomes recipes, so the next time the same task runs on the fast one.
   strongModel = process.env.AGENT_STRONG_MODEL || "openai/gpt-oss-120b",
   maxSteps = 12,
+  // Tokens one model call may write (its reasoning too): far over any answer or call, so an answer that falls into a
+  // loop (loop.js) stops in seconds, not at the provider's limit (65k on Groq) a minute later.
+  maxTokens = Number(process.env.AGENT_MAX_TOKENS) || 16_384,
   canExecute = true,
   canConnect = true,
   instructions,
@@ -47,7 +51,8 @@ export function createAgent({
   const personal = String(instructions ?? "").trim();
   const preamble = [{ role: "system", content: SYSTEM }, ...(personal ? [{ role: "system", content: personalNote(personal) }] : [])];
 
-  async function llm(messages, usage, tools = TOOLS, toolChoice, useModel = model) {
+  // sampling: other settings for this call (UNLOOP, when the last answer looped).
+  async function llm(messages, usage, tools = TOOLS, toolChoice, useModel = model, sampling) {
     const started = Date.now();
     const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
@@ -61,6 +66,8 @@ export function createAgent({
         parallel_tool_calls: true,
         ...(toolChoice && { tool_choice: toolChoice }),
         temperature: 0,
+        max_tokens: maxTokens,
+        ...sampling,
         reasoning: { effort: "low" }, // the fast agent: short thinking, quick tool calls
         usage: { include: true },
       }),
@@ -325,14 +332,32 @@ export function createAgent({
     run.failures = {}; // tool -> failed calls in this round
     run.wrote = false; // something was written or committed in this round
     run.pressed = false;
+    run.looped = false; // an answer of this round fell into a loop and was written again
+    let resample = false; // the next call writes a looped answer again
     let result = null;
     try {
       for (let step = 0; step < maxSteps && !result; step++) {
         // Stuck on the fast model (failed calls, searching again and again): the rest of the run goes to the strong one.
         if (!run.strong && (Object.keys(run.failures).length || run.searches >= 2 || run.nudged || run.unstuck || run.prompted || run.retried)) run.strong = true;
-        const message = asCalls(await llm(run.messages, usage, toolsFor(run.mode), undefined, run.strong ? strongModel : model), `call_${run.id.slice(0, 8)}_${step}`);
+        const sampling = resample ? UNLOOP : undefined;
+        resample = false;
+        const message = asCalls(await llm(run.messages, usage, toolsFor(run.mode), undefined, run.strong ? strongModel : model, sampling), `call_${run.id.slice(0, 8)}_${step}`);
         run.messages.push({ role: "assistant", content: message.content ?? null, ...(message.tool_calls?.length && { tool_calls: message.tool_calls }) });
         if (!message.tool_calls?.length) {
+          // An answer that fell into a loop ("как-как-как-…" to the token limit, loop.js) is never shown: once, it is written
+          // again, sampled and told where it looped; looping again, it is cut where the loop starts.
+          const loop = loopIn(message.content);
+          if (loop) {
+            if (!run.looped && step < maxSteps - 1) {
+              run.looped = true;
+              resample = true;
+              run.messages.pop(); // not kept: the model would go on from the loop
+              run.messages.push({ role: "user", content: loopNote(loop.piece) });
+              continue;
+            }
+            message.content = cutLoop(message.content);
+            run.messages.at(-1).content = message.content || null;
+          }
           // The model's reasoning or a broken call written as text is never the answer: sent back once, then it fails.
           if (LEAKED.test(message.content ?? "")) {
             if (!run.leaked && step < maxSteps - 1) {
@@ -411,7 +436,7 @@ export function createAgent({
       if (!result) {
         run.messages.push({ role: "user", content: "No more tool calls. Answer now from what you found; say briefly what is missing." });
         const message = await llm(run.messages, usage, TOOLS, "none", run.strong ? strongModel : model).catch(() => null);
-        const text = message?.content && finalText(message.content);
+        const text = message?.content && cutLoop(finalText(message.content));
         run.messages.push({ role: "assistant", content: text || null });
         result = text && !LEAKED.test(text)
           ? { status: "done", answer: text }
