@@ -178,7 +178,8 @@ export function createAgent({
           run.recipeArgs[out.id] = args;
         }
         // What the model can cite: the call's one result, or each item of a list (`_ref` on the item).
-        const cited = ok && !empty && data != null && tool ? refsOfResult({ app: appOf(tool, run.apps), tool, args, data }, (r) => register(run, r)) : { data, ref: null, items: [] };
+        // Each reference knows the recipe it came from, so the recipes an answer rests on are the ones it cites.
+        const cited = ok && !empty && data != null && tool ? refsOfResult({ app: appOf(tool, run.apps), tool, args, data }, (r) => register(run, out.id ? { ...r, recipe: out.id } : r)) : { data, ref: null, items: [] };
         if (run.mode === "recipes" && ok && !empty && out.id) keepRaw(run, { id: out.id, from: input.id, tool, args, out, cited });
         // An empty search is not an answer yet: the words may be in another language than the data, or too narrow.
         const retry =
@@ -217,6 +218,8 @@ export function createAgent({
         const { summary, saved: read, ...shown } = out;
         const recipe = read ? { id: read.id, created: read.created, changed: read.changed } : null;
         if (read) {
+          const ref = run.refs.find((r) => r.n === n);
+          if (ref) ref.recipe = read.id;
           keepRaw(run, { id: read.id, tool: read.tool, args: read.args, out: read, cited: { data: read.data, ref: n, items: [] } });
           run.recipes[read.id] = read.tool;
           run.recipeArgs[read.id] = read.args;
@@ -429,6 +432,12 @@ export function createAgent({
     if (result.status === "done") {
       const used = run.mode === "recipes" ? refsOfResults(run, result.results) : citedRefs(result.answer, run.refs, { round: run.round });
       result.references = await withWrites(used);
+      // The recipes the answer rests on: those its references came from (mode "recipes": those handed over). The request is
+      // kept on them, and only on them, so the same request finds them all again with no model call (backend fast path).
+      result.answer_recipes = run.mode === "recipes" ? result.results.map((r) => r.id) : [...new Set(used.map((r) => r.recipe).filter(Boolean))];
+      if (ASKED_MODES.includes(run.mode) && result.answer_recipes.length && genter.recipes?.asked) {
+        await genter.recipes.asked({ ids: result.answer_recipes, task: run.task }).catch((e) => console.error("genter: keeping the request on recipes failed:", e.message));
+      }
     }
     run.status = result.status;
     run.updated_at = new Date().toISOString();
@@ -694,7 +703,7 @@ export function createAgent({
     (run.touched ??= {})[saved] = recipe;
     run.steps.push({ tool, from_recipe: id, recipe, ok: true, summary: null, saved });
     onEvent({ type: "tool", tool, recipe, ok: true, summary: null });
-    const cited = refsOfResult({ app: appOf(tool, run.apps), tool, args, data }, (r) => register(run, r));
+    const cited = refsOfResult({ app: appOf(tool, run.apps), tool, args, data }, (r) => register(run, { ...r, recipe: saved }));
     return keepRaw(run, { id: saved, from: id, tool, args, out, cited });
   }
 
@@ -708,8 +717,6 @@ export function createAgent({
     // "" or the app's own name ("github") is no connection: models send them for account.
     if (!account || account === app || run.apps?.includes(account)) account = undefined;
     const chosen = account ?? run.account ?? run.accounts?.[app];
-    // The request goes along: a result with nothing for it is not kept as a recipe.
-    input = run.task && input.remember !== false ? { ...input, task: run.task } : input;
     const first = await genter.execute({ ...input, account: chosen });
     if (chosen || !notHere(first)) return chosen ? { ...first, accountId: chosen } : first;
     run.connections ??= await genter
@@ -904,7 +911,7 @@ const MAX_REFS = 300;
 // A saved recipe as a reference: the call it makes points somewhere (its args).
 const recipeRef = (run, r) =>
   r.id && r.tool
-    ? register(run, shapeRef({ app: appOf(r.tool, run.apps), via: "recipe", tool: r.tool, title: r.short ?? r.title, where: locatorArgs(r.args ?? {}) }))
+    ? register(run, { ...shapeRef({ app: appOf(r.tool, run.apps), via: "recipe", tool: r.tool, title: r.short ?? r.title, where: locatorArgs(r.args ?? {}) }), recipe: r.id })
     : undefined;
 
 // The place a write is for: a reference number of the run ("3", "[3]"), or a link (one of the run's, or any link
@@ -1090,6 +1097,8 @@ const NOT_AN_ANSWER =
 const MAX_TOOL_FAILURES = 3;
 const MAX_SEARCHES = 3;
 const READ_ONLY_MODES = ["find", "recipes", "prepare", "event"];
+// Modes whose task is a person's request (not a prepare or event instruction): it is kept on the recipes the answer used.
+const ASKED_MODES = ["run", "find", "recipes"];
 const MAX_MANY = 100;
 const MAX_EACH = 300; // calls one read_each makes: an area bigger than that is read in part, and the note says how much is left
 const MAX_LISTED = 2000;

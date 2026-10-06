@@ -784,6 +784,24 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       async get(id) {
         return publicRecipe(await load(id));
       },
+      // The request an answer was made for, kept on the recipes that answer rests on (queryEmbeddings; a skill's piece also
+      // takes it as an intent), so a request close to it finds them again, all of them at once. Only those: a call made just
+      // to find a name or an id is not what the request asked for. The vector is the one search() made for the same text.
+      async asked({ ids = [], task }) {
+        const text = String(task ?? "").trim();
+        const list = [...new Set(ids)].filter(Boolean);
+        if (!text || !list.length) return { filed: 0 };
+        const vector = askedVectors.get(task) ?? (await embed(text, "recipe_embed").catch(() => null));
+        let filed = 0;
+        for (const id of list) {
+          const record = await load(id);
+          const skill = record && isSkillTool(record.tool);
+          if (!record || (!vector && !skill)) continue;
+          await save({ ...record, ...(vector && { queryEmbeddings: addQuery(record.queryEmbeddings, vector, now()) }), ...(skill && { intents: addIntent(record.intents, text) }) });
+          filed++;
+        }
+        return { filed };
+      },
       // Deletes the recipe (and turns its trigger off, unless other recipes share it).
       async remove(id) {
         const record = await load(id);
