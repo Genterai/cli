@@ -458,48 +458,17 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     return load(id);
   }
 
-  // The description of a skill's piece or file is made from the text itself, with no model: where it is, its start, the
-  // words of its headings as keywords. One embedding call. A skill recipe is never about the whole skill.
+  // The description of a skill's piece or file is made from the text itself, with no model (skillDescription, already in the
+  // record from its first save); here only its vector is added. A skill recipe is never about the whole skill.
   const rememberSkill = (id, digest, data) => withCost({ entity_type: "recipe", entity_id: id }, () => rememberSkillInner(id, digest, data));
   async function rememberSkillInner(id, digest, data) {
     let record = await load(id);
     if (!record || record.digest !== digest) return record;
-    const name = data.skill?.name ?? "Skill";
-    const flat = (t, n) => String(t ?? "").replace(/\s+/g, " ").trim().slice(0, n);
-    let title;
-    let summary;
-    let path;
-    let keywords;
-    if (data.section) {
-      path = [name, ...data.section.headings];
-      title = flat(`${name}: ${data.section.headings.at(-1)}`, 100);
-      summary = flat(`Section "${data.section.headings.join(" › ")}" of the skill "${name}". ${flat(data.text, 700)}`, 1200);
-      keywords = [name, ...data.section.headings, "skill", "instructions", data.section.path];
-    } else {
-      path = [name, data.path];
-      title = flat(`${name}: ${data.path}`, 100);
-      const what = data.executable_code ? "Executable code (Genter does not run it)" : data.kind === "artifact" ? "File" : "File";
-      summary = flat(`${what} "${data.path}" of the skill "${name}" (${data.mime}, ${data.size} bytes). ${data.text != null ? flat(data.text, 600) : "Given as a link: too large or binary."}`, 1200);
-      keywords = [name, data.path, data.kind, "skill", data.executable_code ? "script" : "file"];
-    }
-    keywords = [...new Set(keywords.map((k) => flat(k, 60).toLowerCase()).filter(Boolean))].slice(0, 30);
-    const named = { summary, keywords };
+    const named = skillDescription(data);
     const vectors = openrouterApiKey ? await embedMany([summaryText(named)], "recipe_embed").catch(() => []) : [];
     record = await load(id);
     if (!record || record.digest !== digest) return record;
-    record = {
-      ...record,
-      scope: { ...record.scope, toolkit: "skill" },
-      partial: false,
-      source: { app: "Skill", path: path.slice(0, 6), url: null },
-      title,
-      short: flat(data.section ? flat(data.text, 140) : summary, 140),
-      summary,
-      items: data.section ? [data.section.headings.join(" › ")] : [data.path],
-      keywords,
-      ...(vectors[0] && { summaryEmbedding: vectors[0] }),
-      trigger: { active: false, spec: null, id: null, recommended: true }, // a skill's content changes only by an update
-    };
+    record = { ...record, scope: { ...record.scope, toolkit: "skill" }, ...named, ...(vectors[0] && { summaryEmbedding: vectors[0] }) };
     await save(record);
     return load(id);
   }
@@ -780,6 +749,9 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         ...(kept && { title: kept.title, short: kept.short, summary: kept.summary, items: kept.items, summaryEmbedding: kept.summaryEmbedding, itemEmbeddings: kept.itemEmbeddings, source: kept.source, partial: kept.partial }),
       };
       const record = { ...base, scope: withArea(base.scope, area), digest, status: "fresh", updated_at: at, checked_at: at };
+      // A skill's piece says what it is with no model: its title, place and text are there from the first save, so a list
+      // never shows it untitled while its vector is made.
+      if (isSkillTool(tool)) Object.assign(record, skillDescription(result.data), { scope: { ...record.scope, toolkit: "skill" } });
       if (asked) record.queryEmbeddings = addQuery(base.queryEmbeddings, asked, at);
       if (isSkillTool(tool) && task) record.intents = intents(base);
       // The call as it ran: args kept as written (placeholders included), in canonical form so equal calls look equal.
@@ -1117,6 +1089,40 @@ function decodeBase64(key, value) {
     return { ...value, content: Buffer.from(value.content, "base64").toString("utf8") };
   }
   return value;
+}
+
+// What a skill's piece or file is, from its own text (SKILL_READ_CHUNK / SKILL_GET_FILE results), with no model: where it is,
+// its start, the words of its headings as keywords. Never triggered: a skill's content changes only by an update.
+function skillDescription(data) {
+  const name = data?.skill?.name ?? "Skill";
+  const flat = (t, n) => String(t ?? "").replace(/\s+/g, " ").trim().slice(0, n);
+  let title;
+  let summary;
+  let path;
+  let keywords;
+  if (data?.section) {
+    path = [name, ...data.section.headings];
+    title = flat(`${name}: ${data.section.headings.at(-1)}`, 100);
+    summary = flat(`Section "${data.section.headings.join(" › ")}" of the skill "${name}". ${flat(data.text, 700)}`, 1200);
+    keywords = [name, ...data.section.headings, "skill", "instructions", data.section.path];
+  } else {
+    path = [name, data?.path];
+    title = flat(`${name}: ${data?.path}`, 100);
+    const what = data?.executable_code ? "Executable code (Genter does not run it)" : "File";
+    summary = flat(`${what} "${data?.path}" of the skill "${name}" (${data?.mime}, ${data?.size} bytes). ${data?.text != null ? flat(data.text, 600) : "Given as a link: too large or binary."}`, 1200);
+    keywords = [name, data?.path, data?.kind, "skill", data?.executable_code ? "script" : "file"];
+  }
+  keywords = [...new Set(keywords.map((k) => flat(k, 60).toLowerCase()).filter(Boolean))].slice(0, 30);
+  return {
+    partial: false,
+    source: { app: "Skill", path: path.filter(Boolean).slice(0, 6), url: null },
+    title,
+    short: flat(data?.section ? flat(data.text, 140) : summary, 140),
+    summary,
+    items: data?.section ? [data.section.headings.join(" › ")] : [data?.path].filter(Boolean),
+    keywords,
+    trigger: { active: false, spec: null, id: null, recommended: true },
+  };
 }
 
 // One line per item of a list result: its title and when, e.g. "Уборка (2026-10-08 13:00)".

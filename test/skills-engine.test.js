@@ -111,6 +111,23 @@ describe("reading a piece of a skill is one call, saved as one recipe", () => {
     assert.ok(!urls.some((u) => /backend\.composio\.dev|\/tools\/|chat\/completions/.test(u)), "no Composio tool call, no chat model");
   });
 
+  it("S1b the piece is titled and placed from its first save, before its vector is made: a list never shows it untitled", async () => {
+    net();
+    const { genter, skill, flush } = setup();
+    const out = await genter.execute({ tool: SKILL_TOOLS.chunk, args: chunkArgs(skill, "Rollback") });
+    const early = await genter.recipes.get(out.id); // the description step has not run yet (deferred)
+    assert.equal(early.title, "deploy-guide: Rollback");
+    assert.deepEqual(early.source.path, ["deploy-guide", "Deploy guide", "Rollback"]);
+    assert.equal(early.scope.toolkit, "skill");
+    assert.ok(early.summary.includes("rollback.sh"));
+    await flush();
+    const late = await genter.recipes.get(out.id);
+    assert.equal(late.title, early.title);
+    const file = await genter.execute({ tool: SKILL_TOOLS.file, args: { skill: skill.id, version: skill.version, path: "config/app.json" } });
+    assert.equal((await genter.recipes.get(file.id)).title, "deploy-guide: config/app.json");
+    await flush();
+  });
+
   it("S2 asking for the same piece in other words is the same recipe with one more intent key", async () => {
     net();
     const { genter, skill, store, flush } = setup();
