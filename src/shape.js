@@ -73,11 +73,11 @@ export function pick(obj, path) {
 
 
 // The shape of a call's result, found in a real response: the biggest list of objects, and in its items an id,
-// a version and a title. No list: the whole response is one item (re-read every sync).
+// a version and a title (a commit's is its message: GitHub lists commits with no title of their own). No list: the whole response is one item (re-read every sync).
 // path before sha: in a file tree the path is the file, the sha its version.
 const ID = ["id", "uuid", "messageId", "message_id", "ts", "number", "key", "path", "sha", "gid", "name"];
 const VERSION = ["updated_at", "updatedAt", "modifiedTime", "modified_time", "last_edited_time", "lastModified", "updated", "etag", "historyId", "edited.ts", "internalDate", "sha", "ts"];
-const TITLE = ["subject", "title", "name", "summary", "full_name", "displayName", "display_name", "text", "snippet", "label", "email", "filename", "path"];
+const TITLE = ["subject", "title", "name", "summary", "full_name", "commit.message", "displayName", "display_name", "text", "snippet", "label", "email", "filename", "path"];
 const LINK = ["html_url", "web_url", "webViewLink", "htmlLink", "permalink", "url", "link"];
 
 export function inferList(response) {

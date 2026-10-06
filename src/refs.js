@@ -157,7 +157,7 @@ export function refsOfResult({ app, tool, args, data }, add, { max = 25 } = {}) 
     const numbers = [];
     for (const raw of items.slice(0, max)) {
       const id = pick(raw, shape.id);
-      const title = pick(raw, shape.title);
+      const title = firstLine(pick(raw, shape.title));
       const n = add(shapeRef({ app, tool, via: "item", item: id == null ? undefined : String(id), title: title == null ? undefined : String(title), url: pick(raw, shape.url), where: { ...located, ...idKeys(raw) }, raw }));
       if (n != null) numbers.push((raw._ref = n));
     }
@@ -256,6 +256,28 @@ const KNOWN_WRITES = {
     { tool: "GOOGLETASKS_INSERT_TASK", args: { tasklist_id: "tasklist_id", task_parent: "task_id" }, needs: ["title", "notes?", "due?"], does: "Add a subtask under it" },
   ],
 };
+
+// ---------- Reading one thing in full ----------
+
+// The call that reads one referenced thing whole, by the ids that point to it: a commit with its files and their diff,
+// an issue, a pull request, a file's text, an email's thread. A kind an app has no such call for is not here (a Google
+// Calendar event: Composio lists and finds events but cannot get one by its id; its list item carries all there is).
+const KNOWN_READS = {
+  "github:commit": (w) => ({ tool: "GITHUB_GET_A_COMMIT", args: { owner: w.owner, repo: w.repo, ref: w.commit_sha } }),
+  "github:issue": (w) => ({ tool: "GITHUB_GET_AN_ISSUE", args: { owner: w.owner, repo: w.repo, issue_number: Number(w.issue_number) } }),
+  "github:pull_request": (w) => ({ tool: "GITHUB_GET_A_PULL_REQUEST", args: { owner: w.owner, repo: w.repo, pull_number: Number(w.pull_number ?? w.issue_number) } }),
+  "github:file": (w) => (w.path ? FILE_EDITORS.github.read(w) : null),
+  "gmail:email": (w) =>
+    w.message_id ? { tool: "GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID", args: { message_id: w.message_id } } : { tool: "GMAIL_FETCH_MESSAGE_BY_THREAD_ID", args: { thread_id: w.thread_id } },
+};
+
+// { tool, args } that reads a reference in full, or null: its kind has no such call, or an id it needs is missing.
+export function readCall(ref) {
+  const make = ref?.app ? KNOWN_READS[`${ref.app}:${ref.kind}`] : null;
+  const call = make?.(ref.where ?? {});
+  if (!call || !Object.values(call.args).every((v) => v != null && v !== "" && !Number.isNaN(v))) return null;
+  return call;
+}
 
 // Write tools for a reference: [{ tool, args, needs, does, read? }], best first. args are filled from `where` and are
 // passed as they are; needs is what the caller adds ("?": optional). A popular app's known kind needs no catalogue;
@@ -515,3 +537,6 @@ const dashed = (id) => (/^[0-9a-f]{32}$/i.test(id) ? `${id.slice(0, 8)}-${id.sli
 function clean(obj) {
   return Object.fromEntries(Object.entries(obj ?? {}).filter(([, v]) => v != null && v !== "" && v !== "undefined" && !(typeof v === "number" && Number.isNaN(v))));
 }
+
+// The first line of a title, as a list shows it (a commit's message is its subject line, then its body).
+const firstLine = (v) => (typeof v === "string" ? v.split("\n").find((l) => l.trim())?.trim() ?? v : v);

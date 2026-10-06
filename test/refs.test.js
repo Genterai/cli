@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { applyEdits, citedRefs, fileEditor, refFromUrl, refLabel, refsOfResult, shapeRef, writeHints } from "../src/refs.js";
-import { readQuestion, referenceText } from "../src/tools.js";
+import { applyEdits, citedRefs, fileEditor, readCall, refFromUrl, refLabel, refsOfResult, shapeRef, writeHints } from "../src/refs.js";
+import { readQuestion, readTarget, referenceText } from "../src/tools.js";
 import { catalogues } from "./helpers.js";
 
 // The references of one call's result, numbered like the agent numbers them.
@@ -296,5 +296,45 @@ describe("A skill's pieces as sources", () => {
     assert.deepEqual(refs.map((r) => [r.kind, r.title, r.of, r.where.chunk]), [["section", "Writing pages", "docsbook-static", "w#pages"], ["section", "7. Style", "docsbook-static", "w#pages/7-style"]]);
     assert.equal(readQuestion(refs[1]), "Read the docsbook-static skill: w#pages/7-style");
     assert.match(referenceText(refs[1]), /^\[2\] skill section 7\. Style \(docsbook-static\)/);
+  });
+});
+
+describe("reading one thing in full", () => {
+  it("names a commit of a list by its message's first line", () => {
+    const sha = "88bda019d0e859e0ec344fa92baea7b0f4f3adec";
+    const { refs } = refsOf("github", "GITHUB_LIST_COMMITS", { owner: "Genterai", repo: "genter" }, {
+      commits: [
+        { sha, html_url: `https://github.com/Genterai/genter/commit/${sha}`, commit: { message: "Merge pull request #53\n\nPlan: Growth is sold" } },
+        { sha: "c00109999b92326b05d22d8e37b6792afdd2c272", html_url: "https://github.com/Genterai/genter/commit/c00109999b92326b05d22d8e37b6792afdd2c272", commit: { message: "Plan: Growth is sold" } },
+      ],
+    });
+    assert.equal(refs[0].title, "Merge pull request #53");
+    assert.equal(refs[0].kind, "commit");
+    assert.equal(refs[1].title, "Plan: Growth is sold");
+  });
+
+  it("reads back the reference a read request names, its ids from the link", () => {
+    const sha = "88bda019d0e859e0ec344fa92baea7b0f4f3adec";
+    const ref = { app: "github", kind: "commit", title: "Merge pull request #53", url: `https://github.com/Genterai/genter/commit/${sha}`, where: { owner: "Genterai", repo: "genter", commit_sha: sha } };
+    const target = readTarget(readQuestion(ref));
+    assert.deepEqual(target.where, { owner: "Genterai", repo: "genter", commit_sha: sha });
+    assert.equal(target.title, "Merge pull request #53");
+    assert.deepEqual(readCall(target), { tool: "GITHUB_GET_A_COMMIT", args: { owner: "Genterai", repo: "genter", ref: sha } });
+    // Ids with no link.
+    const mail = readTarget(readQuestion({ app: "gmail", kind: "email", title: 'Say "hi"', where: { message_id: "m1", thread_id: "t1" } }));
+    assert.equal(mail.title, 'Say "hi"');
+    assert.deepEqual(readCall(mail), { tool: "GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID", args: { message_id: "m1" } });
+    assert.equal(readTarget("Последний коммит Genter"), null);
+    assert.equal(readTarget("Read the docs-writing skill: SKILL.md#install"), null);
+  });
+
+  it("has no read call for a calendar event, an issue with no number, or an unknown kind", () => {
+    const eid = Buffer.from("abc123 genterhq@m").toString("base64");
+    const event = readTarget(`Read the googlecalendar event "GEO vs SEO" in full: https://www.google.com/calendar/event?eid=${eid}`);
+    assert.equal(event.where.event_id, "abc123");
+    assert.equal(readCall(event), null);
+    assert.equal(readCall({ app: "github", kind: "issue", where: { owner: "o", repo: "r" } }), null);
+    assert.equal(readCall({ app: "notion", kind: "page", where: { page_id: "p" } }), null);
+    assert.deepEqual(readCall(readTarget("Read the github pull_request \"#7\" in full: https://github.com/o/r/pull/7")), { tool: "GITHUB_GET_A_PULL_REQUEST", args: { owner: "o", repo: "r", pull_number: 7 } });
   });
 });

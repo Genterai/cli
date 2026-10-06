@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { fileEditor, refLabel } from "./refs.js";
+import { fileEditor, refFromUrl, refLabel } from "./refs.js";
 
 // Shared by the CLI and the MCP server.
 export const instructions = `Genter runs Composio tools and remembers each successful call as a recipe: one call with fixed args, plus what it returned.
@@ -326,4 +326,30 @@ export function readQuestion(r) {
   const name = label && label !== r.kind ? ` "${label}"` : "";
   if (r.url) return `Read the ${what}${name} in full: ${r.url}`;
   return `Read the ${what}${name} in full${Object.keys(w).length ? ` ${JSON.stringify(w)}` : ""}`;
+}
+
+// A read request read back (readQuestion's "Read the <app> <kind> "<name>" in full: <link>" or "... in full {ids}"): the
+// reference it names, { app, kind, title?, url?, where }, its ids from the link when it has one; null for any other request.
+export function readTarget(question) {
+  const m = String(question ?? "")
+    .trim()
+    .match(/^Read the (\S+) (\S+)(?: "([\s\S]*)")? in full(?::\s*(\S+)|\s+(\{[\s\S]*\}))?$/);
+  if (!m) return null;
+  const [, app, kind, title, url, ids] = m;
+  let where = {};
+  if (ids) {
+    try {
+      where = JSON.parse(ids);
+    } catch {
+      return null;
+    }
+  }
+  const linked = url ? refFromUrl(url) : null;
+  return {
+    app: linked?.app ?? app,
+    kind: linked?.kind ?? kind,
+    ...(title && { title }),
+    ...(url && { url }),
+    where: { ...where, ...linked?.where },
+  };
 }
