@@ -360,7 +360,6 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     return { score, matched };
   }
 
-
   const toolInfos = new Map();
   const toolInfo = (tool) => {
     if (!toolInfos.has(tool)) toolInfos.set(tool, composio.tools.getRawComposioToolBySlug(tool).catch(() => ({})));
