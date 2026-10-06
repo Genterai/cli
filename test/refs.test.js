@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { applyEdits, citedRefs, fileEditor, refFromUrl, refLabel, refsOfResult, shapeRef, writeHints } from "../src/refs.js";
+import { readQuestion, referenceText } from "../src/tools.js";
 import { catalogues } from "./helpers.js";
 
 // The references of one call's result, numbered like the agent numbers them.
@@ -280,5 +281,20 @@ describe("Tool ranking", () => {
     const { rankTools } = await import("../src/genter.js");
     const tools = ["GITHUB_LIST_GISTS_FOR_THE_AUTHENTICATED_USER", "GITHUB_GET_A_COMMIT", "GITHUB_LIST_NOTIFICATIONS_FOR_THE_AUTHENTICATED_USER"].map((slug) => ({ slug, description: "" }));
     assert.equal(rankTools(tools, "show the commits of the repo", 1)[0].slug, "GITHUB_GET_A_COMMIT");
+  });
+});
+
+describe("A skill's pieces as sources", () => {
+  const skill = { id: "skl_1", name: "docsbook-static", version: "v1" };
+  const chunk = (id, headings) => ({ skill, section: { id, path: "references/writing.md", title: headings.at(-1), headings }, text: "...", related: [{ path: "a.md", kind: "artifact" }, { path: "b.md", kind: "artifact" }], see_also: [] });
+  it("each section is named by its own heading, the skill beside it, so two pieces of one skill are told apart; what it lists stays inside", () => {
+    const refs = [];
+    const add = (r) => (refs.push({ ...r, n: refs.length + 1 }), refs.length);
+    for (const [id, headings] of [["w#pages", ["Writing pages"]], ["w#pages/7-style", ["Writing pages", "7. Style"]]]) {
+      refsOfResult({ app: "skill", tool: "SKILL_READ_CHUNK", args: { skill: "skl_1", version: "v1", chunk: id }, data: chunk(id, headings) }, add);
+    }
+    assert.deepEqual(refs.map((r) => [r.kind, r.title, r.of, r.where.chunk]), [["section", "Writing pages", "docsbook-static", "w#pages"], ["section", "7. Style", "docsbook-static", "w#pages/7-style"]]);
+    assert.equal(readQuestion(refs[1]), "Read the docsbook-static skill: w#pages/7-style");
+    assert.match(referenceText(refs[1]), /^\[2\] skill section 7\. Style \(docsbook-static\)/);
   });
 });

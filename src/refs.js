@@ -34,6 +34,7 @@ export function shapeRef(r) {
     app: r.app,
     kind: out.kind,
     title: String(out.title ?? r.title ?? out.kind).slice(0, 200),
+    of: out.of, // what the place is part of, named apart from it (a skill's section: the skill)
     url,
     path: out.path,
     where: clean(out.where),
@@ -47,6 +48,17 @@ export function shapeRef(r) {
 const GITHUB_URL = /^https:\/\/github\.com\/([^/?#]+)\/([^/?#]+)(?:\/(blob|tree|issues|pull|commit)\/([^?#]+))?\/?(?:[?#].*)?$/;
 
 const SHAPES = {
+  // A skill's piece: its section (the last heading) or its file, by its own name, so two pieces of one skill are told apart;
+  // the skill is `of`. where: what reads it again (SKILL_READ_CHUNK / SKILL_GET_FILE args).
+  skill({ raw, where: w }) {
+    const skill = raw?.skill;
+    if (!skill) return null;
+    const at = { skill: skill.id ?? w.skill, ...(skill.version && { version: skill.version }) };
+    const section = raw.section;
+    if (section) return { kind: "section", title: section.headings?.at(-1) ?? section.title ?? section.id, of: skill.name, path: section.path, where: { ...at, chunk: section.id } };
+    if (raw.path) return { kind: raw.executable_code ? "script" : "file", title: raw.path, of: skill.name, path: raw.path, where: { ...at, path: raw.path } };
+    return null;
+  },
   github({ url, where: w, item, part, tool = "", title }) {
     const m = url?.match(GITHUB_URL);
     let owner = w.owner ?? m?.[1];
@@ -137,7 +149,8 @@ export function refFromUrl(url) {
 // a list's items one by one (at most `max`; items: their numbers), anything else as the call's one result (ref).
 export function refsOfResult({ app, tool, args, data }, add, { max = 25 } = {}) {
   const located = locatorArgs(args ?? {});
-  const shape = data && typeof data === "object" ? inferList(data) : { single: true };
+  // A skill's piece is one source, whatever it lists (the files it points to are calls to make next, not its items).
+  const shape = data && typeof data === "object" && app !== "skill" ? inferList(data) : { single: true };
   if (!shape.single) {
     const shown = structuredClone(data);
     const items = [pick(shown, shape.items)].flat().filter((x) => x && typeof x === "object");

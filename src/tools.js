@@ -273,7 +273,7 @@ export function readable(data) {
 //     write GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS(message, content)
 // read: with the follow-up that reads the place in full (readQuestion), for a client's model to make when it needs more.
 export function referenceText(r, write = false, { read = false } = {}) {
-  const lines = [`[${r.n}] ${[r.app, r.kind].filter(Boolean).join(" ")} ${refLabel(r)}${r.url ? ` — ${r.url}` : ""}`];
+  const lines = [`[${r.n}] ${[r.app, r.kind].filter(Boolean).join(" ")} ${refLabel(r)}${r.of ? ` (${r.of})` : ""}${r.url ? ` — ${r.url}` : ""}`];
   if (r.where && Object.keys(r.where).length) lines.push(`    where ${JSON.stringify(r.where)}`);
   const question = read && readQuestion(r);
   if (question) lines.push(`    read  GENTER_FIND ${JSON.stringify({ question })}`);
@@ -290,7 +290,7 @@ export function readQuestion(r) {
   const w = r.where ?? {};
   if (r.app === "skill") {
     const piece = w.chunk ?? w.id ?? w.path ?? r.path;
-    const name = r.title && r.title !== piece ? r.title : null;
+    const name = r.of ?? (r.title && r.title !== piece ? r.title : null);
     return `Read the ${name ? `${name} skill` : "skill"}${piece ? `: ${piece}` : ""}`;
   }
   const what = [r.app === "website" ? null : r.app, r.kind].filter(Boolean).join(" ") || "item";
