@@ -84,6 +84,8 @@ Genter finds; you think and write. Genter returns the raw data from the user's a
 do all of that yourself from the data it returns. Never ask Genter to change, rewrite, improve, shorten or compose a text.
 - GENTER_FIND: any question about the user's own data (emails, events, files, issues, messages, contacts, docs, pages). Read-only. Returns raw data:
   the live results of the recipes that hold the answer (a saved one that fits, or new ones a fast agent finds and saves), each under a line naming its call. Answer from them yourself.
+  Optional goal (what the task is for, e.g. "writing product docs"): also returns the user's matching skills and guides in a separate
+  "Skills for the goal" section, never among the data, each once per session. Leave it out when you only look something up.
   Ask only for what to find (who, what, when, which app), never for what to do with it: for "rewrite the intro of our README", find "the README of <repo>" and rewrite it yourself.
 - GENTER_CONTINUE_TASK: answer a run's question, continue after the user connected an app, or narrow or widen the same search.
 Call them whenever the user mentions or implies an app, an account or their own data. Never say you have no access before trying.
@@ -119,7 +121,9 @@ export function agentTools({ connected = [], actions = false } = {}) {
         "A saved recipe that clearly fits runs at once; otherwise a fast agent finds the right calls in the apps and saves them as recipes, " +
         "so the next such question takes one step. The data is always read live from the apps, so it is current.\n" +
         "Call it before answering any question about the user's own data instead of guessing or saying you can't see it: " +
-        "\"what did Anna write about the contract\", \"my meetings tomorrow\", \"PRs waiting for my review\", \"the invoice from March\"." +
+        "\"what did Anna write about the contract\", \"my meetings tomorrow\", \"PRs waiting for my review\", \"the invoice from March\".\n" +
+        "Optional `goal` (what the task is for, e.g. \"writing product documentation\"): also returns the user's matching skills and guides " +
+        "in a separate \"Skills for the goal\" section, each once per session. Example: {question: \"Evallens features\", goal: \"writing product documentation\"}." +
         have,
       input: z.object({
         question: z.string().describe("What to find, in plain words, with any known names, dates or apps. Only what to find, never what to do with it"),
@@ -243,6 +247,11 @@ export function recipesResultText(out, { write = false, instructions } = {}) {
   const said = String(out.answer ?? "").trim();
   const note = said && (!results.length || out.status !== "done") ? said : "";
   const blocks = results.map((r, i) => `${recipeLine(r, i + 1)}\n${JSON.stringify(readable(r.data) ?? null)}`);
+  // Skills and guides picked by GENTER_FIND's goal: their own section after the data, never counted among the recipes.
+  const skills = out.skills ?? [];
+  const skillBlocks = skills.length
+    ? [`Skills for the goal (guides on how to do it, not data to answer from):\n\n${skills.map((r, i) => `Skill ${i + 1}: ${recipeLine(r, i + 1).replace(/^Recipe \d+: /, "")}\n${JSON.stringify(readable(r.data) ?? null)}`).join("\n\n")}`]
+    : [];
   const told = [instructions, ...results.map((r) => r.instructions)].map((t) => String(t ?? "").trim()).filter((t, i, all) => t && all.indexOf(t) === i);
   const next = nextOf(out, refs, write);
   const meta = {
@@ -250,6 +259,7 @@ export function recipesResultText(out, { write = false, instructions } = {}) {
     status: out.status ?? "done",
     ...(out.direct && { direct: true }),
     recipes: results.map((r) => ({ id: r.id, tool: r.tool, ...(r.score != null && { score: r.score }), ...(r.created && { created: true }), ...(r.changed && { changed: true }) })),
+    ...(skills.length && { skills: skills.map((r) => ({ id: r.id, tool: r.tool, ...(r.score != null && { score: r.score }) })) }),
     ...(told.length && { instructions: told.join("\n\n") }),
     ...(out.connect_url && { connect_url: out.connect_url }),
     ...(out.suggestions?.length && { suggestions: out.suggestions }),
@@ -259,7 +269,7 @@ export function recipesResultText(out, { write = false, instructions } = {}) {
   };
   // A result that is one source (a file, a page) is here in full: only the items of a list get a "read" line.
   const listed = refs.length ? `References:\n${refs.map((r) => referenceText(r, write, { read: r.via !== "call" })).join("\n")}` : "";
-  return [note, ...blocks, listed, JSON.stringify(meta)].filter(Boolean).join("\n\n");
+  return [note, ...blocks, ...skillBlocks, listed, JSON.stringify(meta)].filter(Boolean).join("\n\n");
 }
 
 // Recipe 1: rcp_… · GMAIL_FETCH_EMAILS {"query":"from:anna"} — Emails from Anna (account work)
