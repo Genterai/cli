@@ -40,6 +40,36 @@ export function underSite(page, site) {
   }
 }
 
+// What people call a site: the name its domain is registered under, without www, the ending (.io, .co.uk) and the host
+// it lives on ("evallens" for https://www.evallens.io/team, "acme" for docs.acme.co.uk and acme.github.io). null for
+// an IP address or a name of under 3 letters.
+const SECOND_LEVEL = new Set(["co", "com", "org", "net", "gov", "edu", "ac"]);
+const HOSTS = new Set(["github", "gitlab", "vercel", "netlify", "pages", "herokuapp", "notion", "gitbook", "webflow", "framer", "wordpress", "blogspot", "substack", "medium", "readthedocs", "firebaseapp", "web", "appspot", "wixsite", "tilda", "myshopify"]);
+export function siteName(url) {
+  let host;
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  if (/^[\d.]+$/.test(host) || host.includes(":")) return null;
+  const labels = host.split(".").filter((l) => l && l !== "www");
+  labels.pop();
+  if (labels.length > 1 && SECOND_LEVEL.has(labels.at(-1))) labels.pop();
+  if (labels.length > 1 && HOSTS.has(labels.at(-1))) labels.pop();
+  const name = labels.at(-1)?.replace(/[^\p{L}\p{N}]/gu, "");
+  return name && name.length >= 3 ? name : null;
+}
+
+// Whether a text names the site of this page: a word of it, or two words written together, is the site's name
+// ("Evallens?", "EvalLens.io" and "Eval Lens" name evallens.io).
+export function namesSite(text, url) {
+  const name = siteName(url);
+  if (!name) return false;
+  const words = String(text ?? "").toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+  return words.some((w, i) => w === name || w + (words[i + 1] ?? "") === name);
+}
+
 // A link as a page to visit: same site, under the start's folder, not a file; no fragment and no tracking params.
 function pageLink(href, base, start) {
   let u;

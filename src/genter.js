@@ -5,7 +5,7 @@ import { addMcpServer, isCustomToolkit, mcpUrl } from "./mcp.js";
 import { areaOf, canonicalArgs, canonicalJson, classifyFailure, contentHash, isPartial, normalizeLegacy, publicRecipe, recipeId, sourceOf } from "./recipe.js";
 import { fill, inferList, pick } from "./shape.js";
 import { addIntent, chunkCall, fileCall, isSkillTool, LIMITS as SKILL_LIMITS, SCRIPT_NOTE, SKILL_TOOLS } from "./skills.js";
-import { crawl, forgetPage, readPage, siteUrl, underSite } from "./web.js";
+import { crawl, forgetPage, namesSite, readPage, siteUrl, underSite } from "./web.js";
 
 // Genter = Composio + recipes of past calls.
 // A Recipe is ONE successful tool call with fixed args plus knowledge about its actual result (see recipe.js and
@@ -149,6 +149,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
                   "A user searches their apps (email, chats, docs, issues) with this request. Translate it for searching. " +
                   'Reply with JSON only: {"en": "<the request in English>", "terms": ["<key search terms in the original language>", ' +
                   '"<the same terms in English, plus 1-2 close English synonyms>"]}. Keep names, emails, ids and quoted text as they are. ' +
+                  "A name (a person, company, product, project, site) is a term of its own. " +
                   `Terms are short phrases that would appear in the data, not the whole request.\n\n${query}`,
               },
             ],
@@ -158,7 +159,9 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         )
           .then((text) => {
             const out = JSON.parse(text);
-            return { en: String(out.en ?? "").trim() || null, terms: (out.terms ?? []).map(String).filter(Boolean).slice(0, 10) };
+            // One term per string: the model often joins several ("product owner code, owner code"), which no text contains.
+            const terms = (out.terms ?? []).flatMap((t) => String(t).split(/\s*[,;|]\s*/)).map((t) => t.trim()).filter(Boolean);
+            return { en: String(out.en ?? "").trim() || null, terms: [...new Map(terms.map((t) => [t.toLowerCase(), t])).values()].slice(0, 12) };
           })
           .catch(() => null),
       );
@@ -628,29 +631,39 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       if (vector) askedVectors.set(query, vector);
       if (askedVectors.size > MAX_ASKED) askedVectors.delete(askedVectors.keys().next().value);
       const terms = (english?.terms ?? []).map((t) => t.toLowerCase().trim()).filter((t) => t.length >= 4);
-      const memories = vector
+      const scored = vector
         ? (await everyRecipe())
             .filter((r) => r.status === "fresh" && !r.disabled && r.summaryEmbedding && (!allow || allow(r)))
             .map((r) => ({ r, ...resultMatch(r, vector, terms) }))
-            .filter(({ score }) => score >= minScore)
-            .sort((a, b) => b.score - a.score)
-            .slice(0, limit)
-            .map(({ r, score, matched }) => ({
-              id: r.id,
-              tool: r.tool,
-              args: r.args,
-              title: r.title,
-              short: r.short,
-              summary: r.summary,
-              ...(r.keywords && { keywords: r.keywords }),
-              ...(matched.length && { matched }),
-              score: Number(score.toFixed(2)),
-              status: r.status,
-              updated_at: r.updated_at,
-              checked_at: r.checked_at,
-              trigger: { active: Boolean(r.trigger?.active) },
-            }))
         : [];
+      // A site the request names ("Evallens" for evallens.io) is where to look: its closest pages come first, up to half
+      // the places, however far the request is from them by meaning (a typo, another language). "Код продуктовнер в
+      // Evallens?" got Google Drive files while the site's pages were saved. Naming a site does not stop the tool search.
+      const named = scored
+        .filter(({ r }) => r.tool === "WEBSITE_READ_PAGE" && namesSite(text, r.args?.url))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, Math.ceil(limit / 2));
+      for (const m of named) [m.closeness, m.score] = [m.score, Math.max(m.score, strongScore)];
+      const onSite = new Set(named.map((m) => m.r.id));
+      const memories = scored
+        .filter(({ score }) => score >= minScore)
+        .sort((a, b) => b.score - a.score || (b.closeness ?? b.score) - (a.closeness ?? a.score))
+        .slice(0, limit)
+        .map(({ r, score, matched }) => ({
+          id: r.id,
+          tool: r.tool,
+          args: r.args,
+          title: r.title,
+          short: r.short,
+          summary: r.summary,
+          ...(r.keywords && { keywords: r.keywords }),
+          ...(matched.length && { matched }),
+          score: Number(score.toFixed(2)),
+          status: r.status,
+          updated_at: r.updated_at,
+          checked_at: r.checked_at,
+          trigger: { active: Boolean(r.trigger?.active) },
+        }));
       // Skills: pieces found by meaning next to the saved recipes (a piece that is already a recipe is not offered twice).
       if (skills && vector) {
         const have = new Set(memories.map((m) => m.id));
@@ -659,7 +672,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         memories.sort((a, b) => b.score - a.score);
         memories.splice(limit);
       }
-      if (!withTools && memories.some((m) => m.score >= strongScore)) return memories;
+      if (!withTools && memories.some((m) => m.score >= strongScore && !onSite.has(m.id))) return memories;
 
       const search = english?.en ?? query;
       const ofApps = (t) => !only || only.has(String(t.toolkit?.slug ?? "").toLowerCase());
