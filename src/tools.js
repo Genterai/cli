@@ -85,7 +85,7 @@ do all of that yourself from the data it returns. Never ask Genter to change, re
 - GENTER_FIND: any question about the user's own data (emails, events, files, issues, messages, contacts, docs, pages). Read-only. Returns raw data:
   the live results of the recipes that hold the answer (a saved one that fits, or new ones a fast agent finds and saves), each under a line naming its call. Answer from them yourself.
   Optional goal (what the task is for, e.g. "writing product docs"): also returns the user's matching skills and guides in a separate
-  "Skills for the goal" section, never among the data, each once per session. Leave it out when you only look something up.
+  "Skills for the goal" section, never among the data, each once per chat (pass the same optional conversation_id in every call of a chat, a new one in a new chat). Leave it out when you only look something up.
   Ask only for what to find (who, what, when, which app), never for what to do with it: for "rewrite the intro of our README", find "the README of <repo>" and rewrite it yourself.
 - GENTER_CONTINUE_TASK: answer a run's question, continue after the user connected an app, or narrow or widen the same search.
 Call them whenever the user mentions or implies an app, an account or their own data. Never say you have no access before trying.
@@ -123,10 +123,14 @@ export function agentTools({ connected = [], actions = false } = {}) {
         "Call it before answering any question about the user's own data instead of guessing or saying you can't see it: " +
         "\"what did Anna write about the contract\", \"my meetings tomorrow\", \"PRs waiting for my review\", \"the invoice from March\".\n" +
         "Optional `goal` (what the task is for, e.g. \"writing product documentation\"): also returns the user's matching skills and guides " +
-        "in a separate \"Skills for the goal\" section, each once per session. Example: {question: \"Evallens features\", goal: \"writing product documentation\"}." +
+        "in a separate \"Skills for the goal\" section, each once per chat. Pass the same `conversation_id` (an id you make up once per chat, new in a new chat) in every call of a chat so a skill is not repeated. " +
+        "Example: {question: \"Evallens features\", goal: \"writing product documentation\", conversation_id: \"k3x9a2fq\"}. Both are optional." +
         have,
       input: z.object({
         question: z.string().describe("What to find, in plain words, with any known names, dates or apps. Only what to find, never what to do with it"),
+        goal: z.string().optional().describe("Optional. What the task is for, in a few words (\"writing product documentation\"). Brings matching skills and guides in a separate section; leave it out when you only look something up"),
+        conversation_id: z.string().max(200).optional().describe("Optional. One short id for this chat, the same in every call of this chat and new in a new chat (e.g. a random 8-character string you make up once). Keeps a skill from being shown twice in a chat"),
+        model: z.string().max(100).optional().describe("Optional. Your model name, for the call log only"),
         account,
       }),
       annotations: { title: "Find in your apps", readOnlyHint: true, openWorldHint: true },

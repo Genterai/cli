@@ -81,10 +81,10 @@ genter find '{"question":"what did Anna write about the contract?"}'
 genter continue '{"run_id":"...","message":"use my work account"}'
 ```
 
-Over MCP, `GENTER_FIND` takes `{question, account?, goal?}`. `goal` is optional: what the task is for, in a few words
+Over MCP, `GENTER_FIND` takes `{question, account?, goal?, conversation_id?, model?}`. `goal` is optional: what the task is for, in a few words
 (`"writing product documentation"`), while `question` stays what to find. `goal` only brings the user's matching skills and
 guides, in a separate "Skills for the goal" section of the result (`skills` in its JSON line) after the data recipes; they
-never take a slot of the data recipes, and a skill shown once is not shown again in the same session. Without `goal` nothing changes.
+never take a slot of the data recipes, and a skill shown once is not shown again in the same chat. `conversation_id` is an optional short id the client's model makes up once per chat (the same in every call of the chat, new in a new chat): skills are not repeated per that id (kept apart per person and workspace; without it, per MCP session). `model` is the client's model name, for the call log only. Without `goal` nothing changes.
 
 A run ends `done`, `needs_input` (a question), `needs_connection` (a connect link) or `failed`; `continue` picks it up.
 A `done` answer cites its sources as `[n]` and comes with `references` (see below).
