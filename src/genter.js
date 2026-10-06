@@ -601,7 +601,10 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     // and without one the connected apps' tools are ranked by the query's words.
     // `within`: a Set of anchor ids, the only anchors offered (a person limited to some projects): they are ranked among
     // themselves, so anchors outside it do not take the places, and a skill's piece is offered only as its anchor there.
-    async search({ query, limit = 5, apps = [], toolkits: also = [], tools: withTools = false, connected = false, within = null }) {
+    // `kind: "skill"`: only skills, their anchors and their pieces, never app tools (GENTER_FIND's goal looks for how to do a
+    // task, not for data: anchors of apps would take the places of the pieces).
+    async search({ query, limit = 5, apps = [], toolkits: also = [], tools: withTools = false, connected = false, within = null, kind = null }) {
+      const onlySkills = kind === "skill";
       const english = await translate(query);
       const text = `${query} ${english?.en ?? ""}`;
       const only = connected && apps.length ? new Set(apps.map((a) => String(a).toLowerCase())) : null;
@@ -612,7 +615,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       const terms = (english?.terms ?? []).map((t) => t.toLowerCase().trim()).filter((t) => t.length >= 4);
       const scored = vector
         ? (await everyRecipe())
-            .filter((r) => r.status === "fresh" && !r.disabled && r.summaryEmbedding && (!allow || allow(r)) && (!within || within.has(r.id)))
+            .filter((r) => r.status === "fresh" && !r.disabled && r.summaryEmbedding && (!allow || allow(r)) && (!within || within.has(r.id)) && (!onlySkills || isSkillTool(r.tool)))
             .map((r) => ({ r, ...resultMatch(r, vector, terms) }))
         : [];
       // A site the request names ("Evallens" for evallens.io) is where to look: its closest pages come first, up to half
@@ -658,6 +661,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         memories.sort((a, b) => b.score - a.score);
         memories.splice(limit);
       }
+      if (onlySkills) return memories;
       if (!withTools && memories.some((m) => m.score >= strongScore && !onSite.has(m.id))) return memories;
 
       const search = english?.en ?? query;

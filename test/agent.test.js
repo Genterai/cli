@@ -920,6 +920,16 @@ describe("MCP raw anchors text", () => {
     assert.match(agentInstructions, /Optional goal/);
   });
 
+  it("the goal is asked for as the exact step, not the area, with a pointed example", () => {
+    const tool = agentTools().GENTER_FIND;
+    for (const text of [tool.description, agentInstructions, tool.input.shape.goal.description]) {
+      assert.match(text, /exact step/);
+      assert.match(text, /quickstart page of the Evallens docs/);
+      assert.match(text, /not "documentation"/);
+    }
+    assert.doesNotMatch(tool.description, /goal: \\?"writing product documentation\\?"/);
+  });
+
   it("goal, conversation_id and model are in the schema (a client only sends fields the schema lists) and all optional", () => {
     const { input } = agentTools().GENTER_FIND;
     const parsed = input.parse({ question: "q", goal: "g", conversation_id: "k3x9a2fq", model: "m" });

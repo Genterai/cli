@@ -287,6 +287,20 @@ describe("search", () => {
     );
   });
 
+  it("S13 kind \"skill\" (GENTER_FIND's goal): only skills' anchors and pieces, and no app tools are searched", async () => {
+    const urls = net();
+    const { genter, skill, flush } = setup();
+    const install = await genter.execute({ tool: SKILL_TOOLS.chunk, args: chunkArgs(skill, "Install"), task: "install" });
+    await flush();
+    const found = await genter.search({ query: "how to deploy and roll back", limit: 10, kind: "skill" });
+    assert.ok(found.length >= 2);
+    assert.ok(found.every((f) => f.tool === SKILL_TOOLS.chunk));
+    assert.equal(found.filter((f) => f.id === install.id).length, 1);
+    // Nothing fits: an empty list, not a search of app tools.
+    assert.deepEqual(await genter.search({ query: "my unread email from today", limit: 5, kind: "skill" }), []);
+    assert.ok(!urls.some((u) => /backend\.composio\.dev|\/tools/.test(u)));
+  });
+
   it("S11 an unrelated request does not find skill pieces", async () => {
     net();
     const { genter } = setup();
