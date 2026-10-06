@@ -254,7 +254,12 @@ a new one is added, a page the site removed (404) is marked gone. `forget_websit
 A trigger keeps a recipe current: `recipes.recommendTrigger(id)` lets a model pick a Composio trigger spec for the
 recipe's app (cached in `trigger.spec`), `recipes.setTrigger({id, active})` creates or disables it (only where
 `createGenter` gets `triggers: true`, the hosted backend), `recipes.byTrigger({triggerId})` finds the recipes an event
-concerns; the backend wakes the agent in `event` mode with them.
+concerns; the backend wakes the agent in `event` mode with them. `recipes.setTriggers({ids, active})` does it for many
+recipes at once (a project's Keep in sync): each recipe keeps its own trigger, the spec picked for its own call, and
+recipes whose specs are the same subscription (slug, config, account) share one Composio trigger, so one event wakes one
+run with all of them; a shared trigger is disabled only when no recipe keeps it on. When a recipe's result changes, the
+record keeps `previous` (`{title, short, summary, items, updated_at}` of the result before), so a notification can say
+what changed.
 
 ## Data
 
@@ -282,7 +287,8 @@ await genter.register_tool({ mcp_url: "https://mcp.example.com/mcp" }); // or { 
 await genter.search({ query: "send a slack message" });
 const out = await genter.execute({ tool: "GMAIL_FETCH_EMAILS", args: { query: "is:unread" } }); // { id, result, created, changed, unchanged, pending }
 await genter.recipes.list(); // get(id), remove(id), recheck(id), invalidateAccount({account|toolkit}), markGone(id),
-                             // recommendTrigger(id), setTrigger({id, active}), byTrigger({triggerId}), prepareScope(...), scopes()
+                             // recommendTrigger(id), setTrigger({id, active}), setTriggers({ids, active}), byTrigger({triggerId}),
+                             // prepareScope(...), scopes()
 ```
 
 ## License

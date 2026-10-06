@@ -415,6 +415,100 @@ describe("recipes", () => {
   });
 });
 
+describe("triggers of many recipes", () => {
+  // Composio's trigger endpoints over fetch, on top of fakeComposio: one trigger type (a commit in a repository), an upsert
+  // that makes a NEW trigger each time (so sharing is Genter's doing), enable and disable.
+  function fakeTriggers() {
+    const seen = { upserts: 0, updates: [] };
+    const below = globalThis.fetch;
+    const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    const type = { slug: "GITHUB_COMMIT_EVENT", name: "Commit", description: "A new commit", toolkit: { slug: "github", name: "GitHub", logo: "" }, payload: {}, config: { properties: { owner: {}, repo: {} }, required: ["owner", "repo"] } };
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      if (u.includes("/trigger_instances/") && u.includes("/upsert")) return json({ trigger_id: `ti_${++seen.upserts}` });
+      if (u.includes("/trigger_instances/manage/")) {
+        seen.updates.push([u.split("/").pop().split("?")[0], JSON.parse(init.body).status]);
+        return json({ status: "success" });
+      }
+      if (u.includes("/triggers_types/")) return json(type);
+      if (u.includes("/triggers_types")) return json({ items: [type], total_pages: 1 });
+      return below(url, init);
+    };
+    return seen;
+  }
+  const model = {
+    chat: (prompt) =>
+      /Which of these triggers/.test(prompt)
+        ? { triggers: [{ slug: "GITHUB_COMMIT_EVENT", config: { owner: "o", repo: "r" }, label: "on every commit" }] }
+        : { title: `File ${(prompt.match(/"text":"([^"]*)"/) ?? [])[1] ?? ""}`, short: "A file.", summary: (prompt.match(/"text":"([^"]*)"/) ?? [])[1] ?? "A file.", items: [] },
+    vector: () => [1, 0, 0],
+  };
+  const setup = () => {
+    let text = { a: "one", b: "one", c: "one" };
+    fakeComposio((sent) => ({ text: text[sent.arguments?.path] }), model);
+    const seen = fakeTriggers();
+    const store = memoryStore();
+    const genter = createGenter({ composioApiKey: "k", openrouterApiKey: "o", userId: "u", secret: "s", store, triggers: true });
+    const file = async (path) => {
+      const out = await genter.execute({ tool: "GITHUB_GET_FILE", args: { owner: "o", repo: "r", path } });
+      await out.pending;
+      return out.id;
+    };
+    return { genter, seen, file, set: (path, value) => (text = { ...text, [path]: value }) };
+  };
+
+  it("T1 each recipe keeps its own trigger; the same subscription is one Composio trigger, disabled when nobody keeps it", async () => {
+    const { genter, seen, file } = setup();
+    const [a, b, c] = [await file("a"), await file("b"), await file("c")];
+    const on = await genter.recipes.setTriggers({ ids: [a, b], active: true });
+    assert.deepEqual(on.map((x) => [x.active, x.label]), [[true, "on every commit"], [true, "on every commit"]]);
+    assert.equal(seen.upserts, 1); // one subscription for both
+    const id = (await genter.recipes.get(a)).trigger.id;
+    assert.equal((await genter.recipes.get(b)).trigger.id, id);
+    assert.deepEqual((await genter.recipes.get(a)).trigger.spec, { slug: "GITHUB_COMMIT_EVENT", config: { owner: "o", repo: "r" }, label: "on every commit" });
+
+    await genter.recipes.setTrigger({ id: c, active: true }); // a third one joins the same trigger
+    assert.equal(seen.upserts, 1);
+    assert.equal((await genter.recipes.get(c)).trigger.id, id);
+    assert.deepEqual((await genter.recipes.byTrigger({ triggerId: id })).map((r) => r.id).sort(), [a, b, c].sort());
+
+    await genter.recipes.setTriggers({ ids: [a], active: false });
+    assert.deepEqual(seen.updates, []); // b and c still keep it
+    assert.deepEqual((await genter.recipes.byTrigger({ triggerId: id })).map((r) => r.id).sort(), [b, c].sort());
+    await genter.recipes.remove(b);
+    assert.deepEqual(seen.updates, []);
+    await genter.recipes.setTriggers({ ids: [c], active: false });
+    assert.deepEqual(seen.updates, [[id, "disable"]]);
+
+    await genter.recipes.setTriggers({ ids: [a, c], active: true }); // the old trigger is enabled again, not made anew
+    assert.equal(seen.upserts, 1);
+    assert.deepEqual(seen.updates.at(-1), [id, "enable"]);
+    assert.equal((await genter.recipes.get(c)).trigger.active, true);
+  });
+
+  it("T2 a recipe that cannot be turned on says why and stays off; the others are turned on", async () => {
+    const { genter, file } = setup();
+    const a = await file("a");
+    const out = await genter.recipes.setTriggers({ ids: [a, "rcp_missing"], active: true });
+    assert.equal(out[0].active, true);
+    assert.deepEqual(out[1], { id: "rcp_missing", active: false, label: null, error: "Unknown recipe" });
+    await assert.rejects(genter.recipes.setTrigger({ id: "rcp_missing", active: true }), /Unknown recipe/);
+  });
+
+  it("T3 a changed result keeps what the recipe said before", async () => {
+    const { genter, file, set } = setup();
+    const a = await file("a");
+    assert.equal((await genter.recipes.get(a)).previous, undefined);
+    set("a", "two");
+    const again = await genter.recipes.recheck(a);
+    assert.equal(again.changed, true);
+    const record = await genter.recipes.get(a);
+    assert.equal(record.summary, "two");
+    assert.equal(record.previous.summary, "one");
+    assert.equal(record.previous.title, "File one");
+  });
+});
+
 describe("queryEmbeddings", () => {
   // The old request and the new clumsy one are close; the summary and the items are far from both.
   const vector = (t) => (t.startsWith("old question") ? [1, 0, 0] : t.startsWith("clumsy") ? [0.99, 0.1, 0] : [0, 1, 0]);
