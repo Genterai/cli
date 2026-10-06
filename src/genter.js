@@ -870,7 +870,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       // enabled once, so one event wakes one run with all of them. Off: a Composio trigger is disabled only when no other
       // anchor still uses it. Answers [{ id, active, label, error? }] (error: no trigger fits it, or Composio refused).
       async setTriggers({ ids, active }) {
-        if (active && !triggers) throw new Error("Triggers need the hosted backend: Composio events do not reach this process");
+        if (active && !triggers) throw new Error("Triggers need the hosted backend: app events do not reach this process");
         const records = (await Promise.all([...new Set(ids)].map((id) => load(id)))).filter(Boolean);
         const out = new Map(ids.map((id) => [id, { id, active: false, label: null, error: "Unknown anchor" }]));
         if (!active) {
