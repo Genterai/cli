@@ -4,6 +4,7 @@ import { logCost, roughTokens, usageFields, withCost } from "./cost.js";
 import { addMcpServer, isCustomToolkit, mcpUrl } from "./mcp.js";
 import { areaOf, canonicalArgs, canonicalJson, classifyFailure, contentHash, isPartial, normalizeLegacy, publicRecipe, recipeId, sourceOf } from "./recipe.js";
 import { fill, inferList, pick } from "./shape.js";
+import { itemOf, listedItems, planReconcile } from "./area.js";
 import { addIntent, chunkCall, fileCall, isSkillTool, LIMITS as SKILL_LIMITS, SCRIPT_NOTE, SKILL_TOOLS } from "./skills.js";
 import { crawl, forgetPage, namesSite, readPage, siteUrl, underSite } from "./web.js";
 
@@ -932,6 +933,73 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       // turned its sync off keeps the id to enable again, and anchors share one trigger).
       async byTrigger({ triggerId }) {
         return (await everyRecipe()).filter((r) => r.trigger?.active && r.trigger.id === triggerId).map(publicRecipe);
+      },
+      // An area kept whole, compared with its anchors again with no model (area.js): its list call runs again (the real
+      // call, an ordinary anchor), and from what it lists now an item with no anchor yet is read (a new anchor), one whose
+      // version moved (a sha, a modified time) is checked again, one no longer listed is marked gone (no call), and one a
+      // person deleted is left out. At most `budget` calls (new items first); the rest is `pending`, for the next time.
+      // Answers { status: done | failed, error?, listing (to keep: versions and failures updated), created, changed, gone,
+      // unchanged, pending, failed, excluded, listed, partial }; created / changed / gone are anchor ids.
+      async reconcile({ listing, budget = 40 }) {
+        if (!listing?.read_tool || !listing.item_arg || !(listing.recipe_id || listing.tool)) throw new Error("Not an area's listing: pass recipe_id or tool, read_tool and item_arg");
+        const account = listing.account || undefined;
+        const empty = { created: [], changed: [], gone: [], unchanged: 0, pending: 0, failed: 0, excluded: 0, listed: 0, partial: false };
+        const listed = await api
+          .execute({ ...(listing.recipe_id && { id: listing.recipe_id }), ...(listing.tool && { tool: listing.tool, args: listing.args ?? {} }), account: (listing.list_account ?? listing.account) || undefined })
+          .catch((e) => ({ result: { successful: false, error: e.message } }));
+        if (listed.result?.successful === false) return { ...empty, status: "failed", error: String(typeof listed.result.error === "string" ? listed.result.error : JSON.stringify(listed.result.error ?? "the list call failed")).slice(0, 300), listing };
+        const items = listedItems(listed.result?.data, listing.item_field ?? listing.item_arg);
+        // A list that lists nothing says nothing about the area (an error page, another shape): nothing is touched.
+        if (!items?.size) return { ...empty, status: "failed", error: "The list call listed no items to read", listing };
+        const existing = new Map();
+        for (const r of await everyRecipe()) {
+          const key = itemOf(listing, r, workspaceId);
+          if (key != null) existing.set(key, { id: r.id, status: r.status });
+        }
+        const partial = isPartial(listed.result.data);
+        const plan = planReconcile({ listing, listed: items, existing, partial, budget });
+        const versions = plan.versions;
+        const failures = { ...listing.failed };
+        const out = { ...empty, listed: items.size, partial, excluded: plan.excluded, pending: plan.pending };
+        await pool(plan.read, 4, async (value) => {
+          const key = String(value);
+          const read = await api.execute({ tool: listing.read_tool, args: { ...listing.shared_args, [listing.item_arg]: value }, account }).catch((e) => ({ result: { successful: false, error: e.message } }));
+          if (read.result?.successful === false || !read.id) {
+            failures[key] = (failures[key] ?? 0) + 1;
+            out.failed++;
+            return;
+          }
+          if (read.pending) await read.pending;
+          delete failures[key];
+          versions[key] = items.get(key)?.version ?? "";
+          if (read.created) out.created.push(read.id);
+          else if (read.changed) out.changed.push(read.id);
+          else out.unchanged++;
+        });
+        await pool(plan.recheck, 4, async ({ id, key }) => {
+          const checked = await api.recipes.recheck(id).catch((e) => ({ status: "failed", error: e.message }));
+          if (checked.status === "gone") {
+            out.gone.push(id);
+            delete versions[key];
+          } else if (checked.status === "fresh") {
+            versions[key] = items.get(key)?.version ?? "";
+            if (checked.changed) out.changed.push(id);
+            else out.unchanged++;
+          } else out.failed++;
+        });
+        for (const { id, key } of plan.gone) {
+          await api.recipes.markGone(id).catch(() => null);
+          delete versions[key];
+          out.gone.push(id);
+        }
+        const failed = Object.fromEntries(Object.entries(failures).filter(([key]) => items.has(key)));
+        return { status: "done", ...out, listing: { ...listing, versions, failed, at: now() } };
+      },
+      // Which of these anchors are reads of an area kept whole (its listing): their ids.
+      async inArea({ listing, ids }) {
+        const out = [];
+        for (const id of ids ?? []) if (itemOf(listing, await load(id), workspaceId) != null) out.push(id);
+        return out;
       },
       // A prepared area: minimal record, so events know it was prepared. No anchor of its own.
       async prepareScope({ label, toolkit, account = "" }) {

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isContainer, listingFrom, noText } from "./area.js";
 import { cipher, namedApps } from "./genter.js";
 import { appOf, applyEdits, citedRefs, fileEditor, needsCatalogue, refFromUrl, refLabel, refsOfResult, shapeRef, writeHints } from "./refs.js";
 import { inferList, locatorArgs, pick } from "./shape.js";
@@ -475,7 +476,7 @@ export function createAgent({
     run.status = result.status;
     run.updated_at = new Date().toISOString();
     // Stored without raw tool results: each one is replaced by its summary.
-    const stored = { ...run, timing: undefined, seen: undefined, lists: undefined, raw: undefined, messages: run.messages.map(({ keep, ...m }) => (keep ? { ...m, content: keep } : m)) };
+    const stored = { ...run, timing: undefined, seen: undefined, lists: undefined, listing: undefined, raw: undefined, messages: run.messages.map(({ keep, ...m }) => (keep ? { ...m, content: keep } : m)) };
     await runs.put({ id: run.id, blob: seal(stored) });
     const out = {
       run_id: run.id,
@@ -484,6 +485,8 @@ export function createAgent({
       // Anchors this round executed and what happened to them (the UI shows "saved" from this, no toast).
       saved: Object.values(run.touched ?? {}),
       recipes_used: [...new Set(run.steps.flatMap((x) => [x.recipe?.id, x.from_recipe]).filter(Boolean))],
+      // A prepare run: how the area was listed and read, so it can be kept whole (area.js).
+      ...(run.listing && { listing: run.listing }),
       ...(run.suggestions?.length && { suggestions: run.suggestions.map(({ label }) => ({ label })) }),
       usage: { ...usage, ...run.timing, model: run.strong ? strongModel : model, cost_usd: Number(usage.cost_usd.toFixed(5)), ms: Date.now() - started + (run.timing.search_ms || 0) },
     };
@@ -656,12 +659,37 @@ export function createAgent({
     const field = String(input.item_field || (list.items.some((i) => i[input.item_arg] != null) ? input.item_arg : list.id));
     const values = [...new Set(list.items.filter((i) => !isContainer(i) && !noText(i[field])).map((i) => i[field]).filter((v) => v != null && v !== ""))];
     if (!values.length) return { content: JSON.stringify({ error: `None of the ${list.items.length} listed items has a ${field} to read (folders and files with no text are left out).` }) };
-    const calls = values.slice(0, MAX_EACH).map((v) => ({ tool, args: { ...shared, [input.item_arg]: v }, account: input.account }));
+    const calls = values.slice(0, MAX_EACH).map((v) => ({ tool, args: { ...shared, [input.item_arg]: v }, account: input.account, item: v }));
     const out = await fanOut(run, calls, "read_each");
+    await keepListing(run, { list, tool, shared, item_arg: String(input.item_arg), field, calls });
     if (values.length <= MAX_EACH) return out;
     const more = `${values.length - MAX_EACH} more items were not read (at most ${MAX_EACH} per area).`;
     lastNote = `${lastNote} ${more}`;
     return { content: JSON.stringify({ ...JSON.parse(out.content), not_read: values.length - MAX_EACH, note: lastNote }) };
+  }
+
+  // How the area was read, handed over with the run (`listing`), so it can be listed again and compared with its anchors
+  // with no model (area.js, genter.recipes.reconcile): the list call's anchor, the read and the arg each item goes in, and
+  // the items read with the version the list gave them. The biggest read_each of the run is the area's.
+  async function keepListing(run, { list, tool, shared, item_arg, field, calls }) {
+    const read = calls.filter((c) => c.ok);
+    if (!list.recipe || !read.length || (run.listing && Object.keys(run.listing.versions).length >= read.length)) return;
+    const get = (id) => (id ? Promise.resolve(genter.recipes?.get?.(id)).catch(() => null) : null);
+    // The account of the reads is the one their anchors were saved on (an item's anchor id holds it); the list call keeps its own.
+    const [record, first] = await Promise.all([get(list.recipe), get(read.find((c) => c.id)?.id)]);
+    const versionOf = new Map(list.items.map((i) => [String(i[field]), list.version && i[list.version] != null ? String(i[list.version]) : ""]));
+    run.listing = listingFrom({
+      recipe: list.recipe,
+      tool: record?.tool,
+      args: record?.args,
+      account: first?.scope?.account ?? record?.scope?.account ?? "",
+      list_account: record?.scope?.account ?? "",
+      read_tool: tool,
+      shared_args: shared,
+      item_arg,
+      item_field: field,
+      versions: Object.fromEntries(read.map((c) => [String(c.item), versionOf.get(String(c.item)) ?? ""])),
+    });
   }
 
   async function fanOut(run, calls, name) {
@@ -691,6 +719,8 @@ export function createAgent({
           continue;
         }
         counts.ok++;
+        c.ok = true;
+        c.id = out.id;
         if (out.created) counts.created++;
         else if (out.changed) counts.changed++;
         else counts.unchanged++;
@@ -872,7 +902,7 @@ function keepList(run, id, data) {
   const items = pick(data, shape.items);
   if (!Array.isArray(items) || items.length < 2) return 0;
   const flat = items.slice(0, MAX_LISTED).map((i) => Object.fromEntries(Object.entries(i ?? {}).filter(([, v]) => v == null || typeof v !== "object")));
-  (run.lists ??= {})[id] = { id: shape.id, items: flat };
+  (run.lists ??= {})[id] = { recipe: id, id: shape.id, ...(shape.version && shape.version !== shape.id && { version: shape.version }), items: flat };
   return items.length;
 }
 
@@ -906,12 +936,6 @@ function refsOfResults(run, results, max = MAX_RESULT_REFS) {
 const RECIPE_ID = /\brcp_\w+/g;
 const MAX_RESULTS = 8; // anchors a "recipes" run hands over
 const MAX_RESULT_REFS = 40;
-
-// A folder among listed items: a tree or a directory, by its type or mime type.
-const isContainer = (item) => /^(tree|dir|directory|folder)$|\.folder$/i.test(String(item?.type ?? item?.mimeType ?? item?.mime_type ?? item?.kind ?? ""));
-// A file that holds no text worth an anchor, by its name: images, media, archives, fonts, binaries, lock files.
-const noText = (value) =>
-  typeof value === "string" && /(\.(png|jpe?g|gif|webp|ico|bmp|tiff?|heic|psd|mp[34]|mov|avi|wav|ogg|webm|zip|gz|tgz|tar|rar|7z|jar|woff2?|ttf|otf|eot|exe|dll|so|dylib|bin|class|pyc|wasm|lock)|(^|\/)(package-lock\.json|pnpm-lock\.yaml))$/i.test(value);
 
 // A tool's args as an object: as given, or parsed from JSON text; anything else is none.
 function argsObject(value) {

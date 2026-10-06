@@ -664,6 +664,14 @@ describe("Anchors in the agent", () => {
     assert.ok(!reads.some((r) => /png|lock|^src$/.test(r.args.path)));
     assert.match(out.answer, /Prepared 150 reads: 150 new anchors/);
     assert.equal(out.saved.length, 151); // the tree and every file
+    // How the area was read goes with the run, so it can be listed again and compared with no model (area.js).
+    assert.equal(out.listing.recipe_id, "rcp_1");
+    assert.equal(out.listing.read_tool, "GITHUB_GET_REPOSITORY_CONTENT");
+    assert.deepEqual(out.listing.shared_args, { owner: "o", repo: "r" });
+    assert.equal(out.listing.item_arg, "path");
+    assert.equal(out.listing.item_field, "path");
+    assert.equal(Object.keys(out.listing.versions).length, 150);
+    assert.equal(out.listing.versions["src/f7.js"], "s7"); // the sha the tree gave the file
   });
 
   it("N5c read_each with no list, args written as JSON text, and an empty execute in a prepare task get the way to do it", async () => {
