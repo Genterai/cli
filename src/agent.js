@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { cipher, namedApps } from "./genter.js";
 import { appOf, applyEdits, citedRefs, fileEditor, needsCatalogue, refFromUrl, refLabel, refsOfResult, shapeRef, writeHints } from "./refs.js";
 import { locatorArgs } from "./shape.js";
+import { logCost, usageFields } from "./cost.js";
 
 // The task agent: an LLM loop over genter (search -> execute -> save), tuned for speed.
 // Before the first LLM call it already has, in parallel: the saved recipes matching the task (found by
@@ -61,8 +62,12 @@ export function createAgent({
         usage: { include: true },
       }),
     });
-    if (!res.ok) throw new Error(`Agent model failed: ${res.status} ${await res.text()}`);
+    if (!res.ok) {
+      logCost({ type: "llm", model: useModel, source: "agent_step", ok: false, ms: Date.now() - started });
+      throw new Error(`Agent model failed: ${res.status} ${await res.text()}`);
+    }
     const data = await res.json();
+    logCost({ type: "llm", model: useModel, source: "agent_step", ms: Date.now() - started, ...usageFields(data) });
     usage.llm_calls += 1;
     usage.tokens_in += data.usage?.prompt_tokens ?? 0;
     usage.tokens_out += data.usage?.completion_tokens ?? 0;
