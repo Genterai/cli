@@ -375,6 +375,15 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     return triggerTypes.get(toolkit);
   };
 
+  // Disables these Composio triggers, each only when no recipe keeps it on any more (recipes with the same subscription
+  // share one: see setTriggers).
+  async function disableUnused(triggerIds) {
+    const ids = new Set(triggerIds.filter(Boolean));
+    if (!ids.size) return;
+    for (const r of await everyRecipe()) if (r.trigger?.active) ids.delete(r.trigger.id);
+    for (const id of ids) await composio.triggers.disable(id).catch(() => {});
+  }
+
   // The trigger that fires when this call's result may change, chosen by a model with config it could fill: the
   // first of [{ slug, config, label }], or null.
   async function pickTrigger({ toolkit, tool, args, title }) {
@@ -767,6 +776,8 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         ...(kept && { title: kept.title, short: kept.short, summary: kept.summary, items: kept.items, summaryEmbedding: kept.summaryEmbedding, itemEmbeddings: kept.itemEmbeddings, source: kept.source, partial: kept.partial }),
       };
       const record = { ...base, scope: withArea(base.scope, area), digest, status: "fresh", updated_at: at, checked_at: at };
+      // What it said before this change, so a notification can tell what changed (summaries only, never the raw result).
+      if (existing?.summary) record.previous = previousOf(existing);
       if (asked) record.queryEmbeddings = addQuery(base.queryEmbeddings, asked, at);
       if (isSkillTool(tool) && task) record.intents = intents(base);
       // The call as it ran: args kept as written (placeholders included), in canonical form so equal calls look equal.
@@ -788,12 +799,12 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       async get(id) {
         return publicRecipe(await load(id));
       },
-      // Deletes the recipe (and turns its trigger off).
+      // Deletes the recipe (and turns its trigger off, unless other recipes share it).
       async remove(id) {
         const record = await load(id);
         if (!record) return { id, removed: false };
-        if (record.trigger?.id && record.trigger.active) await composio.triggers.disable(record.trigger.id).catch(() => {});
         await drop(id);
+        if (record.trigger?.id && record.trigger.active) await disableUnused([record.trigger.id]);
         return { id, removed: true };
       },
       // Runs the saved call again: { recipe, changed, status }. status: fresh | gone | denied | failed (a failure that
@@ -834,31 +845,80 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         await save({ ...record, trigger: { active: false, id: null, ...record.trigger, spec: spec ?? null, recommended: true } });
         return spec ?? null;
       },
-      // Turns "keep this current" on (creates or re-enables the Composio trigger of its spec) or off.
+      // Turns "keep this current" on (its own trigger: the Composio trigger of its spec, created or re-enabled) or off.
       async setTrigger({ id, active }) {
-        const record = await loadOrThrow(id);
-        const trigger = { spec: null, id: null, ...record.trigger };
-        if (active) {
-          if (!triggers) throw new Error("Triggers need the hosted backend: Composio events do not reach this process");
-          const spec = trigger.spec ?? (await api.recipes.recommendTrigger(id));
-          if (!spec) throw new Error("No trigger fits this recipe");
-          const fresh = await loadOrThrow(id);
-          trigger.spec = spec;
-          trigger.id = fresh.trigger?.id ?? null;
-          if (trigger.id && composio.triggers.enable) await composio.triggers.enable(trigger.id).catch(() => (trigger.id = null));
-          if (!trigger.id) {
-            const connected = record.scope?.account ? await accountId(record.scope.account, { strict: false }) : undefined;
-            trigger.id = (await composio.triggers.create(userId, spec.slug, { ...(connected && { connectedAccountId: connected }), triggerConfig: spec.config })).triggerId;
-          }
-        } else if (trigger.id) {
-          await composio.triggers.disable(trigger.id).catch(() => {});
-        }
-        await save({ ...(await loadOrThrow(id)), trigger: { ...trigger, recommended: true, active: Boolean(active) } });
+        const [out] = await api.recipes.setTriggers({ ids: [id], active });
+        if (out.error) throw new Error(out.error);
         return publicRecipe(await load(id));
       },
-      // The recipes a Composio trigger keeps current (an event names the trigger id).
+      // The same for many recipes at once (a project's "Keep in sync"): each one gets its OWN trigger, the spec picked for
+      // its call; recipes whose specs are the same subscription (slug, config, account) share one Composio trigger, made or
+      // enabled once, so one event wakes one run with all of them. Off: a Composio trigger is disabled only when no other
+      // recipe still uses it. Answers [{ id, active, label, error? }] (error: no trigger fits it, or Composio refused).
+      async setTriggers({ ids, active }) {
+        if (active && !triggers) throw new Error("Triggers need the hosted backend: Composio events do not reach this process");
+        const records = (await Promise.all([...new Set(ids)].map((id) => load(id)))).filter(Boolean);
+        const out = new Map(ids.map((id) => [id, { id, active: false, label: null, error: "Unknown recipe" }]));
+        if (!active) {
+          const stopped = [];
+          for (const r of records) {
+            if (r.trigger?.id && r.trigger.active) stopped.push(r.trigger.id);
+            await save({ ...r, trigger: { spec: null, id: null, ...r.trigger, recommended: true, active: false } });
+            out.set(r.id, { id: r.id, active: false, label: r.trigger?.spec?.label ?? null });
+          }
+          await disableUnused(stopped);
+          return ids.map((id) => out.get(id));
+        }
+        // Each recipe's own spec (one model call for a recipe that was never asked; a few at a time).
+        const specs = new Map();
+        await pool(records, 4, async (r) => specs.set(r.id, r.trigger?.spec ?? (await api.recipes.recommendTrigger(r.id).catch(() => null))));
+        // Subscriptions already on: their Composio trigger is reused.
+        const live = new Map();
+        for (const r of await everyRecipe()) if (r.trigger?.active && r.trigger.id && r.trigger.spec) live.set(subscriptionOf(r.trigger.spec, r.scope?.account), r.trigger.id);
+        const groups = new Map();
+        for (const r of records) {
+          const spec = specs.get(r.id);
+          if (!spec) {
+            out.set(r.id, { id: r.id, active: false, label: null, error: "No trigger fits this recipe" });
+            continue;
+          }
+          const key = subscriptionOf(spec, r.scope?.account);
+          groups.set(key, [...(groups.get(key) ?? []), r]);
+        }
+        for (const [key, group] of groups) {
+          const spec = specs.get(group[0].id);
+          let triggerId = live.get(key) ?? null;
+          try {
+            // A trigger one of them had before (turned off since) is enabled again rather than made anew.
+            for (const r of group) {
+              if (triggerId) break;
+              const old = r.trigger?.id && r.trigger.spec && subscriptionOf(r.trigger.spec, r.scope?.account) === key ? r.trigger.id : null;
+              if (old && composio.triggers.enable) triggerId = await composio.triggers.enable(old).then(() => old, () => null);
+            }
+            if (!triggerId) {
+              const account = group[0].scope?.account;
+              const connected = account ? await accountId(account, { strict: false }) : undefined;
+              triggerId = (await composio.triggers.create(userId, spec.slug, { ...(connected && { connectedAccountId: connected }), triggerConfig: spec.config })).triggerId;
+            }
+          } catch (e) {
+            for (const r of group) out.set(r.id, { id: r.id, active: false, label: spec.label ?? null, error: e.message || "The trigger could not be created" });
+            continue;
+          }
+          live.set(key, triggerId);
+          for (const r of group) {
+            const fresh = (await load(r.id)) ?? r;
+            const replaced = fresh.trigger?.active && fresh.trigger.id && fresh.trigger.id !== triggerId ? fresh.trigger.id : null;
+            await save({ ...fresh, trigger: { ...fresh.trigger, spec, id: triggerId, recommended: true, active: true } });
+            if (replaced) await disableUnused([replaced]);
+            out.set(r.id, { id: r.id, active: true, label: spec.label ?? null });
+          }
+        }
+        return ids.map((id) => out.get(id));
+      },
+      // The recipes a Composio trigger keeps current (an event names the trigger id): those that keep it on (a recipe that
+      // turned its sync off keeps the id to enable again, and recipes share one trigger).
       async byTrigger({ triggerId }) {
-        return (await everyRecipe()).filter((r) => r.trigger?.id === triggerId).map(publicRecipe);
+        return (await everyRecipe()).filter((r) => r.trigger?.active && r.trigger.id === triggerId).map(publicRecipe);
       },
       // A prepared area: minimal record, so events know it was prepared. No recipe of its own.
       async prepareScope({ label, toolkit, account = "" }) {
@@ -1137,6 +1197,13 @@ function forSummary(data) {
     return decodeBase64(key, value);
   });
 }
+
+// What a recipe said before its result changed: { title, short, summary, items, updated_at } (items cut to 30).
+const previousOf = (r) => ({ title: r.title ?? null, short: r.short ?? null, summary: r.summary ?? null, items: (r.items ?? []).slice(0, 30), updated_at: r.updated_at ?? null });
+
+// The Composio subscription a trigger spec makes on an account: recipes with the same one share one Composio trigger, so
+// an event wakes one run with all of them instead of one run each.
+const subscriptionOf = (spec, account) => `${spec.slug}|${canonicalJson(spec.config ?? {})}|${account ?? ""}`;
 
 // fn over items, n at a time.
 async function pool(items, n, fn) {
