@@ -68,7 +68,7 @@ describe("classifyFailure", () => {
   it("denied: forbidden, unauthorized, revoked or missing connection", () => {
     for (const e of ["403 Forbidden", "Resource not accessible by integration", "401 Unauthorized", "Connected account not found", "invalid_grant: Token has been revoked", "Insufficient permission"]) assert.equal(classifyFailure(e), "denied", e);
   });
-  it("null: transient or argument errors never change a recipe", () => {
+  it("null: transient or argument errors never change an anchor", () => {
     for (const e of ["request timed out", "429 rate limit exceeded", "Internal Server Error 500", "Invalid argument: limit must be a number", "", null, undefined]) assert.equal(classifyFailure(e), null, String(e));
   });
 });
@@ -103,7 +103,7 @@ describe("normalizeLegacy", () => {
     assert.equal(r.status, "stale");
     assert.equal(r.disabled, "2026");
   });
-  it("drops aliases, sync records, live plans and never-recipes", () => {
+  it("drops aliases, sync records, live plans and never-anchors", () => {
     assert.equal(normalizeLegacy({ id: "a", alias: "b" }), null);
     assert.equal(normalizeLegacy({ ...old, kind: "sync" }), null);
     assert.equal(normalizeLegacy({ id: "x", tool: "T", args: {}, summary: "s" }), null);

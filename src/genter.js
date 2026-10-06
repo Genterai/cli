@@ -7,30 +7,30 @@ import { fill, inferList, pick } from "./shape.js";
 import { addIntent, chunkCall, fileCall, isSkillTool, LIMITS as SKILL_LIMITS, SCRIPT_NOTE, SKILL_TOOLS } from "./skills.js";
 import { crawl, forgetPage, namesSite, readPage, siteUrl, underSite } from "./web.js";
 
-// Genter = Composio + recipes of past calls.
-// A Recipe is ONE successful tool call with fixed args plus knowledge about its actual result (see recipe.js and
-// docs: specs/recipes.md). Its id is deterministic (workspace, account, tool, canonical args): the same call upserts the
+// Genter = Composio + anchors of past calls.
+// An anchor is ONE successful tool call with fixed args plus knowledge about its actual result (see recipe.js and
+// docs: specs/anchors.md). Its id is deterministic (workspace, account, tool, canonical args): the same call upserts the
 // same record. The raw result is never stored: only a digest, a semantic summary, one line per item and their vectors.
 // execute() runs the REAL tool every time. Unchanged result (same digest): only checked_at moves, no model is called.
-// Changed result: the same recipe is described and embedded again. Failed call: no recipe; one that exists is marked
+// Changed result: the same anchor is described and embedded again. Failed call: no anchor; one that exists is marked
 // gone / denied when the error says so.
 // Records are encrypted before they reach the store, so the store only sees rows { id, remembered, blob }
 // and needs: get(id), put(row), all() (remembered rows); remove(id) (optional).
 // scopes (optional): { get, put, list, remove } of prepared areas { id, label, toolkit, account, spec }.
-// workspaceId: part of every recipe id (default: userId).
+// workspaceId: part of every anchor id (default: userId).
 // triggers: true only where Composio's webhook reaches this code (the hosted backend); the CLI can not receive events.
-// allow(record) (optional): false hides a recipe from search (the backend: connections the person may use).
+// allow(record) (optional): false hides an anchor from search (the backend: connections the person may use).
 // skills (optional): the host's store of skills (skills.js, specs/skills.md): { list(): [{ id, name, version, embedding, chunks:
 // [{ id, path, title, headings, refs, see, embedding }], files: [{ path, kind, mime, size }] }], get(id), text(id, path),
 // file(id, path): { text } | { url } }. It lets search offer the pieces of skills and lets two local tools read them:
-// SKILL_READ_CHUNK and SKILL_GET_FILE. A skill is never one Recipe; each read is one call, saved like any other.
+// SKILL_READ_CHUNK and SKILL_GET_FILE. A skill is never one Anchor; each read is one call, saved like any other.
 export function createGenter({ composioApiKey, openrouterApiKey, userId, workspaceId, secret, store, scopes: scopeStore, skills, triggers = false, defer, allow, minScore = 0.25, strongScore = 0.45 }) {
   if (!secret) throw new Error("secret is required to encrypt stored calls");
   workspaceId ??= userId;
   const composio = new Composio({ apiKey: composioApiKey });
   const { seal, open: decrypt } = cipher(`${secret}:${userId}`);
   // Decrypted records are cached by their blob (a new seal has a new random iv), so search does not
-  // decrypt and parse every recipe on every call.
+  // decrypt and parse every anchor on every call.
   const open = (blob) => {
     const key = `${userId}:${blob.slice(0, 40)}`;
     let record = decrypted.get(key);
@@ -54,7 +54,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
   };
   const loadOrThrow = async (id) => {
     const record = await load(id);
-    if (!record) throw new Error(`Unknown recipe: ${id}`);
+    if (!record) throw new Error(`Unknown anchor: ${id}`);
     return record;
   };
   const everyRecipe = async () => (await store.all()).map(read).filter(Boolean);
@@ -65,7 +65,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
   };
   const pending = new Set();
   const later = (task) => {
-    const p = task.catch((e) => console.error("genter: saving a recipe failed:", e.message));
+    const p = task.catch((e) => console.error("genter: saving an anchor failed:", e.message));
     if (defer) return defer(p);
     pending.add(p);
     p.finally(() => pending.delete(p));
@@ -204,11 +204,11 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
   // Tools that run here, not in Composio: a website's page (web.js).
   // Skills (skills.js): reading one piece of a skill and handing over one file of it. Genter never runs a script.
   const skillTools = skills && {
-    // A call fixed to a version: a skill that changed since is "not found" for it, so the recipe goes gone (outdated).
+    // A call fixed to a version: a skill that changed since is "not found" for it, so the anchor goes gone (outdated).
     async [SKILL_TOOLS.chunk]({ skill, version, chunk } = {}) {
       const s = await skills.get(skill);
       if (!s) return { successful: false, error: `Skill not found: ${skill} (deleted)`, data: null };
-      if (s.version !== version) return { successful: false, error: `Skill "${s.name}" at version ${version} not found: it is now at ${s.version}. This recipe is outdated`, data: null };
+      if (s.version !== version) return { successful: false, error: `Skill "${s.name}" at version ${version} not found: it is now at ${s.version}. This anchor is outdated`, data: null };
       const c = s.chunks.find((x) => x.id === chunk);
       if (!c) return { successful: false, error: `Section not found in skill "${s.name}": ${chunk}`, data: null };
       const text = (await skills.text(skill, c.path)) ?? "";
@@ -237,7 +237,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     async [SKILL_TOOLS.file]({ skill, version, path } = {}) {
       const s = await skills.get(skill);
       if (!s) return { successful: false, error: `Skill not found: ${skill} (deleted)`, data: null };
-      if (s.version !== version) return { successful: false, error: `Skill "${s.name}" at version ${version} not found: it is now at ${s.version}. This recipe is outdated`, data: null };
+      if (s.version !== version) return { successful: false, error: `Skill "${s.name}" at version ${version} not found: it is now at ${s.version}. This anchor is outdated`, data: null };
       const f = s.files.find((x) => x.path === path);
       if (!f) return { successful: false, error: `File not found in skill "${s.name}": ${path}`, data: null };
       const got = await skills.file(skill, path);
@@ -274,7 +274,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
 
   // Several texts at once.
   async function embedMany(input, source = "embed") {
-    if (!openrouterApiKey) throw new Error("Recipes need an OpenRouter key for embeddings (OPENROUTER_API_KEY)");
+    if (!openrouterApiKey) throw new Error("Anchors need an OpenRouter key for embeddings (OPENROUTER_API_KEY)");
     const started = Date.now();
     const res = await fetch("https://openrouter.ai/api/v1/embeddings", {
       method: "POST",
@@ -341,14 +341,14 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     }
   }
 
-  // How well a recipe fits a request: its result summary and each thing it held (not the tool's description).
+  // How well an anchor fits a request: its result summary and each thing it held (not the tool's description).
   // A line of its last result with a key term of the request in it or very close by meaning makes it a strong match;
-  // a line somewhat close (0.33+) or a key term in the summary or its keywords puts it among the recipes offered.
+  // a line somewhat close (0.33+) or a key term in the summary or its keywords puts it among the anchors offered.
   // matched: those lines.
   function resultMatch(r, vector, terms) {
     const lines = r.items ?? [];
     const byItem = (r.itemEmbeddings ?? []).map((e, i) => [lines[i], cosine(vector.slice(0, e.length), e)]);
-    // Past requests this recipe answered count like its summary: a clumsy new question finds a similar old one.
+    // Past requests this anchor answered count like its summary: a clumsy new question finds a similar old one.
     const past = (r.queryEmbeddings ?? []).map((q) => cosine(vector.slice(0, q.e.length), q.e));
     let score = Math.max(r.summaryEmbedding ? cosine(vector, r.summaryEmbedding) : 0, ...past);
     const said = (text) => terms.some((t) => String(text ?? "").toLowerCase().includes(t));
@@ -373,7 +373,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     return triggerTypes.get(toolkit);
   };
 
-  // Disables these Composio triggers, each only when no recipe keeps it on any more (recipes with the same subscription
+  // Disables these Composio triggers, each only when no anchor keeps it on any more (anchors with the same subscription
   // share one: see setTriggers).
   async function disableUnused(triggerIds) {
     const ids = new Set(triggerIds.filter(Boolean));
@@ -401,7 +401,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
           {
             role: "user",
             content:
-              `A recipe runs ${tool} with args ${JSON.stringify(args)}${title ? ` ("${String(title).slice(0, 200)}")` : ""}. ` +
+              `An anchor runs ${tool} with args ${JSON.stringify(args)}${title ? ` ("${String(title).slice(0, 200)}")` : ""}. ` +
               "Which of these triggers fire when its result may change (a new, updated or deleted item it would return)? " +
               'Reply with JSON only: {"triggers": [{"slug": "...", "config": {...}, "label": "on every new email"}]}. ' +
               "Fill every required config field from the args; skip a trigger you can not fill. Usually one; none fits: [].\n\n" +
@@ -457,13 +457,13 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       }),
     };
     await save(record);
-    // The model proposes how to keep it current, once, when the recipe is first saved.
+    // The model proposes how to keep it current, once, when the anchor is first saved.
     if (created && !record.trigger?.recommended) await api.recipes.recommendTrigger(id).catch(() => null);
     return load(id);
   }
 
   // The description of a skill's piece or file is made from the text itself, with no model (skillDescription, already in the
-  // record from its first save); here only its vector is added. A skill recipe is never about the whole skill.
+  // record from its first save); here only its vector is added. A skill anchor is never about the whole skill.
   const rememberSkill = (id, digest, data) => withCost({ entity_type: "recipe", entity_id: id }, () => rememberSkillInner(id, digest, data));
   async function rememberSkillInner(id, digest, data) {
     let record = await load(id);
@@ -478,7 +478,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
   }
 
   // Pieces of skills as search candidates: the skill is chosen by its description vector, the piece by its own. Pieces
-  // already saved as recipes are offered as those recipes by search (same call = same id), the rest as new calls with
+  // already saved as anchors are offered as those anchors by search (same call = same id), the rest as new calls with
   // fixed args. { id: null, kind: "skill", tool, args, title, description, skill, score, status: "new" }.
   // keep(recipe_id) (optional): false leaves a piece out before the best `limit` are taken (a person limited to some projects).
   async function skillCandidates(vector, limit, keep) {
@@ -509,7 +509,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     return found.sort((a, b) => b.score - a.score).slice(0, limit);
   }
 
-  // The page recipes of a site (any status).
+  // The page anchors of a site (any status).
   const websitePages = async (site) =>
     (await everyRecipe()).filter((r) => r.tool === "WEBSITE_READ_PAGE" && typeof r.args?.url === "string" && underSite(r.args.url, site));
 
@@ -537,7 +537,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       return { toolkit, connect_url: request.redirectUrl, connection_id: request.id, ...(mcp_url && { mcp_url: mcpUrl(mcp_url) }) };
     },
 
-    // A website as a prepared area: a crawl finds its pages (web.js) and each one is read as a recipe of its own
+    // A website as a prepared area: a crawl finds its pages (web.js) and each one is read as an anchor of its own
     // (WEBSITE_READ_PAGE). Again (the host's scheduler, every hour): an unchanged page only moves checked_at, a changed
     // one is described again, a new one is added, and a known page the crawl no longer finds is read again, so one the
     // site removed (404) is marked gone. { url, pages, created, changed, unchanged, failed, complete, scope }.
@@ -566,7 +566,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       return { ...stats, scope: scope?.id ?? null };
     },
 
-    // A website no longer kept: its pages' recipes and its area record go. { url, removed }.
+    // A website no longer kept: its pages' anchors and its area record go. { url, removed }.
     async forget_website({ url, account }) {
       const site = siteUrl(url);
       const pages = await websitePages(site);
@@ -590,16 +590,16 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     // The English version and bilingual key terms of a non-English query ({ en, terms }), or null.
     translate,
 
-    // Saved recipes first (which call to make: the result summary says what it returned once, it is not the current
-    // value), plain Composio tools as fallback. Only fresh, enabled recipes. A non-English query is matched in its
+    // Saved anchors first (which call to make: the result summary says what it returned once, it is not the current
+    // value), plain Composio tools as fallback. Only fresh, enabled anchors. A non-English query is matched in its
     // language and in English. `apps`: the connected toolkits; those the query names give their tools first.
-    // `toolkits`: apps to search in anyway. `tools`: Composio tools come too even when a recipe fits well.
+    // `toolkits`: apps to search in anyway. `tools`: Composio tools come too even when an anchor fits well.
     // `connected`: only tools of `apps` (the agent: a tool of an app nobody connected cannot run). Composio's search over
     // all apps gave CLARIFY_MCP_GET_CALENDAR_EVENTS for "What's on my calendar today" with Google Calendar connected,
     // and the agent ran it. So the apps the query means by a word of their name ("calendar") give their tools first,
     // and without one the connected apps' tools are ranked by the query's words.
-    // `within`: a Set of recipe ids, the only recipes offered (a person limited to some projects): they are ranked among
-    // themselves, so recipes outside it do not take the places, and a skill's piece is offered only as its recipe there.
+    // `within`: a Set of anchor ids, the only anchors offered (a person limited to some projects): they are ranked among
+    // themselves, so anchors outside it do not take the places, and a skill's piece is offered only as its anchor there.
     async search({ query, limit = 5, apps = [], toolkits: also = [], tools: withTools = false, connected = false, within = null }) {
       const english = await translate(query);
       const text = `${query} ${english?.en ?? ""}`;
@@ -643,7 +643,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         .sort((a, b) => b.score - a.score || (b.closeness ?? b.score) - (a.closeness ?? a.score))
         .slice(0, limit)
         .map(shown);
-      // Skills: pieces found by meaning next to the saved recipes. A piece that is already a recipe is offered as that recipe
+      // Skills: pieces found by meaning next to the saved anchors. A piece that is already an anchor is offered as that anchor
       // (once, with the better of the two scores), never as a second, new candidate; with `within`, only those.
       if (skills && vector) {
         const saved = new Map(scored.map((m) => [m.r.id, m]));
@@ -686,26 +686,26 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       return [...memories, ...found];
     },
 
-    // Run the REAL tool (always: a recipe is never the current value). Pass `id` to repeat a saved recipe (args are
+    // Run the REAL tool (always: an anchor is never the current value). Pass `id` to repeat a saved anchor (args are
     // merged on top). `account` picks a connection (from login) when an app is connected several times.
     // Returns { id, result, created, changed, unchanged, pending, recipe_status }:
-    //   created: a new recipe; changed: the recipe's result is different now (it is described again);
-    //   unchanged: same result, only checked_at moved. pending resolves to the recipe once its description is saved.
-    // A failed call returns { result } (and recipe_status gone / denied, with the id, when it was a known recipe that
+    //   created: a new anchor; changed: the anchor's result is different now (it is described again);
+    //   unchanged: same result, only checked_at moved. pending resolves to the anchor once its description is saved.
+    // A failed call returns { result } (and recipe_status gone / denied, with the id, when it was a known anchor that
     // the error says is gone or forbidden). remember: false runs it without saving (an inner step).
     async execute({ id, tool, args = {}, account, task, remember: keep = true }) {
       const previous = id ? await load(id) : null;
-      if (id && !previous && !tool) throw new Error(`Unknown recipe: ${id}`);
+      if (id && !previous && !tool) throw new Error(`Unknown anchor: ${id}`);
       if (previous) {
         tool ??= previous.tool;
         args = { ...previous.args, ...args };
-        account ??= previous.scope?.account || undefined; // a recipe runs on the account it was made for
+        account ??= previous.scope?.account || undefined; // an anchor runs on the account it was made for
       }
       if (!tool) throw new Error("Pass `tool` or `id`");
       account = await accountId(account); // an alias from login
       let result;
       try {
-        // Dates stay placeholders in the recipe ({{today}}, {{ago.7d}}) and are filled for this run.
+        // Dates stay placeholders in the anchor ({{today}}, {{ago.7d}}) and are filled for this run.
         result = LOCAL[tool]
           ? await LOCAL[tool](withDates(args))
           : await composio.tools.execute(tool, {
@@ -725,7 +725,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       const at = now();
 
       if (!result.successful) {
-        // No recipe from a failed call. A known one learns what the error says: gone, or denied.
+        // No anchor from a failed call. A known one learns what the error says: gone, or denied.
         const failure = classifyFailure(result.error);
         if (existing && failure) {
           await save({ ...existing, status: failure, checked_at: at });
@@ -738,7 +738,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       // The vector of the request: the one search() computed; on a cache miss (another process, eviction) embedded once here.
       let asked = task ? askedVectors.get(task) : null;
       if (task && !asked) asked = await embed(task, "recipe_embed").catch(() => null);
-      // A skill's piece asked for in other words is the same recipe with one more intent key, never a second recipe.
+      // A skill's piece asked for in other words is the same anchor with one more intent key, never a second anchor.
       const intents = (old) => (isSkillTool(tool) ? addIntent(old?.intents, task) : old?.intents);
       // The area the call reads in (a repository, a folder, a calendar), so a project can be offered for it.
       const area = areaOf({ args, data: result.data });
@@ -751,7 +751,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         return { id: rid, result, created: false, changed: false, unchanged: true, pending: Promise.resolve(publicRecipe(next)), recipe_status: "fresh" };
       }
       const created = !existing;
-      // A recipe of the old model (random id) re-keys here: its knowledge is kept when the result is the same.
+      // An anchor of the old model (random id) re-keys here: its knowledge is kept when the result is the same.
       const legacy = created && previous?.legacy && previous.tool === tool && canonicalJson(previous.args) === canonicalJson(args) ? previous : null;
       const kept = legacy && legacy.summaryEmbedding && legacy.digest === createHash("sha256").update(JSON.stringify(result.data)).digest("hex") ? legacy : null;
       const base = existing ?? {
@@ -782,16 +782,16 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       return { id: rid, result, created, changed: !created, unchanged: false, pending: described.catch(() => null), recipe_status: "fresh" };
     },
 
-    // Recipes: everything saved, one by one, or a prepared area.
+    // Anchors: everything saved, one by one, or a prepared area.
     recipes: {
-      // Every recipe (any status, without vectors), newest result first.
+      // Every anchor (any status, without vectors), newest result first.
       async list() {
         return (await everyRecipe()).map(publicRecipe).sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
       },
       async get(id) {
         return publicRecipe(await load(id));
       },
-      // The request an answer was made for, kept on the recipes that answer rests on (queryEmbeddings; a skill's piece also
+      // The request an answer was made for, kept on the anchors that answer rests on (queryEmbeddings; a skill's piece also
       // takes it as an intent), so a request close to it finds them again, all of them at once. Only those: a call made just
       // to find a name or an id is not what the request asked for. The vector is the one search() made for the same text.
       async asked({ ids = [], task }) {
@@ -809,7 +809,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         }
         return { filed };
       },
-      // Deletes the recipe (and turns its trigger off, unless other recipes share it).
+      // Deletes the anchor (and turns its trigger off, unless other anchors share it).
       async remove(id) {
         const record = await load(id);
         if (!record) return { id, removed: false };
@@ -818,7 +818,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         return { id, removed: true };
       },
       // Runs the saved call again: { recipe, changed, status }. status: fresh | gone | denied | failed (a failure that
-      // says nothing about the recipe: a timeout, a bad argument).
+      // says nothing about the anchor: a timeout, a bad argument).
       async recheck(id) {
         const record = await loadOrThrow(id);
         // Checking runs the call again, so only a call that may only read: a saved send, create or delete is never run again
@@ -829,7 +829,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         const status = out.recipe_status ?? (out.result?.successful === false ? "failed" : "fresh");
         return { recipe: publicRecipe(await load(id)), changed: Boolean(out.changed), status, ...(status === "failed" && { error: out.result?.error }) };
       },
-      // Marks every recipe of a revoked / deleted connection (by account id, or by app) as denied: count.
+      // Marks every anchor of a revoked / deleted connection (by account id, or by app) as denied: count.
       async invalidateAccount({ account, toolkit } = {}) {
         if (!account && !toolkit) throw new Error("Pass account or toolkit");
         let count = 0;
@@ -842,13 +842,13 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         }
         return { count };
       },
-      // The object is gone (deleted upstream): the recipe stays but is never retrieved as fresh.
+      // The object is gone (deleted upstream): the anchor stays but is never retrieved as fresh.
       async markGone(id) {
         const record = await loadOrThrow(id);
         await save({ ...record, status: "gone", checked_at: now() });
         return publicRecipe(await load(id));
       },
-      // The trigger spec a model picks for this recipe's app: { slug, config, label }, or null. Cached in
+      // The trigger spec a model picks for this anchor's app: { slug, config, label }, or null. Cached in
       // record.trigger.spec (null too: it is asked once).
       async recommendTrigger(id) {
         const record = await loadOrThrow(id);
@@ -864,14 +864,14 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         if (out.error) throw new Error(out.error);
         return publicRecipe(await load(id));
       },
-      // The same for many recipes at once (a project's "Keep in sync"): each one gets its OWN trigger, the spec picked for
-      // its call; recipes whose specs are the same subscription (slug, config, account) share one Composio trigger, made or
+      // The same for many anchors at once (a project's "Keep in sync"): each one gets its OWN trigger, the spec picked for
+      // its call; anchors whose specs are the same subscription (slug, config, account) share one Composio trigger, made or
       // enabled once, so one event wakes one run with all of them. Off: a Composio trigger is disabled only when no other
-      // recipe still uses it. Answers [{ id, active, label, error? }] (error: no trigger fits it, or Composio refused).
+      // anchor still uses it. Answers [{ id, active, label, error? }] (error: no trigger fits it, or Composio refused).
       async setTriggers({ ids, active }) {
         if (active && !triggers) throw new Error("Triggers need the hosted backend: Composio events do not reach this process");
         const records = (await Promise.all([...new Set(ids)].map((id) => load(id)))).filter(Boolean);
-        const out = new Map(ids.map((id) => [id, { id, active: false, label: null, error: "Unknown recipe" }]));
+        const out = new Map(ids.map((id) => [id, { id, active: false, label: null, error: "Unknown anchor" }]));
         if (!active) {
           const stopped = [];
           for (const r of records) {
@@ -882,7 +882,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
           await disableUnused(stopped);
           return ids.map((id) => out.get(id));
         }
-        // Each recipe's own spec (one model call for a recipe that was never asked; a few at a time).
+        // Each anchor's own spec (one model call for an anchor that was never asked; a few at a time).
         const specs = new Map();
         await pool(records, 4, async (r) => specs.set(r.id, r.trigger?.spec ?? (await api.recipes.recommendTrigger(r.id).catch(() => null))));
         // Subscriptions already on: their Composio trigger is reused.
@@ -892,7 +892,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         for (const r of records) {
           const spec = specs.get(r.id);
           if (!spec) {
-            out.set(r.id, { id: r.id, active: false, label: null, error: "No trigger fits this recipe" });
+            out.set(r.id, { id: r.id, active: false, label: null, error: "No trigger fits this anchor" });
             continue;
           }
           const key = subscriptionOf(spec, r.scope?.account);
@@ -928,12 +928,12 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         }
         return ids.map((id) => out.get(id));
       },
-      // The recipes a Composio trigger keeps current (an event names the trigger id): those that keep it on (a recipe that
-      // turned its sync off keeps the id to enable again, and recipes share one trigger).
+      // The anchors a Composio trigger keeps current (an event names the trigger id): those that keep it on (an anchor that
+      // turned its sync off keeps the id to enable again, and anchors share one trigger).
       async byTrigger({ triggerId }) {
         return (await everyRecipe()).filter((r) => r.trigger?.active && r.trigger.id === triggerId).map(publicRecipe);
       },
-      // A prepared area: minimal record, so events know it was prepared. No recipe of its own.
+      // A prepared area: minimal record, so events know it was prepared. No anchor of its own.
       async prepareScope({ label, toolkit, account = "" }) {
         if (!scopeStore) throw new Error("No scopes store");
         const id = `scp_${createHash("sha256").update([workspaceId, toolkit, account, label].join("|")).digest("hex").slice(0, 24)}`;
@@ -947,22 +947,22 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       },
     },
 
-    // Waits for recipes still being saved (the CLI calls it before exiting).
+    // Waits for anchors still being saved (the CLI calls it before exiting).
     async flush() {
       await Promise.all([...pending]);
     },
 
-    // Skills (skills.js). The recipes of a skill are tied to a version, and go when the skill goes.
+    // Skills (skills.js). The anchors of a skill are tied to a version, and go when the skill goes.
     skills: {
-      // The recipes of a skill (any status, newest first), with their intents.
+      // The anchors of a skill (any status, newest first), with their intents.
       async recipes({ skill }) {
         return (await everyRecipe())
           .filter((r) => isSkillTool(r.tool) && r.args?.skill === skill)
           .map(publicRecipe)
           .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
       },
-      // The skill changed: its recipes of another version are outdated. Each one whose piece (or file) still exists in the
-      // new version is made again there (a recipe of the new version, its intent keys and past requests carried over, the
+      // The skill changed: its anchors of another version are outdated. Each one whose piece (or file) still exists in the
+      // new version is made again there (an anchor of the new version, its intent keys and past requests carried over, the
       // old one dropped); the others become gone and stay listed. { carried: [{ from, to }], gone: n }.
       async update({ skill, version }) {
         const now_ = now();
@@ -997,7 +997,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         }
         return { carried, gone };
       },
-      // The skill is deleted: its recipes of every version are deleted with it (a recipe goes with its source). { count }
+      // The skill is deleted: its anchors of every version are deleted with it (an anchor goes with its source). { count }
       async removed({ skill }) {
         let count = 0;
         for (const r of await everyRecipe()) {
@@ -1026,7 +1026,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
 // and 0.41 at 256, unrelated events stay under 0.22, and 100 lines cost ~34 KB instead of 600.
 const MAX_ITEMS = 100;
 
-// What a recipe's summary vector is made of: the summary and the search keywords written with it.
+// What an anchor's summary vector is made of: the summary and the search keywords written with it.
 const summaryText = ({ summary, keywords }) => (keywords?.length ? `${summary}\nKeywords: ${keywords.join(", ")}` : summary);
 const ITEM_DIMS = 256;
 // How close a line of a result is to a request (256 dims): «Уборка» to "когда мне убираться" 0.40, to "when should I
@@ -1034,13 +1034,13 @@ const ITEM_DIMS = 256;
 // a few short ones up to 0.35.
 const ITEM_FIT = 0.33;
 const ITEM_STRONG = 0.45;
-// The requests a recipe answered, as vectors: the one already computed when it was searched, cut like items (256 dims,
+// The requests an anchor answered, as vectors: the one already computed when it was searched, cut like items (256 dims,
 // int8), at most MAX_QUERIES, each with how often it came. A near-duplicate (cosine >= QUERY_DUP) only raises the count
 // of the stored one; when full, the least frequent and then the oldest goes. No backfill: they pile up from now on.
 const MAX_QUERIES = 8;
 const QUERY_DUP = 0.95;
 
-// A recipe's scope with the area its last result was in (areaOf), or without one when that call is in none.
+// An anchor's scope with the area its last result was in (areaOf), or without one when that call is in none.
 const withArea = (scope = {}, area) => {
   const { area: _old, ...rest } = scope ?? {};
   return area ? { ...rest, area } : rest;
@@ -1058,7 +1058,7 @@ export function addQuery(list = [], vector, at = new Date().toISOString()) {
 const decrypted = new Map(); // "<user>:<blob prefix>" -> record, shared by every genter in the process
 const translations = new Map(); // query -> Promise<{ en, terms } | null>
 // Vectors of the requests searched lately, by their text, shared by every genter in the process (a backend makes one per
-// request): execute({ task }) and recipes.asked() file the one search() made for a recipe without embedding it again.
+// request): execute({ task }) and anchors.asked() file the one search() made for an anchor without embedding it again.
 const askedVectors = new Map();
 const MAX_ASKED = 200;
 
@@ -1110,7 +1110,7 @@ export function namedApps(text, apps = []) {
 }
 
 // Connected apps the text means by a word of their name or what they hold, not their whole slug: "calendar" or
-// "meetings" -> googlecalendar, "my drive" -> googledrive. Only for finding tools: a recipe of another app still counts.
+// "meetings" -> googlecalendar, "my drive" -> googledrive. Only for finding tools: an anchor of another app still counts.
 export function appsMeant(text, apps = []) {
   const stem = (w) => w.replace(/(ies|es|s)$/, "");
   const words = new Set(String(text).toLowerCase().split(/[^a-z0-9а-яё]+/).filter(Boolean).map(stem));
@@ -1252,10 +1252,10 @@ function forSummary(data) {
   });
 }
 
-// What a recipe said before its result changed: { title, short, summary, items, updated_at } (items cut to 30).
+// What an anchor said before its result changed: { title, short, summary, items, updated_at } (items cut to 30).
 const previousOf = (r) => ({ title: r.title ?? null, short: r.short ?? null, summary: r.summary ?? null, items: (r.items ?? []).slice(0, 30), updated_at: r.updated_at ?? null });
 
-// The Composio subscription a trigger spec makes on an account: recipes with the same one share one Composio trigger, so
+// The Composio subscription a trigger spec makes on an account: anchors with the same one share one Composio trigger, so
 // an event wakes one run with all of them instead of one run each.
 const subscriptionOf = (spec, account) => `${spec.slug}|${canonicalJson(spec.config ?? {})}|${account ?? ""}`;
 
@@ -1277,7 +1277,7 @@ function cosine(a, b) {
   return dot / Math.sqrt(na * nb);
 }
 
-// Date placeholders of a recipe's args filled for this run: {{now}}, {{today}}, {{tomorrow}}, {{ago.7d}}, {{ahead.30d}}.
+// Date placeholders of an anchor's args filled for this run: {{now}}, {{today}}, {{tomorrow}}, {{ago.7d}}, {{ahead.30d}}.
 function withDates(args) {
   if (!JSON.stringify(args ?? {}).includes("{{")) return args;
   const day = new Date();

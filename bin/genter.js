@@ -17,7 +17,7 @@ const write = (file, data) => {
   writeFileSync(join(dir, file), JSON.stringify(data, null, 2));
 };
 
-// Local store: encrypted recipes in ~/.genter/calls.json, agent runs in ~/.genter/runs.json.
+// Local store: encrypted anchors in ~/.genter/calls.json, agent runs in ~/.genter/runs.json.
 const store = {
   get: async (id) => read("calls.json")[id],
   put: async (row) => write("calls.json", { ...read("calls.json"), [row.id]: row }),
@@ -41,14 +41,18 @@ const agentCommands = {
   write: { tool: "GENTER_WRITE", start: (agent, args) => agent.write(args) },
 };
 
-const [name, json = "{}"] = process.argv.slice(2);
+// Anchors were called recipes: the anchor names are aliases of the recipe commands (both work).
+const aliases = { anchors: "recipes", recheck_anchor: "recheck_recipe", remove_anchor: "remove_recipe" };
+const [given, json = "{}"] = process.argv.slice(2);
+const name = aliases[given] ?? given;
 if (!tools[name] && !agentCommands[name]) {
   console.log("genter <command> '<json args>'\n");
-  console.log(`  ${"run".padEnd(14)} {task, account?}: an agent does the task in your apps, recipes first`);
+  console.log(`  ${"run".padEnd(14)} {task, account?}: an agent does the task in your apps, anchors first`);
   console.log(`  ${"find".padEnd(14)} {question, account?}: read-only agent, answers from past results and live data`);
   console.log(`  ${"continue".padEnd(14)} {run_id, message}: answer a run's question or give a follow-up`);
   console.log(`  ${"write".padEnd(14)} {run_id, ref, change}, {run_id, ref, edits, message} (a file) or {run_id, ref, tool, args}: write where a reference [n] (or a link) points\n`);
   for (const [tool, { description }] of Object.entries(tools)) console.log(`  ${tool.padEnd(14)} ${description}`);
+  console.log(`\nAliases: ${Object.entries(aliases).map(([alias, command]) => `${alias} = ${command}`).join(", ")}`);
   console.log(`\nKeys: genter login '{"composio_api_key":"...","openrouter_api_key":"...","user_id":"me"}'`);
   console.log("or env COMPOSIO_API_KEY, OPENROUTER_API_KEY, GENTER_USER_ID");
   process.exit(name ? 1 : 0);
@@ -95,7 +99,7 @@ try {
     const out = Array.isArray(res) ? res : (({ pending, ...rest }) => rest)(res);
     console.log(JSON.stringify(out, null, 2));
   }
-  await genter.flush(); // recipes are saved after the result is shown
+  await genter.flush(); // anchors are saved after the result is shown
 } catch (error) {
   console.error(error.message);
   process.exit(1);

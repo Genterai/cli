@@ -6,18 +6,18 @@ import { logCost, usageFields } from "./cost.js";
 import { UNLOOP, cutLoop, loopIn, loopNote } from "./loop.js";
 
 // The task agent: an LLM loop over genter (search -> execute -> save), tuned for speed.
-// Before the first LLM call it already has, in parallel: the saved recipes matching the task (found by
+// Before the first LLM call it already has, in parallel: the saved anchors matching the task (found by
 // what they do and by what they returned), candidate Composio tools with compact arg schemas, and the
-// connected apps. So a known task is usually one tool call and an answer, and a recipe's result summary
+// connected apps. So a known task is usually one tool call and an answer, and an anchor's result summary
 // can answer a question with no tool call at all.
 // A run can pause (a question for the user, an app to connect) and be continued with `send`.
 // Runs are stored encrypted: { id, blob }. Tool results are kept only as their summaries, never raw.
 //
 // mode "run": do the task. mode "find": read-only, only tools that read data run.
 // mode "recipes" (MCP GENTER_FIND): read-only, and the model writes no answer: it finds and runs the calls whose results
-// hold what was asked (saved recipes that fit, or new calls, which become recipes) and names their ids; the run ends with
-// those recipes' current raw results (`results`), for the caller's own model to answer from.
-// canExecute false: no tool runs at all (dashboard viewers); the agent answers from recipes and plans.
+// hold what was asked (saved anchors that fit, or new calls, which become anchors) and names their ids; the run ends with
+// those anchors' current raw results (`results`), for the caller's own model to answer from.
+// canExecute false: no tool runs at all (dashboard viewers); the agent answers from anchors and plans.
 // References: every knowledge chunk, recipe, call result and item of a list the model sees gets a number, the answer
 // cites them as [n], and a result lists the cited ones (refs.js): what each is, where it is (path, link, ids) and which
 // write tools work there. write() writes at one of them (or at a link). A file is changed by edits (exact pieces of its
@@ -31,9 +31,9 @@ export function createAgent({
   userId,
   runs, // get(id) -> { blob } | undefined, put({ id, blob })
   model = process.env.AGENT_MODEL || "openai/gpt-oss-120b",
-  // A task no saved recipe covers yet, or a run the fast model gets stuck on, goes to a stronger model
+  // A task no saved anchor covers yet, or a run the fast model gets stuck on, goes to a stronger model
   // (AGENT_STRONG_MODEL; the same one by default: none of the models tried did these tasks better, README → Models).
-  // What it finds becomes recipes, so the next time the same task runs on the fast one.
+  // What it finds becomes anchors, so the next time the same task runs on the fast one.
   strongModel = process.env.AGENT_STRONG_MODEL || "openai/gpt-oss-120b",
   maxSteps = 12,
   // Tokens one model call may write (its reasoning too): far over any answer or call, so an answer that falls into a
@@ -123,22 +123,22 @@ export function createAgent({
         return { content: JSON.stringify(schemas) };
       }
       case "execute": {
-        if (!canExecute) return { content: "Not allowed: this user can search but not run tools. Answer from recipes, or say which tool would do it." };
+        if (!canExecute) return { content: "Not allowed: this user can search but not run tools. Answer from anchors, or say which tool would do it." };
         const tool = input.tool ?? run.recipes[input.id];
-        // A call with neither a slug nor a known recipe id: it counts as a failure, so the run moves to the strong model.
+        // A call with neither a slug nor a known anchor id: it counts as a failure, so the run moves to the strong model.
         if (!tool && !input.id) {
           run.failures.execute = (run.failures.execute ?? 0) + 1;
           onEvent({ type: "tool", tool: "execute", ok: false, summary: "no tool or id" });
           // A prepare task with a list in hand: the empty call was meant to read its items.
           const list = run.mode === "prepare" && Object.keys(run.lists ?? {}).at(-1);
           const each = list && `To read every listed item, call execute {tool: "read_each", args: {list_id: "${list}", read_tool: <the tool that reads ONE item>, shared_args: {...}, item_arg: <e.g. path>}}.`;
-          return { content: JSON.stringify({ error: "Pass tool (a slug from the first message or search results) and args, or id of a saved recipe.", ...(each && { hint: each }) }) };
+          return { content: JSON.stringify({ error: "Pass tool (a slug from the first message or search results) and args, or id of a saved anchor.", ...(each && { hint: each }) }) };
         }
-        // A read-only run checks the call it would make: a recipe id it did not meet is looked up first (a saved recipe can
+        // A read-only run checks the call it would make: an anchor id it did not meet is looked up first (a saved anchor can
         // be a send or a delete), and a call whose tool is not known does not run.
         const ran = tool ?? (READ_ONLY_MODES.includes(run.mode) && input.id ? await genter.recipes?.get?.(input.id).then((r) => r?.tool, () => null) : null);
         if (READ_ONLY_MODES.includes(run.mode) && (!ran || !isReadOnly(ran))) {
-          return { content: notAllowed(ran ?? `recipe ${input.id}`, run.mode) };
+          return { content: notAllowed(ran ?? `anchor ${input.id}`, run.mode) };
         }
         // A call that already failed is not run again: the model gets the error back and must change course.
         const key = `${tool ?? input.id} ${JSON.stringify(input.args ?? {})}`;
@@ -193,7 +193,7 @@ export function createAgent({
           run.recipeArgs[out.id] = args;
         }
         // What the model can cite: the call's one result, or each item of a list (`_ref` on the item).
-        // Each reference knows the recipe it came from, so the recipes an answer rests on are the ones it cites.
+        // Each reference knows the anchor it came from, so the anchors an answer rests on are the ones it cites.
         const cited = ok && !empty && data != null && tool ? refsOfResult({ app: appOf(tool, run.apps), tool, args, data }, (r) => register(run, out.id ? { ...r, recipe: out.id } : r)) : { data, ref: null, items: [] };
         if (run.mode === "recipes" && ok && !empty && out.id) keepRaw(run, { id: out.id, from: input.id, tool, args, out, cited });
         // An empty search is not an answer yet: the words may be in another language than the data, or too narrow.
@@ -223,13 +223,13 @@ export function createAgent({
       case "read_file": {
         // Reading a repository file is the base of most code tasks, and tool search does not surface it
         // ("read file" finds READMEs and gists, not GITHUB_GET_REPOSITORY_CONTENT): it is built in, like edit_file.
-        if (!canExecute) return { content: "Not allowed: this user can search but not run tools. Answer from what recipes say, or say which tool would do it." };
+        if (!canExecute) return { content: "Not allowed: this user can search but not run tools. Answer from what anchors say, or say which tool would do it." };
         const place = fileRef(run, input);
         if (!place) return { content: JSON.stringify({ error: input.ref != null ? `No reference [${input.ref}] in this run` : "Pass ref (the file's reference number) or owner, repo and path" }) };
         const n = register(run, place);
         const out = await readFile({ run, place, account: input.account || undefined }).catch((e) => ({ error: e.message }));
         if (out.error) run.failures.read_file = (run.failures.read_file ?? 0) + 1;
-        // mode "recipes": the read is a recipe like any call, and its result is kept to be handed over.
+        // mode "recipes": the read is an anchor like any call, and its result is kept to be handed over.
         const { summary, saved: read, ...shown } = out;
         const recipe = read ? { id: read.id, created: read.created, changed: read.changed } : null;
         if (read) {
@@ -286,7 +286,7 @@ export function createAgent({
       }
       case "recheck_recipe": {
         if (!canExecute) return { content: "Not allowed: this user can search but not run tools." };
-        if (!input.id) return { content: JSON.stringify({ error: "Pass id of the recipe" }) };
+        if (!input.id) return { content: JSON.stringify({ error: "Pass id of the anchor" }) };
         const started = Date.now();
         const out = await genter.recipes.recheck(input.id).catch((e) => ({ error: e.message }));
         run.timing.tool_ms += Date.now() - started;
@@ -298,7 +298,7 @@ export function createAgent({
       }
       case "forget_recipe": {
         if (!canExecute) return { content: "Not allowed: this user can search but not run tools." };
-        if (!input.id) return { content: JSON.stringify({ error: "Pass id of the recipe" }) };
+        if (!input.id) return { content: JSON.stringify({ error: "Pass id of the anchor" }) };
         const out = await genter.recipes.markGone(input.id).then(() => ({ id: input.id, status: "gone" }), (e) => ({ error: e.message }));
         run.steps.push({ tool: "forget_recipe", from_recipe: input.id, recipe: null, ok: !out.error, summary: out.error ?? (input.reason ? String(input.reason).slice(0, 200) : "gone"), saved: null });
         onEvent({ type: "tool", tool: "forget_recipe", ok: !out.error, summary: out.error ?? "gone" });
@@ -333,8 +333,8 @@ export function createAgent({
     run.leaked = false;
     run.searches = 0;
     run.seen = new Set();
-    run.touched = {}; // recipe id -> { id, created, changed } of this round
-    run.raw = {}; // mode "recipes": recipe id -> its raw result of this round (memory only, never stored)
+    run.touched = {}; // anchor id -> { id, created, changed } of this round
+    run.raw = {}; // mode "recipes": anchor id -> its raw result of this round (memory only, never stored)
     run.suggestions = [];
     run.failed = {}; // "<tool> <args>" -> error of a call that failed in this round
     run.failures = {}; // tool -> failed calls in this round
@@ -453,7 +453,7 @@ export function createAgent({
     } catch (error) {
       result = { status: "failed", answer: error.message };
     }
-    // Mode "recipes": the recipes the model named, with their current raw results; what it read is never lost to a failed
+    // Mode "recipes": the anchors the model named, with their current raw results; what it read is never lost to a failed
     // last step (a reply that was its reasoning, the model failing at the end).
     if (run.mode === "recipes") {
       result.results = await chosenResults(run, result.answer).catch(() => []);
@@ -465,11 +465,11 @@ export function createAgent({
     if (result.status === "done") {
       const used = run.mode === "recipes" ? refsOfResults(run, result.results) : citedRefs(result.answer, run.refs, { round: run.round });
       result.references = await withWrites(used);
-      // The recipes the answer rests on: those its references came from (mode "recipes": those handed over). The request is
+      // The anchors the answer rests on: those its references came from (mode "recipes": those handed over). The request is
       // kept on them, and only on them, so the same request finds them all again with no model call (backend fast path).
       result.answer_recipes = run.mode === "recipes" ? result.results.map((r) => r.id) : [...new Set(used.map((r) => r.recipe).filter(Boolean))];
       if (ASKED_MODES.includes(run.mode) && result.answer_recipes.length && genter.recipes?.asked) {
-        await genter.recipes.asked({ ids: result.answer_recipes, task: run.task }).catch((e) => console.error("genter: keeping the request on recipes failed:", e.message));
+        await genter.recipes.asked({ ids: result.answer_recipes, task: run.task }).catch((e) => console.error("genter: keeping the request on anchors failed:", e.message));
       }
     }
     run.status = result.status;
@@ -481,7 +481,7 @@ export function createAgent({
       run_id: run.id,
       ...result,
       steps: run.steps,
-      // Recipes this round executed and what happened to them (the UI shows "saved" from this, no toast).
+      // Anchors this round executed and what happened to them (the UI shows "saved" from this, no toast).
       saved: Object.values(run.touched ?? {}),
       recipes_used: [...new Set(run.steps.flatMap((x) => [x.recipe?.id, x.from_recipe]).filter(Boolean))],
       ...(run.suggestions?.length && { suggestions: run.suggestions.map(({ label }) => ({ label })) }),
@@ -492,7 +492,7 @@ export function createAgent({
   }
 
   const api = {
-    // Start a task. Recipes, candidate tools and connections are fetched in parallel before the first LLM call.
+    // Start a task. Anchors, candidate tools and connections are fetched in parallel before the first LLM call.
     // target (write): a reference to write at, with its write tools; the briefing ends with it.
     async start({ task, mode = "run", account, target }) {
       if (readOnly && target) throw new Error(READ_ONLY_ERROR);
@@ -506,7 +506,7 @@ export function createAgent({
         genter.translate ? genter.translate(task) : null, // shared with search, so no second model call
       ]);
       const search_ms = Date.now() - searched;
-      // The apps the task names: recipes of other apps are left out ("what's new in Google Tasks" is not a Gmail search).
+      // The apps the task names: anchors of other apps are left out ("what's new in Google Tasks" is not a Gmail search).
       const named = namedApps(`${task} ${english?.en ?? ""}`, connected.map((c) => c.toolkit));
       const ofNamed = (r) => !named.length || !r.tool || named.some((t) => r.tool.startsWith(`${t.toUpperCase()}_`));
       found = found.filter(ofNamed);
@@ -523,7 +523,7 @@ export function createAgent({
         status: "running",
         created_at: new Date().toISOString(),
         apps: [...new Set(connected.map((c) => c.toolkit))],
-        // No valid recipe that clearly fits: this task is new, the strong model works it out (and leaves recipes).
+        // No valid anchor that clearly fits: this task is new, the strong model works it out (and leaves anchors).
         strong: !recipes.some((r) => r.score >= STRONG_RECIPE),
         named, // apps the task is about
         recipes: Object.fromEntries(recipes.map((r) => [r.id, r.tool])),
@@ -634,7 +634,7 @@ export function createAgent({
   }
 
   // A prepare task's fan-out: many independent reads over one area, a few at a time. Every success is an ordinary
-  // atomic recipe; the model gets counts and the first failures, never the data.
+  // atomic anchor; the model gets counts and the first failures, never the data.
   async function executeMany(run, input) {
     const calls = (Array.isArray(input.calls) ? input.calls : []).filter((c) => c && c.tool).slice(0, MAX_MANY);
     if (!calls.length) return { content: JSON.stringify({ error: "Pass calls: [{tool, args, account?}]" }) };
@@ -702,15 +702,15 @@ export function createAgent({
     await Promise.all(Array.from({ length: Math.min(MANY_CONCURRENCY, calls.length) }, worker));
     run.timing.tool_ms += Date.now() - started;
     run.prepared = ["requested", "ok", "created", "changed", "unchanged", "failed", "skipped"].reduce((t, k) => ({ ...t, [k]: (run.prepared?.[k] ?? 0) + counts[k] }), {});
-    const note = `Prepared ${run.prepared.ok} reads: ${run.prepared.created} new recipes, ${run.prepared.changed} updated, ${run.prepared.unchanged} unchanged, ${run.prepared.failed} failed${run.prepared.skipped ? `, ${run.prepared.skipped} skipped (not reads)` : ""}.`;
+    const note = `Prepared ${run.prepared.ok} reads: ${run.prepared.created} new anchors, ${run.prepared.changed} updated, ${run.prepared.unchanged} unchanged, ${run.prepared.failed} failed${run.prepared.skipped ? `, ${run.prepared.skipped} skipped (not reads)` : ""}.`;
     lastNote = note;
     onEvent({ type: "tool", tool: name, ok: counts.ok > 0 || !counts.failed, summary: note });
     return { content: JSON.stringify({ ...counts, ...(failures.length && { failures }), note }) };
   }
 
-  // Mode "recipes": what the run hands over. The recipes the model named by id in its last message, best first (an id it
-  // ran with other args stands for the recipe that call made); none named: every recipe this round read that held
-  // something. A named recipe not run in this round (one from the first message, or read in an earlier round) is run now,
+  // Mode "recipes": what the run hands over. The anchors the model named by id in its last message, best first (an id it
+  // ran with other args stands for the anchor that call made); none named: every anchor this round read that held
+  // something. A named anchor not run in this round (one from the first message, or read in an earlier round) is run now,
   // so every result is current; one this round ran that failed or held nothing is not run again. At most MAX_RESULTS.
   async function chosenResults(run, text) {
     const kept = Object.values(run.raw ?? {});
@@ -726,7 +726,7 @@ export function createAgent({
     return out.length ? out : kept.slice(0, MAX_RESULTS);
   }
 
-  // A saved recipe run for its current result, read-only. null when it may not run, fails or holds nothing.
+  // A saved anchor run for its current result, read-only. null when it may not run, fails or holds nothing.
   async function readNow(run, id) {
     const tool = run.recipes?.[id];
     if (!canExecute || !tool || !isReadOnly(tool)) return null;
@@ -774,9 +774,9 @@ export function createAgent({
     return { ...first, tried: own.length };
   }
 
-  // A file's text for the model (cut at MAX_FILE_TEXT), or a folder's entries. Not saved as a recipe: a file's
+  // A file's text for the model (cut at MAX_FILE_TEXT), or a folder's entries. Not saved as an anchor: a file's
   // content is not a call to repeat, and the reference it gets says where it is. Except in mode "recipes", whose run
-  // hands over recipes: there the read is saved like any call, and `saved` carries the recipe and the raw result.
+  // hands over anchors: there the read is saved like any call, and `saved` carries the anchor and the raw result.
   async function readFile({ run, place, account }) {
     const editor = fileEditor(place);
     if (!editor) throw new Error(`[${place.n ?? "?"}] is a ${place.app} ${place.kind}, not a file`);
@@ -805,7 +805,7 @@ export function createAgent({
   }
 
   // A file changed in one commit: read (its text and sha), the edits applied here, committed with that sha.
-  // Neither call is saved as a recipe: they are steps of the edit, and the commit carries the whole file.
+  // Neither call is saved as an anchor: they are steps of the edit, and the commit carries the whole file.
   async function editFile({ run, place, edits, message, account }) {
     if (!canExecute) throw new Error("This user can search but not change files");
     const editor = fileEditor(place);
@@ -876,9 +876,9 @@ function keepList(run, id, data) {
   return items.length;
 }
 
-// Mode "recipes": a recipe's current result as the call returned it (a list with `_ref` on its items), kept for this
+// Mode "recipes": an anchor's current result as the call returned it (a list with `_ref` on its items), kept for this
 // round in memory only, never stored, with the references it got: { id, tool, args, from?, account?, created, changed,
-// instructions?, data, refs }. from: the recipe the model ran it as (with other args it is another recipe).
+// instructions?, data, refs }. from: the anchor the model ran it as (with other args it is another anchor).
 function keepRaw(run, { id, from, tool, args, out, cited }) {
   const entry = {
     id,
@@ -904,12 +904,12 @@ function refsOfResults(run, results, max = MAX_RESULT_REFS) {
 }
 
 const RECIPE_ID = /\brcp_\w+/g;
-const MAX_RESULTS = 8; // recipes a "recipes" run hands over
+const MAX_RESULTS = 8; // anchors a "recipes" run hands over
 const MAX_RESULT_REFS = 40;
 
 // A folder among listed items: a tree or a directory, by its type or mime type.
 const isContainer = (item) => /^(tree|dir|directory|folder)$|\.folder$/i.test(String(item?.type ?? item?.mimeType ?? item?.mime_type ?? item?.kind ?? ""));
-// A file that holds no text worth a recipe, by its name: images, media, archives, fonts, binaries, lock files.
+// A file that holds no text worth an anchor, by its name: images, media, archives, fonts, binaries, lock files.
 const noText = (value) =>
   typeof value === "string" && /(\.(png|jpe?g|gif|webp|ico|bmp|tiff?|heic|psd|mp[34]|mov|avi|wav|ogg|webm|zip|gz|tgz|tar|rar|7z|jar|woff2?|ttf|otf|eot|exe|dll|so|dylib|bin|class|pyc|wasm|lock)|(^|\/)(package-lock\.json|pnpm-lock\.yaml))$/i.test(value);
 
@@ -945,7 +945,7 @@ function register(run, { write, ...ref }) {
 const refKey = (r) => `${r.app}:${r.kind}:${r.url ?? JSON.stringify(Object.entries(r.where ?? {}).sort())}`;
 const MAX_REFS = 300;
 
-// A saved recipe as a reference: the call it makes points somewhere (its args).
+// A saved anchor as a reference: the call it makes points somewhere (its args).
 const recipeRef = (run, r) =>
   r.id && r.tool
     ? register(run, { ...shapeRef({ app: appOf(r.tool, run.apps), via: "recipe", tool: r.tool, title: r.short ?? r.title, where: locatorArgs(r.args ?? {}) }), recipe: r.id })
@@ -1015,7 +1015,7 @@ export function isEmpty(data) {
   return lists > 0 && items === 0;
 }
 
-// Search results as the model sees them: recipes (which call to make: their summary is what that call returned when it
+// Search results as the model sees them: anchors (which call to make: their summary is what that call returned when it
 // was last saved, not the current value) with their reference number, Composio tools with a compact arg schema.
 function compactFound(r, ref) {
   if (r.id) {
@@ -1138,13 +1138,13 @@ const READ_ONLY_MODES = ["find", "recipes", "prepare", "event"];
 const READ_ONLY_ERROR = "Read-only: this workspace can find, not change things in its apps (actions come with the Enterprise plan)";
 // What a read-only run is told when it tries to change something: say so, never claim it was done.
 const notAllowed = (what, mode) => `Not allowed: ${what} may change data and this is a read-only ${mode}. Only read; say in the answer what was not done.`;
-// Modes whose task is a person's request (not a prepare or event instruction): it is kept on the recipes the answer used.
+// Modes whose task is a person's request (not a prepare or event instruction): it is kept on the anchors the answer used.
 const ASKED_MODES = ["run", "find", "recipes"];
 const MAX_MANY = 100;
 const MAX_EACH = 300; // calls one read_each makes: an area bigger than that is read in part, and the note says how much is left
 const MAX_LISTED = 2000;
 const MANY_CONCURRENCY = 4;
-const STRONG_RECIPE = 0.45; // a recipe this close to the task is known ground: the fast model is enough
+const STRONG_RECIPE = 0.45; // an anchor this close to the task is known ground: the fast model is enough
 
 function briefing({ task, mode, account, found, connected, canExecute, english, named = [], recipeRef = () => undefined }) {
   const recipes = found.filter((r) => r.id).map((r) => compactFound(r, recipeRef(r)));
@@ -1155,11 +1155,11 @@ function briefing({ task, mode, account, found, connected, canExecute, english, 
     english?.en && `In English: ${english.en}`,
     english?.terms?.length && `Search terms for keyword filters (use both languages, joined with OR): ${english.terms.join(" | ")}`,
     MODE_NOTES[mode] ?? MODE_NOTES.run,
-    !canExecute && "This user cannot run tools: answer from recipe summaries, or say which tool and args would do it.",
+    !canExecute && "This user cannot run tools: answer from anchor summaries, or say which tool and args would do it.",
     account && `Use connection: ${account}`,
     `Connected apps: ${apps.join(", ") || "none"}`,
     named.length && `The task is about ${named.join(", ")}: read the user's data there with its tools (search_tools "${named[0]} ..." if none below fits), not other apps.`,
-    `Saved recipes matching the task (each is a call that worked before; last_result is what it returned then, not what is there now):\n${recipes.length ? JSON.stringify(recipes) : "none"}`,
+    `Saved anchors matching the task (each is a call that worked before; last_result is what it returned then, not what is there now):\n${recipes.length ? JSON.stringify(recipes) : "none"}`,
     tools.length && `Candidate Composio tools:\n${JSON.stringify(tools)}`,
   ]
     .filter(Boolean)
@@ -1169,22 +1169,22 @@ function briefing({ task, mode, account, found, connected, canExecute, english, 
 const MODE_NOTES = {
   find: "Mode: find (read-only: answer the question; only execute tools that read data).",
   recipes:
-    "Mode: recipes (read-only; only execute tools that read data). Write NO answer for the user: they get the raw results of the recipes you name and read them themselves. " +
-    "Your job is to find and run the calls whose current results hold exactly what the task asks for, so each is saved as a recipe: execute the saved recipes that fit by id (override only the args that differ), " +
+    "Mode: anchors (read-only; only execute tools that read data). Write NO answer for the user: they get the raw results of the anchors you name and read them themselves. " +
+    "Your job is to find and run the calls whose current results hold exactly what the task asks for, so each is saved as an anchor: execute the saved anchors that fit by id (override only the args that differ), " +
     "otherwise the read tools that return that data, with the filters, dates and names of the task (read a repository file with read_file). Prefer one call that returns what is asked over broad listings; " +
-    "a call made only to find a name or an id is not one to name. A task that joins several things (a guide and the project it is for: 'how do I write good docs for Evallens'; a person and a topic) needs what each of them holds: run the recipes of each, not only of the closest one. " +
-    "Then, instead of the final answer the system prompt asks for, end with ONLY the ids of those recipes (the id of each execute or read_file result), " +
+    "a call made only to find a name or an id is not one to name. A task that joins several things (a guide and the project it is for: 'how do I write good docs for Evallens'; a person and a topic) needs what each of them holds: run the anchors of each, not only of the closest one. " +
+    "Then, instead of the final answer the system prompt asks for, end with ONLY the ids of those anchors (the id of each execute or read_file result), " +
     "most relevant first, one per line, nothing else. If no call holds anything for the task, end with one line saying what you checked.",
   run: "Mode: run (do the task).",
   prepare:
-    "Mode: prepare. The task names an area (a repository, a folder, a calendar, a channel, a list) and the args that point at it. Your only job is to read ALL of it, one recipe per item: " +
+    "Mode: prepare. The task names an area (a repository, a folder, a calendar, a channel, a list) and the args that point at it. Your only job is to read ALL of it, one anchor per item: " +
     "first list every item with the app's list tool and those args, in one call if it can (a repository: its whole file tree, recursively; a folder: its files; a calendar: its events of the last and the next months; a channel: its messages). " +
     "Then read every listed item with read_each {list_id: <the id the list call returned>, read_tool: <the tool that returns ONE item's full content, e.g. one file of the repository>, shared_args: <what every read shares, e.g. owner and repo>, item_arg: <the arg that takes each item, e.g. path>}: " +
     "it makes one read per item for you (folders and files with no text are left out), so never write those calls out. read_many is only for a few extra calls you write yourself (a list that came in pages). " +
-    "read_file saves nothing: do not use it. Every successful read is saved as its own recipe automatically. Do not summarize the content: finish with the counts you got.",
+    "read_file saves nothing: do not use it. Every successful read is saved as its own anchor automatically. Do not summarize the content: finish with the counts you got.",
   event:
-    "Mode: event. The task carries an event from an app and the recipes it may have changed. Re-read ONLY those recipes with recheck_recipe (all in one step). A recipe whose object was deleted: forget_recipe. " +
-    "Create new recipes (execute with the real read tool) for NEW objects only when the event is inside an area that was prepared (the task says so); otherwise do not. Finish with one line: what changed, what was forgotten.",
+    "Mode: event. The task carries an event from an app and the anchors it may have changed. Re-read ONLY those anchors with recheck_recipe (all in one step). An anchor whose object was deleted: forget_recipe. " +
+    "Create new anchors (execute with the real read tool) for NEW objects only when the event is inside an area that was prepared (the task says so); otherwise do not. Finish with one line: what changed, what was forgotten.",
 };
 
 // A person's instructions from their workspace admin, as the second system message.
@@ -1193,28 +1193,28 @@ const personalNote = (text) =>
 
 const SYSTEM = `You are Genter's task agent. You act in the user's connected apps through Composio tools, and you are judged on speed: the fewest steps that give a correct, complete result.
 
-A Recipe is one successful tool call with fixed args, remembered together with what it returned the last time. The first message already holds everything for a fast start: saved recipes that match the task (calls that worked, with their args and last_result), candidate Composio tools with their args, and the connected apps.
-- search_tools / the saved recipes tell you WHICH call to make. A recipe's last_result is what that call returned when it was saved: it is NOT the current value. ALWAYS execute the real tool (execute with the recipe id, or the tool and args) to get fresh data before you answer, even when last_result looks like the answer. Answer from last_result alone only when the user asks what was known earlier.
-- result_matched lists what a recipe's last result held that is close to the task (an event, a task, an email). When those lines are what the task asks about, that recipe is the call to make: execute it by id first, before searching anywhere else. Lines about something else are not a match.
-- A task with several parts (find the recent commits, read their files, write a note) is done part by part; a recipe that answers one part does not end the run.
-- If a recipe fits, execute it by id and override only the args that differ. This is the fastest path.
+An anchor is one successful tool call with fixed args, remembered together with what it returned the last time. The first message already holds everything for a fast start: saved anchors that match the task (calls that worked, with their args and last_result), candidate Composio tools with their args, and the connected apps.
+- search_tools / the saved anchors tell you WHICH call to make. An anchor's last_result is what that call returned when it was saved: it is NOT the current value. ALWAYS execute the real tool (execute with the anchor id, or the tool and args) to get fresh data before you answer, even when last_result looks like the answer. Answer from last_result alone only when the user asks what was known earlier.
+- result_matched lists what an anchor's last result held that is close to the task (an event, a task, an email). When those lines are what the task asks about, that anchor is the call to make: execute it by id first, before searching anywhere else. Lines about something else are not a match.
+- A task with several parts (find the recent commits, read their files, write a note) is done part by part; an anchor that answers one part does not end the run.
+- If an anchor fits, execute it by id and override only the args that differ. This is the fastest path.
 - Otherwise pick a candidate tool and execute it. Call get_tool_schema only when the args are unclear; call search_tools only when nothing fits.
 - Make independent calls in the same step (parallel). Chain only when a call needs another's output.
 - Never invent tool slugs or argument names: use only slugs from the first message, search results or error hints.
 - Keyword search in apps (Gmail q, Slack, Drive, Notion, GitHub search) matches literal words, and the data is often in another language than the request (English emails, Russian request). Put the key terms in both languages in one query, joined with OR, e.g. Gmail: ("объединенные знания" OR "unified knowledge" OR "merged knowledge"). The first message lists the terms.
 - A failed call is not retried with the same args. "Not Found" from an app means the repo, file or id is wrong, not the tool: find the real one (list the user's repos, search) instead of guessing. After two failures of a tool, answer with what you have.
 - A connected app always has tools: never answer that there is no tool for it. If no candidate fits, search_tools with the app name and what to do (e.g. "Google Tasks list tasks"), then execute.
-- A candidate with kind "skill" (or a recipe of SKILL_READ_CHUNK) is one section of a skill, a written how-to: execute it with exactly its args and follow what it says. The result names the files it points to (related, each with the call that gets it); fetch only those you need. A script is code Genter does not run: read it, never claim it was run.
+- A candidate with kind "skill" (or an anchor of SKILL_READ_CHUNK) is one section of a skill, a written how-to: execute it with exactly its args and follow what it says. The result names the files it points to (related, each with the call that gets it); fetch only those you need. A script is code Genter does not run: read it, never claim it was run.
 - A name you do not know (an org, a project, a repo, a person): look it up in the connected apps first (e.g. the user's GitHub repositories and orgs) and answer about what you found. "Projects" in GitHub usually means repositories: list them (and Projects only if asked).
 - "What's new in <app>" / "что нового в <app>" for a connected app means the user's own latest items there (recently created or updated tasks, issues, emails, files), read with that app's tools, not news about the product.
-- Every fact in the answer comes from a tool result of this run (a recipe's last_result only says what to call). Never answer from general knowledge about a product or company; if nothing was found, say what was checked.
-- Cite where each fact comes from: right after it, the ref number of the recipe, tool result or list item (its _ref) in square brackets, e.g. "Paging stops at a short page [3]." or "[2, 5]". Cite only what you used; never invent numbers. The user gets the cited places (paths, links, ids) with the answer.
+- Every fact in the answer comes from a tool result of this run (an anchor's last_result only says what to call). Never answer from general knowledge about a product or company; if nothing was found, say what was checked.
+- Cite where each fact comes from: right after it, the ref number of the anchor, tool result or list item (its _ref) in square brackets, e.g. "Paging stops at a short page [3]." or "[2, 5]". Cite only what you used; never invent numbers. The user gets the cited places (paths, links, ids) with the answer.
 - To read a file of a repository (its text) or a folder (its entries), call read_file with owner, repo, path (and branch), or the file's ref; several files: several read_file calls in one step. Never answer that a file cannot be read before read_file failed on it.
 - The files a GitHub commit changed: GITHUB_GET_A_COMMIT {owner, repo, ref: <sha>} (its files[].filename), then read_file for each.
 - Never show a file's text, a commit's files or any other content that no call of this run returned: read it first.
 - To change an existing file of a repository, call edit_file with exact pieces of its current text and what goes instead: it reads and commits the file for you. Never write a whole existing file out; GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS is for new files.
 - An empty result is not an answer: retry once with translated or broader terms before saying nothing was found. Neither is a result whose items only share a word with the request (a GitHub notification that says "clean up" for "when do I clean"): say it holds nothing about the task and look where it would be (calendar, tasks).
-- Every successful call is saved as a recipe automatically (the same call updates the same recipe; a failed call saves nothing). Do not describe or name recipes: just make the calls that answer the task. A result that is only a page (next-page marker, truncated) is a partial result: say so, never claim totals or absence from it.
+- Every successful call is saved as an anchor automatically (the same call updates the same anchor; a failed call saves nothing). Do not describe or name anchors: just make the calls that answer the task. A result that is only a page (next-page marker, truncated) is a partial result: say so, never claim totals or absence from it.
 - When you discover a finite area the user may want kept ready (a repository's files, a Drive folder, a channel), call suggest_prepare {label, why} once, and carry on with the task: it has no side effects.
 - An app the task needs is not connected: call connect_app and stop.
 - Never ask the user anything and never end with a question or a choice for them. Ambiguous: take the most likely reading (the default account, the latest, all of them, the closest name), do it, and say in one line what you assumed. Only an irreversible action (delete, send, pay) on a target you cannot pin down is not done: say what was not done and why.
@@ -1229,11 +1229,11 @@ const FREE_ARGS = { description: 'The tool\'s arguments as a JSON object, e.g. {
 const TOOLS = [
   {
     name: "execute",
-    description: "Run a Composio tool for real: `tool` + `args`, or `id` of a saved recipe (args override its args). Returns the current result data and the id of the recipe it is saved as (saved or updated automatically).",
+    description: "Run a Composio tool for real: `tool` + `args`, or `id` of a saved anchor (args override its args). Returns the current result data and the id of the anchor it is saved as (saved or updated automatically).",
     parameters: {
       type: "object",
       properties: {
-        id: { type: "string", description: "Saved recipe id" },
+        id: { type: "string", description: "Saved anchor id" },
         tool: { type: "string", description: "Tool slug, e.g. GMAIL_FETCH_EMAILS" },
         args: FREE_ARGS,
         account: { type: "string", description: "Connection alias or id when the app is connected several times" },
@@ -1287,7 +1287,7 @@ const TOOLS = [
   },
   {
     name: "search_tools",
-    description: "Search saved recipes (by what their results meant) and Composio tools. Only when nothing in the first message fits. A recipe found says which call to make; execute it for fresh data.",
+    description: "Search saved anchors (by what their results meant) and Composio tools. Only when nothing in the first message fits. An anchor found says which call to make; execute it for fresh data.",
     parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
   },
   {
@@ -1306,7 +1306,7 @@ const TOOLS = [
   },
   {
     name: "read_many",
-    description: "Prepare task only: run up to 100 independent READ calls, 4 at a time. Each success is saved as its own recipe. Returns counts and the first failures, not data.",
+    description: "Prepare task only: run up to 100 independent READ calls, 4 at a time. Each success is saved as its own anchor. Returns counts and the first failures, not data.",
     parameters: {
       type: "object",
       properties: {
@@ -1327,11 +1327,11 @@ const TOOLS = [
     name: "read_each",
     description:
       "Prepare task only: read every item a list call of this run listed, one READ call per item (folders and files with no text left out, 4 at a time, up to 300). " +
-      "Each success is saved as its own recipe. Returns counts and the first failures, not data.",
+      "Each success is saved as its own anchor. Returns counts and the first failures, not data.",
     parameters: {
       type: "object",
       properties: {
-        list_id: { type: "string", description: "The id the list call returned (its recipe id)" },
+        list_id: { type: "string", description: "The id the list call returned (its anchor id)" },
         read_tool: { type: "string", description: "The tool that reads ONE item, e.g. GITHUB_GET_REPOSITORY_CONTENT" },
         shared_args: { description: 'The args every read shares, as a JSON object, e.g. {"owner": "o", "repo": "r"}' },
         item_arg: { type: "string", description: "The arg each item's value goes in, e.g. path, file_id, event_id" },
@@ -1343,12 +1343,12 @@ const TOOLS = [
   },
   {
     name: "recheck_recipe",
-    description: "Event task: run a saved recipe's call again. The recipe is updated only if its result changed. Returns { status: fresh | gone | denied | failed, changed }.",
+    description: "Event task: run a saved anchor's call again. The anchor is updated only if its result changed. Returns { status: fresh | gone | denied | failed, changed }.",
     parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
   },
   {
     name: "forget_recipe",
-    description: "Event task: the object a recipe reads was deleted. Marks it gone: it is never offered as current again.",
+    description: "Event task: the object an anchor reads was deleted. Marks it gone: it is never offered as current again.",
     parameters: { type: "object", properties: { id: { type: "string" }, reason: { type: "string" } }, required: ["id"] },
   },
   {

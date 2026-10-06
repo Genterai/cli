@@ -86,8 +86,8 @@ function setup(extra = {}) {
 }
 const chunkArgs = (skill, title) => ({ skill: skill.id, version: skill.version, chunk: skill.chunks.find((c) => c.title === title).id });
 
-describe("reading a piece of a skill is one call, saved as one recipe", () => {
-  it("S1 returns the piece, the files it points to, and saves a deterministic recipe with no Composio call", async () => {
+describe("reading a piece of a skill is one call, saved as one anchor", () => {
+  it("S1 returns the piece, the files it points to, and saves a deterministic anchor with no Composio call", async () => {
     const urls = net();
     const { genter, skill, store, flush } = setup();
     const out = await genter.execute({ tool: SKILL_TOOLS.chunk, args: chunkArgs(skill, "Install"), task: "how do I install it" });
@@ -128,7 +128,7 @@ describe("reading a piece of a skill is one call, saved as one recipe", () => {
     await flush();
   });
 
-  it("S2 asking for the same piece in other words is the same recipe with one more intent key", async () => {
+  it("S2 asking for the same piece in other words is the same anchor with one more intent key", async () => {
     net();
     const { genter, skill, store, flush } = setup();
     const args = chunkArgs(skill, "Install");
@@ -145,7 +145,7 @@ describe("reading a piece of a skill is one call, saved as one recipe", () => {
     assert.deepEqual((await genter.recipes.get(a.id)).intents, ["how do I install it", "setup steps for the service"]);
   });
 
-  it("S3 different pieces are different recipes", async () => {
+  it("S3 different pieces are different anchors", async () => {
     net();
     const { genter, skill, store, flush } = setup();
     const a = await genter.execute({ tool: SKILL_TOOLS.chunk, args: chunkArgs(skill, "Install") });
@@ -209,7 +209,7 @@ describe("files and scripts", () => {
 });
 
 describe("versions", () => {
-  it("S7 an update makes old recipes outdated; the ones whose piece survives are made again with their intents", async () => {
+  it("S7 an update makes old anchors outdated; the ones whose piece survives are made again with their intents", async () => {
     net();
     const { genter, h, skill, flush } = setup();
     const install = await genter.execute({ tool: SKILL_TOOLS.chunk, args: chunkArgs(skill, "Install"), task: "install it" });
@@ -218,7 +218,7 @@ describe("versions", () => {
     // Version 2: Rollback changes its text, a new section appears, Install is removed from the file list? (kept) -> Install stays.
     const next = h.put("sk1", FILES("Now with dry runs."));
     assert.notEqual(next.version, skill.version);
-    // The old call is now outdated: "not found", and the recipe goes gone.
+    // The old call is now outdated: "not found", and the anchor goes gone.
     const old = await genter.execute({ id: install.id });
     assert.equal(old.result.successful, false);
     assert.equal(old.recipe_status, "gone");
@@ -234,7 +234,7 @@ describe("versions", () => {
     assert.equal((await genter.skills.recipes({ skill: "sk1" })).length, 2);
   });
 
-  it("S8 a piece that no longer exists leaves a recipe that is gone, not deleted", async () => {
+  it("S8 a piece that no longer exists leaves an anchor that is gone, not deleted", async () => {
     net();
     const { genter, h, skill, flush } = setup();
     const rollback = await genter.execute({ tool: SKILL_TOOLS.chunk, args: chunkArgs(skill, "Rollback") });
@@ -246,7 +246,7 @@ describe("versions", () => {
     assert.equal((await genter.recipes.get(rollback.id)).status, "gone");
   });
 
-  it("S9 deleting a skill deletes its recipes", async () => {
+  it("S9 deleting a skill deletes its anchors", async () => {
     net();
     const { genter, h, skill, flush } = setup();
     const a = await genter.execute({ tool: SKILL_TOOLS.chunk, args: chunkArgs(skill, "Install") });
@@ -259,7 +259,7 @@ describe("versions", () => {
 });
 
 describe("search", () => {
-  it("S10 pieces of skills are found by meaning, with fixed args; a saved piece is offered once, as its recipe", async () => {
+  it("S10 pieces of skills are found by meaning, with fixed args; a saved piece is offered once, as its anchor", async () => {
     net();
     const { genter, skill, flush } = setup();
     const found = await genter.search({ query: "how to deploy and roll back", limit: 10 });
@@ -274,7 +274,7 @@ describe("search", () => {
     assert.ok(!again.some((f) => f.kind === "skill" && f.recipe_id === read.id));
   });
 
-  it("S12 within (a person limited to some projects): only those recipes, a piece only as its recipe there", async () => {
+  it("S12 within (a person limited to some projects): only those anchors, a piece only as its anchor there", async () => {
     net();
     const { genter, skill, flush } = setup();
     const install = await genter.execute({ tool: SKILL_TOOLS.chunk, args: chunkArgs(skill, "Install"), task: "install" });
