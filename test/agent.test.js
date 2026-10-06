@@ -912,6 +912,15 @@ describe("MCP raw recipes text", () => {
     assert.match(agentInstructions, /Optional goal/);
   });
 
+  it("goal, conversation_id and model are in the schema (a client only sends fields the schema lists) and all optional", () => {
+    const { input } = agentTools().GENTER_FIND;
+    const parsed = input.parse({ question: "q", goal: "g", conversation_id: "k3x9a2fq", model: "m" });
+    assert.deepEqual([parsed.goal, parsed.conversation_id, parsed.model], ["g", "k3x9a2fq", "m"]);
+    assert.equal(input.safeParse({ question: "q", conversation_id: "x".repeat(201) }).success, false);
+    assert.match(agentTools().GENTER_FIND.description, /conversation_id/);
+    assert.match(agentInstructions, /conversation_id/);
+  });
+
   it("skills picked by the goal come in their own section after the data, listed apart from the recipes", () => {
     const skill = { id: "rcp_s1", tool: "SKILL_READ_CHUNK", args: { skill: "docs-writing", chunk: "SKILL.md#intro" }, title: "docs-writing: intro", score: 0.8, data: { text: "Write short." } };
     const text = recipesResultText({ status: "done", direct: true, results: [result()], skills: [skill] });
