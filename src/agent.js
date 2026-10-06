@@ -13,6 +13,9 @@ import { logCost, usageFields } from "./cost.js";
 // Runs are stored encrypted: { id, blob }. Tool results are kept only as their summaries, never raw.
 //
 // mode "run": do the task. mode "find": read-only, only tools that read data run.
+// mode "recipes" (MCP GENTER_FIND): read-only, and the model writes no answer: it finds and runs the calls whose results
+// hold what was asked (saved recipes that fit, or new calls, which become recipes) and names their ids; the run ends with
+// those recipes' current raw results (`results`), for the caller's own model to answer from.
 // canExecute false: no tool runs at all (dashboard viewers); the agent answers from recipes and plans.
 // References: every knowledge chunk, recipe, call result and item of a list the model sees gets a number, the answer
 // cites them as [n], and a result lists the cited ones (refs.js): what each is, where it is (path, link, ids) and which
@@ -98,6 +101,7 @@ export function createAgent({
         const found = await genter.search({ query: input.query, limit: 6, apps: run.apps, toolkits: run.named, tools: true, connected: true });
         run.seen = new Set([...(run.seen ?? []), ...found.filter((f) => f.tool).slice(0, 4).map((f) => f.tool)]);
         for (const f of found) if (f.id && f.args) run.recipeArgs[f.id] = f.args;
+        for (const f of found) if (f.id && f.tool) (run.recipes ??= {})[f.id] ??= f.tool;
         const shown = found.map((f) => compactFound(f, recipeRef(run, f)));
         const hint = run.searches >= 2 ? "Pick the closest tool above and execute it now; do not search again." : undefined;
         return { content: JSON.stringify(hint ? { tools: shown, hint } : shown) };
@@ -175,6 +179,7 @@ export function createAgent({
         }
         // What the model can cite: the call's one result, or each item of a list (`_ref` on the item).
         const cited = ok && !empty && data != null && tool ? refsOfResult({ app: appOf(tool, run.apps), tool, args, data }, (r) => register(run, r)) : { data, ref: null, items: [] };
+        if (run.mode === "recipes" && ok && !empty && out.id) keepRaw(run, { id: out.id, from: input.id, tool, args, out, cited });
         // An empty search is not an answer yet: the words may be in another language than the data, or too narrow.
         const retry =
           empty && !run.retried
@@ -208,12 +213,20 @@ export function createAgent({
         const n = register(run, place);
         const out = await readFile({ run, place, account: input.account || undefined }).catch((e) => ({ error: e.message }));
         if (out.error) run.failures.read_file = (run.failures.read_file ?? 0) + 1;
-        run.steps.push({ tool: "read_file", from_recipe: null, recipe: null, ok: !out.error, summary: out.error ?? out.summary, saved: null });
-        onEvent({ type: "tool", tool: "read_file", ok: !out.error, summary: out.error ?? out.summary });
-        const { summary, ...shown } = out;
+        // mode "recipes": the read is a recipe like any call, and its result is kept to be handed over.
+        const { summary, saved: read, ...shown } = out;
+        const recipe = read ? { id: read.id, created: read.created, changed: read.changed } : null;
+        if (read) {
+          keepRaw(run, { id: read.id, tool: read.tool, args: read.args, out: read, cited: { data: read.data, ref: n, items: [] } });
+          run.recipes[read.id] = read.tool;
+          run.recipeArgs[read.id] = read.args;
+          (run.touched ??= {})[read.id] = { ...recipe, created: Boolean(run.touched?.[read.id]?.created || recipe.created), changed: Boolean(run.touched?.[read.id]?.changed || recipe.changed) };
+        }
+        run.steps.push({ tool: "read_file", from_recipe: null, recipe, ok: !out.error, summary: out.error ?? summary, saved: read?.id ?? null });
+        onEvent({ type: "tool", tool: "read_file", recipe, ok: !out.error, summary: out.error ?? summary });
         return {
-          content: JSON.stringify({ ref: n, ...shown, ...(out.error && { hint: "Check owner, repo and path (list the repository's files or the commit's files first)." }) }),
-          keep: JSON.stringify({ ref: n, ...(out.error ? { error: out.error } : { summary }), note: "the text is not stored; read_file again for it" }),
+          content: JSON.stringify({ ref: n, ...(read && { id: read.id }), ...shown, ...(out.error && { hint: "Check owner, repo and path (list the repository's files or the commit's files first)." }) }),
+          keep: JSON.stringify({ ref: n, ...(read && { id: read.id }), ...(out.error ? { error: out.error } : { summary }), note: "the text is not stored; read_file again for it" }),
         };
       }
       case "edit_file": {
@@ -303,6 +316,7 @@ export function createAgent({
     run.searches = 0;
     run.seen = new Set();
     run.touched = {}; // recipe id -> { id, created, changed } of this round
+    run.raw = {}; // mode "recipes": recipe id -> its raw result of this round (memory only, never stored)
     run.suggestions = [];
     run.failed = {}; // "<tool> <args>" -> error of a call that failed in this round
     run.failures = {}; // tool -> failed calls in this round
@@ -351,8 +365,10 @@ export function createAgent({
             result = { status: "failed", answer: `Nothing was written.${message.content?.trim() ? ` ${message.content.trim()}` : ""}` };
             break;
           }
-          // A model that ends without text after reading something: once, it is asked for the answer.
-          if (!message.content?.trim() && !lastNote && run.steps.length && !run.prompted && step < maxSteps - 1) {
+          // A model that ends without text after reading something: once, it is asked for the answer. In mode "recipes"
+          // no text is needed once a result is kept: the run hands over what it read.
+          const handsOver = run.mode === "recipes" && Object.keys(run.raw ?? {}).length > 0;
+          if (!message.content?.trim() && !lastNote && run.steps.length && !run.prompted && !handsOver && step < maxSteps - 1) {
             run.prompted = true;
             run.messages.push({ role: "user", content: ANSWER_NOW });
             continue;
@@ -361,8 +377,8 @@ export function createAgent({
           // came with references picked for no answer).
           const text = message.content?.trim() || lastNote;
           const did = run.steps.filter((s) => s.ok).map((s) => s.tool);
-          result = text
-            ? { status: "done", answer: text }
+          result = text || handsOver
+            ? { status: "done", answer: text ?? "" }
             : { status: "failed", answer: did.length ? `The agent ran ${[...new Set(did)].join(", ")} but gave no answer. Run it again.` : "The agent stopped without doing anything or answering." };
           break;
         }
@@ -386,6 +402,8 @@ export function createAgent({
         const pause = outs.find((o) => o.out.pause)?.out.pause;
         if (pause) result = pause;
       }
+      // Out of steps in mode "recipes" with results kept: they are handed over, no answer is written.
+      if (!result && run.mode === "recipes" && Object.keys(run.raw ?? {}).length) result = { status: "done", answer: "" };
       // Out of steps: one more call with no tools, so the user gets an answer from what was found.
       if (!result) {
         run.messages.push({ role: "user", content: "No more tool calls. Answer now from what you found; say briefly what is missing." });
@@ -399,12 +417,23 @@ export function createAgent({
     } catch (error) {
       result = { status: "failed", answer: error.message };
     }
-    // The references the answer used, with how to write at each.
-    if (result.status === "done") result.references = await withWrites(citedRefs(result.answer, run.refs, { round: run.round }));
+    // Mode "recipes": the recipes the model named, with their current raw results; what it read is never lost to a failed
+    // last step (a reply that was its reasoning, the model failing at the end).
+    if (run.mode === "recipes") {
+      result.results = await chosenResults(run, result.answer).catch(() => []);
+      if (result.results.length && result.status === "failed") result.status = "done";
+      // Ids of calls that held nothing are no note for the user.
+      if (!result.results.length && result.status === "done" && !String(result.answer ?? "").replace(RECIPE_ID, "").trim()) result.answer = "Nothing was found: no call held anything for this.";
+    }
+    // The references the answer used (in mode "recipes": those of the results handed over), with how to write at each.
+    if (result.status === "done") {
+      const used = run.mode === "recipes" ? refsOfResults(run, result.results) : citedRefs(result.answer, run.refs, { round: run.round });
+      result.references = await withWrites(used);
+    }
     run.status = result.status;
     run.updated_at = new Date().toISOString();
     // Stored without raw tool results: each one is replaced by its summary.
-    const stored = { ...run, timing: undefined, seen: undefined, lists: undefined, messages: run.messages.map(({ keep, ...m }) => (keep ? { ...m, content: keep } : m)) };
+    const stored = { ...run, timing: undefined, seen: undefined, lists: undefined, raw: undefined, messages: run.messages.map(({ keep, ...m }) => (keep ? { ...m, content: keep } : m)) };
     await runs.put({ id: run.id, blob: seal(stored) });
     const out = {
       run_id: run.id,
@@ -633,6 +662,42 @@ export function createAgent({
     return { content: JSON.stringify({ ...counts, ...(failures.length && { failures }), note }) };
   }
 
+  // Mode "recipes": what the run hands over. The recipes the model named by id in its last message, best first (an id it
+  // ran with other args stands for the recipe that call made); none named: every recipe this round read that held
+  // something. A named recipe not run in this round (one from the first message, or read in an earlier round) is run now,
+  // so every result is current; one this round ran that failed or held nothing is not run again. At most MAX_RESULTS.
+  async function chosenResults(run, text) {
+    const kept = Object.values(run.raw ?? {});
+    const of = (id) => run.raw?.[id] ?? kept.find((r) => r.from === id);
+    const ran = new Set(run.steps.flatMap((s) => [s.saved, s.from_recipe]).filter(Boolean));
+    const named = [...new Set(String(text ?? "").match(RECIPE_ID) ?? [])].filter((id) => of(id) || (run.recipes?.[id] && !ran.has(id)));
+    const out = [];
+    for (const id of named) {
+      if (out.length >= MAX_RESULTS) break;
+      const r = of(id) ?? (await readNow(run, id));
+      if (r && !out.includes(r)) out.push(r);
+    }
+    return out.length ? out : kept.slice(0, MAX_RESULTS);
+  }
+
+  // A saved recipe run for its current result, read-only. null when it may not run, fails or holds nothing.
+  async function readNow(run, id) {
+    const tool = run.recipes?.[id];
+    if (!canExecute || !tool || !isReadOnly(tool)) return null;
+    const out = await executeOn(run, { id, tool }).catch(() => null);
+    if (!out || out.result?.successful === false) return null;
+    const data = out.result?.data ?? null;
+    if (data == null || isEmpty(data)) return null;
+    const args = { ...run.recipeArgs?.[id] };
+    const saved = out.id ?? id;
+    const recipe = { id: saved, created: Boolean(out.created), changed: Boolean(out.changed) };
+    (run.touched ??= {})[saved] = recipe;
+    run.steps.push({ tool, from_recipe: id, recipe, ok: true, summary: null, saved });
+    onEvent({ type: "tool", tool, recipe, ok: true, summary: null });
+    const cited = refsOfResult({ app: appOf(tool, run.apps), tool, args, data }, (r) => register(run, r));
+    return keepRaw(run, { id: saved, from: id, tool, args, out, cited });
+  }
+
   // A call on the account asked for, else the one this run already found the app's data on, else the default.
   // An app connected several times (two GitHub accounts): what the default cannot see (another owner's repository:
   // 404, no access) is tried on the app's other connections. The one that works is kept for the app for the rest of
@@ -666,17 +731,22 @@ export function createAgent({
   }
 
   // A file's text for the model (cut at MAX_FILE_TEXT), or a folder's entries. Not saved as a recipe: a file's
-  // content is not a call to repeat, and the reference it gets says where it is.
+  // content is not a call to repeat, and the reference it gets says where it is. Except in mode "recipes", whose run
+  // hands over recipes: there the read is saved like any call, and `saved` carries the recipe and the raw result.
   async function readFile({ run, place, account }) {
     const editor = fileEditor(place);
     if (!editor) throw new Error(`[${place.n ?? "?"}] is a ${place.app} ${place.kind}, not a file`);
-    const read = await executeOn(run ?? {}, { ...editor.read, remember: false }, account);
+    const remember = run?.mode === "recipes";
+    const read = await executeOn(run ?? {}, { ...editor.read, ...(!remember && { remember: false }) }, account);
     if (read.result?.successful === false) throw new Error(`Could not read ${refLabel(place)}: ${errorText(read.result.error)}`);
     const data = read.result?.data;
+    const saved = remember && read.id
+      ? { id: read.id, tool: editor.read.tool, args: editor.read.args, data: data ?? null, created: Boolean(read.created), changed: Boolean(read.changed), account: read.account, instructions: read.instructions }
+      : undefined;
     const entries = [data?.content, data?.items, data].find(Array.isArray);
     if (entries) {
       const names = entries.map((e) => `${e.path ?? e.name}${e.type === "dir" ? "/" : ""}`);
-      return { folder: names.slice(0, 300), summary: `${refLabel(place)}: a folder of ${names.length}`, ...(read.account && { account: read.account }) };
+      return { folder: names.slice(0, 300), summary: `${refLabel(place)}: a folder of ${names.length}`, ...(read.account && { account: read.account }), saved };
     }
     const { text } = editor.file(data);
     const lines = text.split("\n").length;
@@ -686,6 +756,7 @@ export function createAgent({
       text: text.length > MAX_FILE_TEXT ? `${text.slice(0, MAX_FILE_TEXT)}\n… (truncated: ${lines} lines in all)` : text,
       summary: `read ${refLabel(place)} (${lines} lines)`,
       ...(read.account && { account: read.account }),
+      saved,
     };
   }
 
@@ -760,6 +831,37 @@ function keepList(run, id, data) {
   (run.lists ??= {})[id] = { id: shape.id, items: flat };
   return items.length;
 }
+
+// Mode "recipes": a recipe's current result as the call returned it (a list with `_ref` on its items), kept for this
+// round in memory only, never stored, with the references it got: { id, tool, args, from?, account?, created, changed,
+// instructions?, data, refs }. from: the recipe the model ran it as (with other args it is another recipe).
+function keepRaw(run, { id, from, tool, args, out, cited }) {
+  const entry = {
+    id,
+    tool: tool ?? null,
+    args: args ?? {},
+    ...(from && from !== id && { from }),
+    ...(out.account && { account: out.account }),
+    created: Boolean(out.created),
+    changed: Boolean(out.changed),
+    ...(out.instructions && { instructions: out.instructions }),
+    data: cited.data ?? null,
+    refs: [cited.ref, ...(cited.items ?? [])].filter((n) => n != null),
+  };
+  (run.raw ??= {})[id] = entry;
+  return entry;
+}
+
+// The references of the results a "recipes" run hands over, in their order (each result, then the items it listed).
+function refsOfResults(run, results, max = MAX_RESULT_REFS) {
+  const byN = new Map((run.refs ?? []).map((r) => [r.n, r]));
+  const ns = [...new Set(results.flatMap((r) => r.refs ?? []))];
+  return ns.map((n) => byN.get(n)).filter(Boolean).slice(0, max);
+}
+
+const RECIPE_ID = /\brcp_\w+/g;
+const MAX_RESULTS = 8; // recipes a "recipes" run hands over
+const MAX_RESULT_REFS = 40;
 
 // A folder among listed items: a tree or a directory, by its type or mime type.
 const isContainer = (item) => /^(tree|dir|directory|folder)$|\.folder$/i.test(String(item?.type ?? item?.mimeType ?? item?.mime_type ?? item?.kind ?? ""));
@@ -987,7 +1089,7 @@ const NOT_AN_ANSWER =
 // A tool that keeps failing is stopped after this many failures in one round, so a run never spins on it.
 const MAX_TOOL_FAILURES = 3;
 const MAX_SEARCHES = 3;
-const READ_ONLY_MODES = ["find", "prepare", "event"];
+const READ_ONLY_MODES = ["find", "recipes", "prepare", "event"];
 const MAX_MANY = 100;
 const MAX_EACH = 300; // calls one read_each makes: an area bigger than that is read in part, and the note says how much is left
 const MAX_LISTED = 2000;
@@ -1016,6 +1118,12 @@ function briefing({ task, mode, account, found, connected, canExecute, english, 
 
 const MODE_NOTES = {
   find: "Mode: find (read-only: answer the question; only execute tools that read data).",
+  recipes:
+    "Mode: recipes (read-only; only execute tools that read data). Write NO answer for the user: they get the raw results of the recipes you name and read them themselves. " +
+    "Your job is to find and run the calls whose current results hold exactly what the task asks for, so each is saved as a recipe: execute the saved recipes that fit by id (override only the args that differ), " +
+    "otherwise the read tools that return that data, with the filters, dates and names of the task (read a repository file with read_file). Prefer one call that returns what is asked over broad listings; " +
+    "a call made only to find a name or an id is not one to name. Then, instead of the final answer the system prompt asks for, end with ONLY the ids of those recipes (the id of each execute or read_file result), " +
+    "most relevant first, one per line, nothing else. If no call holds anything for the task, end with one line saying what you checked.",
   run: "Mode: run (do the task).",
   prepare:
     "Mode: prepare. The task names an area (a repository, a folder, a calendar, a channel, a list) and the args that point at it. Your only job is to read ALL of it, one recipe per item: " +
@@ -1201,6 +1309,6 @@ const TOOLS = [
 
 // Which tools a mode offers: read_many and read_each only prepare an area, recheck / forget only answer an event.
 const MODE_ONLY = { read_many: ["prepare"], read_each: ["prepare"], recheck_recipe: ["event"], forget_recipe: ["event"] };
-const TOOLSETS = Object.fromEntries(["run", "find", "prepare", "event"].map((mode) => [mode, TOOLS.filter((t) => !MODE_ONLY[t.function.name] || MODE_ONLY[t.function.name].includes(mode))]));
+const TOOLSETS = Object.fromEntries(["run", "find", "recipes", "prepare", "event"].map((mode) => [mode, TOOLS.filter((t) => !MODE_ONLY[t.function.name] || MODE_ONLY[t.function.name].includes(mode))]));
 const toolsFor = (mode) => TOOLSETS[mode] ?? TOOLSETS.run;
 const TOOL_NAMES = new Set(TOOLS.map((t) => t.function.name));

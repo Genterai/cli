@@ -34,8 +34,9 @@ upserts the same Recipe; two connected accounts never share one. Dates in args s
 
 A result that is a page or cut off (next-page token, `has_more`, `truncated`) is marked `partial`; its summary only claims
 what was returned. Retrieval embeds the result summary (with its keywords: the app, the kind of thing, synonyms and names, in English and
-in the data's language, so "почта" finds "Unread emails from today") and items, never the tool's description. A recipe's summary says
-which call to make, not the current value: the agent always executes again.
+in the data's language, so "почта" finds "Unread emails from today") and items, never the tool's description. A request that names a
+site the workspace reads ("Evallens" for evallens.io) gets that site's closest pages first, up to half the places, whatever their
+score by meaning; the tool search still runs. A recipe's summary says which call to make, not the current value: the agent always executes again.
 
 Recipe record (stored encrypted, raw results never): `{id, tool, args, scope:{account, toolkit, area?}, title, short, summary, items,
 keywords, digest, partial, source:{app, path[], url}, created_at, updated_at, checked_at, status: fresh|stale|gone|denied,
@@ -92,11 +93,21 @@ import { createAgent } from "genter-cli/agent";
 import { agentTools, agentInstructions, agentResultText } from "genter-cli/tools"; // MCP definitions
 
 const agent = createAgent({ genter, openrouterApiKey, secret, userId, runs }); // runs: get(id), put({id, blob})
-// modes: "run", "find" (read-only), "prepare" (list an area, read every item with read_each / read_many, finish with counts),
-// "event" (task text carries the event and the affected recipes: recheck_recipe / forget_recipe)
+// modes: "run", "find" (read-only), "recipes" (read-only, no written answer: finds and runs the calls that hold what was
+// asked, and the result's `results` are those recipes' raw results), "prepare" (list an area, read every item with
+// read_each / read_many, finish with counts), "event" (task text carries the event and the affected recipes: recheck_recipe / forget_recipe)
 const out = await agent.start({ task: "my meetings tomorrow", mode: "find" });
 await agent.send({ run_id: out.run_id, message: "only the work calendar" });
 ```
+
+Mode `recipes` is what the hosted MCP server's `GENTER_FIND` runs when no saved recipe fits the question well enough to
+run it directly: the model writes no answer. It runs the saved recipes that fit or finds new calls (each success is a
+recipe, `read_file` included), and ends with the ids of the ones whose results hold the answer; the result carries them as
+`results: [{ id, tool, args, from?, account?, created, changed, instructions?, data }]` (at most 8, the data as the call
+returned it, items with `_ref`; kept in memory only, never in the stored run), and `references` are theirs. A named recipe
+not run in this round is run then. None named: every result of the round that held something. `recipesResultText(out,
+{ write, instructions })` (`genter-cli/tools`) is the MCP text of it: each result under a line naming its call (base64 file
+contents decoded), References, a JSON line.
 
 `instructions` (optional) is what a workspace admin wrote for this person: tone, language, defaults, what to stay away
 from. It goes to the model as a second system message in every call, after the fixed prompt (which stays cacheable).

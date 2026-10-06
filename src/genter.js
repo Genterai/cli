@@ -5,7 +5,7 @@ import { addMcpServer, isCustomToolkit, mcpUrl } from "./mcp.js";
 import { areaOf, canonicalArgs, canonicalJson, classifyFailure, contentHash, isPartial, normalizeLegacy, publicRecipe, recipeId, sourceOf } from "./recipe.js";
 import { fill, inferList, pick } from "./shape.js";
 import { addIntent, chunkCall, fileCall, isSkillTool, LIMITS as SKILL_LIMITS, SCRIPT_NOTE, SKILL_TOOLS } from "./skills.js";
-import { crawl, forgetPage, readPage, siteUrl, underSite } from "./web.js";
+import { crawl, forgetPage, namesSite, readPage, siteUrl, underSite } from "./web.js";
 
 // Genter = Composio + recipes of past calls.
 // A Recipe is ONE successful tool call with fixed args plus knowledge about its actual result (see recipe.js and
@@ -149,6 +149,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
                   "A user searches their apps (email, chats, docs, issues) with this request. Translate it for searching. " +
                   'Reply with JSON only: {"en": "<the request in English>", "terms": ["<key search terms in the original language>", ' +
                   '"<the same terms in English, plus 1-2 close English synonyms>"]}. Keep names, emails, ids and quoted text as they are. ' +
+                  "A name (a person, company, product, project, site) is a term of its own. " +
                   `Terms are short phrases that would appear in the data, not the whole request.\n\n${query}`,
               },
             ],
@@ -158,7 +159,9 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         )
           .then((text) => {
             const out = JSON.parse(text);
-            return { en: String(out.en ?? "").trim() || null, terms: (out.terms ?? []).map(String).filter(Boolean).slice(0, 10) };
+            // One term per string: the model often joins several ("product owner code, owner code"), which no text contains.
+            const terms = (out.terms ?? []).flatMap((t) => String(t).split(/\s*[,;|]\s*/)).map((t) => t.trim()).filter(Boolean);
+            return { en: String(out.en ?? "").trim() || null, terms: [...new Map(terms.map((t) => [t.toLowerCase(), t])).values()].slice(0, 12) };
           })
           .catch(() => null),
       );
@@ -464,48 +467,17 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     return load(id);
   }
 
-  // The description of a skill's piece or file is made from the text itself, with no model: where it is, its start, the
-  // words of its headings as keywords. One embedding call. A skill recipe is never about the whole skill.
+  // The description of a skill's piece or file is made from the text itself, with no model (skillDescription, already in the
+  // record from its first save); here only its vector is added. A skill recipe is never about the whole skill.
   const rememberSkill = (id, digest, data) => withCost({ entity_type: "recipe", entity_id: id }, () => rememberSkillInner(id, digest, data));
   async function rememberSkillInner(id, digest, data) {
     let record = await load(id);
     if (!record || record.digest !== digest) return record;
-    const name = data.skill?.name ?? "Skill";
-    const flat = (t, n) => String(t ?? "").replace(/\s+/g, " ").trim().slice(0, n);
-    let title;
-    let summary;
-    let path;
-    let keywords;
-    if (data.section) {
-      path = [name, ...data.section.headings];
-      title = flat(`${name}: ${data.section.headings.at(-1)}`, 100);
-      summary = flat(`Section "${data.section.headings.join(" › ")}" of the skill "${name}". ${flat(data.text, 700)}`, 1200);
-      keywords = [name, ...data.section.headings, "skill", "instructions", data.section.path];
-    } else {
-      path = [name, data.path];
-      title = flat(`${name}: ${data.path}`, 100);
-      const what = data.executable_code ? "Executable code (Genter does not run it)" : data.kind === "artifact" ? "File" : "File";
-      summary = flat(`${what} "${data.path}" of the skill "${name}" (${data.mime}, ${data.size} bytes). ${data.text != null ? flat(data.text, 600) : "Given as a link: too large or binary."}`, 1200);
-      keywords = [name, data.path, data.kind, "skill", data.executable_code ? "script" : "file"];
-    }
-    keywords = [...new Set(keywords.map((k) => flat(k, 60).toLowerCase()).filter(Boolean))].slice(0, 30);
-    const named = { summary, keywords };
+    const named = skillDescription(data);
     const vectors = openrouterApiKey ? await embedMany([summaryText(named)], "recipe_embed").catch(() => []) : [];
     record = await load(id);
     if (!record || record.digest !== digest) return record;
-    record = {
-      ...record,
-      scope: { ...record.scope, toolkit: "skill" },
-      partial: false,
-      source: { app: "Skill", path: path.slice(0, 6), url: null },
-      title,
-      short: flat(data.section ? flat(data.text, 140) : summary, 140),
-      summary,
-      items: data.section ? [data.section.headings.join(" › ")] : [data.path],
-      keywords,
-      ...(vectors[0] && { summaryEmbedding: vectors[0] }),
-      trigger: { active: false, spec: null, id: null, recommended: true }, // a skill's content changes only by an update
-    };
+    record = { ...record, scope: { ...record.scope, toolkit: "skill" }, ...named, ...(vectors[0] && { summaryEmbedding: vectors[0] }) };
     await save(record);
     return load(id);
   }
@@ -637,29 +609,39 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       if (vector) askedVectors.set(query, vector);
       if (askedVectors.size > MAX_ASKED) askedVectors.delete(askedVectors.keys().next().value);
       const terms = (english?.terms ?? []).map((t) => t.toLowerCase().trim()).filter((t) => t.length >= 4);
-      const memories = vector
+      const scored = vector
         ? (await everyRecipe())
             .filter((r) => r.status === "fresh" && !r.disabled && r.summaryEmbedding && (!allow || allow(r)))
             .map((r) => ({ r, ...resultMatch(r, vector, terms) }))
-            .filter(({ score }) => score >= minScore)
-            .sort((a, b) => b.score - a.score)
-            .slice(0, limit)
-            .map(({ r, score, matched }) => ({
-              id: r.id,
-              tool: r.tool,
-              args: r.args,
-              title: r.title,
-              short: r.short,
-              summary: r.summary,
-              ...(r.keywords && { keywords: r.keywords }),
-              ...(matched.length && { matched }),
-              score: Number(score.toFixed(2)),
-              status: r.status,
-              updated_at: r.updated_at,
-              checked_at: r.checked_at,
-              trigger: { active: Boolean(r.trigger?.active) },
-            }))
         : [];
+      // A site the request names ("Evallens" for evallens.io) is where to look: its closest pages come first, up to half
+      // the places, however far the request is from them by meaning (a typo, another language). "Код продуктовнер в
+      // Evallens?" got Google Drive files while the site's pages were saved. Naming a site does not stop the tool search.
+      const named = scored
+        .filter(({ r }) => r.tool === "WEBSITE_READ_PAGE" && namesSite(text, r.args?.url))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, Math.ceil(limit / 2));
+      for (const m of named) [m.closeness, m.score] = [m.score, Math.max(m.score, strongScore)];
+      const onSite = new Set(named.map((m) => m.r.id));
+      const memories = scored
+        .filter(({ score }) => score >= minScore)
+        .sort((a, b) => b.score - a.score || (b.closeness ?? b.score) - (a.closeness ?? a.score))
+        .slice(0, limit)
+        .map(({ r, score, matched }) => ({
+          id: r.id,
+          tool: r.tool,
+          args: r.args,
+          title: r.title,
+          short: r.short,
+          summary: r.summary,
+          ...(r.keywords && { keywords: r.keywords }),
+          ...(matched.length && { matched }),
+          score: Number(score.toFixed(2)),
+          status: r.status,
+          updated_at: r.updated_at,
+          checked_at: r.checked_at,
+          trigger: { active: Boolean(r.trigger?.active) },
+        }));
       // Skills: pieces found by meaning next to the saved recipes (a piece that is already a recipe is not offered twice).
       if (skills && vector) {
         const have = new Set(memories.map((m) => m.id));
@@ -668,7 +650,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         memories.sort((a, b) => b.score - a.score);
         memories.splice(limit);
       }
-      if (!withTools && memories.some((m) => m.score >= strongScore)) return memories;
+      if (!withTools && memories.some((m) => m.score >= strongScore && !onSite.has(m.id))) return memories;
 
       const search = english?.en ?? query;
       const ofApps = (t) => !only || only.has(String(t.toolkit?.slug ?? "").toLowerCase());
@@ -778,6 +760,9 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       const record = { ...base, scope: withArea(base.scope, area), digest, status: "fresh", updated_at: at, checked_at: at };
       // What it said before this change, so a notification can tell what changed (summaries only, never the raw result).
       if (existing?.summary) record.previous = previousOf(existing);
+      // A skill's piece says what it is with no model: its title, place and text are there from the first save, so a list
+      // never shows it untitled while its vector is made.
+      if (isSkillTool(tool)) Object.assign(record, skillDescription(result.data), { scope: { ...record.scope, toolkit: "skill" } });
       if (asked) record.queryEmbeddings = addQuery(base.queryEmbeddings, asked, at);
       if (isSkillTool(tool) && task) record.intents = intents(base);
       // The call as it ran: args kept as written (placeholders included), in canonical form so equal calls look equal.
@@ -939,7 +924,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       await Promise.all([...pending]);
     },
 
-    // Skills (skills.js). The recipes of skills stay when a skill goes; they are tied to a version.
+    // Skills (skills.js). The recipes of a skill are tied to a version, and go when the skill goes.
     skills: {
       // The recipes of a skill (any status, newest first), with their intents.
       async recipes({ skill }) {
@@ -984,13 +969,12 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         }
         return { carried, gone };
       },
-      // The skill is deleted: its recipes are not deleted, they stay (they cannot be read until it comes back).
+      // The skill is deleted: its recipes of every version are deleted with it (a recipe goes with its source). { count }
       async removed({ skill }) {
         let count = 0;
         for (const r of await everyRecipe()) {
-          if (!isSkillTool(r.tool) || r.args?.skill !== skill || r.status === "gone") continue;
-          await save({ ...r, status: "gone", checked_at: now() });
-          count++;
+          if (!isSkillTool(r.tool) || r.args?.skill !== skill) continue;
+          if ((await api.recipes.remove(r.id)).removed) count++;
         }
         return { count };
       },
@@ -1165,6 +1149,40 @@ function decodeBase64(key, value) {
     return { ...value, content: Buffer.from(value.content, "base64").toString("utf8") };
   }
   return value;
+}
+
+// What a skill's piece or file is, from its own text (SKILL_READ_CHUNK / SKILL_GET_FILE results), with no model: where it is,
+// its start, the words of its headings as keywords. Never triggered: a skill's content changes only by an update.
+function skillDescription(data) {
+  const name = data?.skill?.name ?? "Skill";
+  const flat = (t, n) => String(t ?? "").replace(/\s+/g, " ").trim().slice(0, n);
+  let title;
+  let summary;
+  let path;
+  let keywords;
+  if (data?.section) {
+    path = [name, ...data.section.headings];
+    title = flat(`${name}: ${data.section.headings.at(-1)}`, 100);
+    summary = flat(`Section "${data.section.headings.join(" › ")}" of the skill "${name}". ${flat(data.text, 700)}`, 1200);
+    keywords = [name, ...data.section.headings, "skill", "instructions", data.section.path];
+  } else {
+    path = [name, data?.path];
+    title = flat(`${name}: ${data?.path}`, 100);
+    const what = data?.executable_code ? "Executable code (Genter does not run it)" : "File";
+    summary = flat(`${what} "${data?.path}" of the skill "${name}" (${data?.mime}, ${data?.size} bytes). ${data?.text != null ? flat(data.text, 600) : "Given as a link: too large or binary."}`, 1200);
+    keywords = [name, data?.path, data?.kind, "skill", data?.executable_code ? "script" : "file"];
+  }
+  keywords = [...new Set(keywords.map((k) => flat(k, 60).toLowerCase()).filter(Boolean))].slice(0, 30);
+  return {
+    partial: false,
+    source: { app: "Skill", path: path.filter(Boolean).slice(0, 6), url: null },
+    title,
+    short: flat(data?.section ? flat(data.text, 140) : summary, 140),
+    summary,
+    items: data?.section ? [data.section.headings.join(" › ")] : [data?.path].filter(Boolean),
+    keywords,
+    trigger: { active: false, spec: null, id: null, recommended: true },
+  };
 }
 
 // One line per item of a list result: its title and when, e.g. "Уборка (2026-10-08 13:00)".

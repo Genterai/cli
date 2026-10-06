@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import { createAgent } from "../src/agent.js";
 import { cipher } from "../src/genter.js";
-import { agentResultText, agentTools } from "../src/tools.js";
+import { agentResultText, agentTools, readable, recipesResultText } from "../src/tools.js";
 import { answer, briefingOf, call, catalogues, fakeGenter, fakeModel, lastOf, memoryRuns } from "./helpers.js";
 
 let model;
@@ -702,6 +702,170 @@ describe("Recipes in the agent", () => {
     assert.deepEqual(out.steps.find((s) => s.tool === "recheck_recipe").recipe, { id: "rcp_a_changed", created: false, changed: true });
     assert.deepEqual(model.requests[0].tools.map((t) => t.function.name).filter((n) => ["recheck_recipe", "forget_recipe"].includes(n)), ["recheck_recipe", "forget_recipe"]);
     assert.match(briefingOf(model.requests[0]), /Mode: event/);
+  });
+});
+
+describe("Mode recipes (MCP GENTER_FIND): the run hands over raw results of recipes, no written answer", () => {
+  const MAIL = { messages: [{ id: "m1", subject: "Contract draft", from: "anna@x.com" }, { id: "m2", subject: "Re: contract", from: "anna@x.com", snippet: "Please sign by Friday" }] };
+  const results = { GMAIL_FETCH_EMAILS: MAIL, GITHUB_LIST_REPOSITORIES: [{ name: "genter-cli" }], GITHUB_LIST_COMMITS: [{ sha: "a1", message: "Fix paging" }], GMAIL_SEND_EMAIL: { id: "sent" } };
+
+  it("M1 the calls the model names come back as they came (items with _ref), its words do not; nothing raw is stored", async () => {
+    const runs = memoryRuns();
+    const genter = fakeGenter({ connected: ["gmail"], results });
+    model = fakeModel([call("execute", { tool: "GMAIL_FETCH_EMAILS", args: { query: "from:anna contract" } }), answer("rcp_1")]);
+    const out = await agentWith(genter, { runs }).start({ task: "what did Anna write about the contract?", mode: "recipes" });
+    assert.equal(out.status, "done");
+    assert.equal(out.results.length, 1);
+    const [r] = out.results;
+    assert.equal(r.id, "rcp_1");
+    assert.equal(r.tool, "GMAIL_FETCH_EMAILS");
+    assert.deepEqual(r.args, { query: "from:anna contract" });
+    assert.deepEqual(r.data.messages.map((m) => m.subject), ["Contract draft", "Re: contract"]);
+    assert.deepEqual(r.data.messages.map((m) => m._ref), [1, 2]);
+    assert.deepEqual(out.references.map((x) => x.n), [1, 2]);
+    assert.match(briefingOf(model.requests[0]), /Mode: recipes/);
+    assert.match(briefingOf(model.requests[0]), /Write NO answer/);
+    const stored = JSON.stringify(cipher("s:u:runs").open(runs.rows.get(out.run_id).blob));
+    assert.doesNotMatch(stored, /sign by Friday/);
+    assert.equal(r.data.messages[1].snippet, "Please sign by Friday");
+  });
+
+  it("M2 a call made only to find a name is left out when the model names the one that answers", async () => {
+    const genter = fakeGenter({ connected: ["github"], results });
+    model = fakeModel([
+      call("execute", { tool: "GITHUB_LIST_REPOSITORIES", args: {} }),
+      call("execute", { tool: "GITHUB_LIST_COMMITS", args: { owner: "o", repo: "genter-cli" } }),
+      answer("rcp_2"),
+    ]);
+    const out = await agentWith(genter).start({ task: "recent commits of genter-cli", mode: "recipes" });
+    assert.deepEqual(out.results.map((r) => r.tool), ["GITHUB_LIST_COMMITS"]);
+    assert.deepEqual(out.saved.map((s) => s.id), ["rcp_1", "rcp_2"]); // both are recipes all the same
+  });
+
+  it("M3 no ids named (a model that ends with no text): every result of the round that held something, empty ones left out", async () => {
+    const genter = fakeGenter({ connected: ["github", "gmail"], results: { ...results, GMAIL_LIST_DRAFTS: { drafts: [] } } });
+    model = fakeModel([
+      { content: null, tool_calls: [...call("execute", { tool: "GITHUB_LIST_COMMITS", args: { owner: "o", repo: "r" } }).tool_calls, ...call("execute", { tool: "GMAIL_LIST_DRAFTS", args: {} }).tool_calls] },
+      answer(""),
+    ]);
+    const out = await agentWith(genter).start({ task: "what changed", mode: "recipes" });
+    assert.equal(out.status, "done");
+    assert.deepEqual(out.results.map((r) => r.tool), ["GITHUB_LIST_COMMITS"]);
+    assert.equal(model.requests.length, 2); // not asked again for an answer
+  });
+
+  it("M4 a saved recipe the model names without running it is run now, so its result is current", async () => {
+    const genter = fakeGenter({ connected: ["github"], recipes: [COMMITS], results });
+    model = fakeModel([answer("rcp_commits")]);
+    const out = await agentWith(genter).start({ task: "recent commits", mode: "recipes" });
+    assert.deepEqual(genter.executed.map((e) => [e.id, e.tool]), [["rcp_commits", "GITHUB_LIST_COMMITS"]]);
+    assert.equal(out.results.length, 1);
+    assert.equal(out.results[0].from, "rcp_commits");
+    assert.deepEqual(out.results[0].data.map((c) => c.sha), ["a1"]);
+  });
+
+  it("M5 read-only: a write is refused; nothing found: the model's one line comes back, with no results", async () => {
+    const genter = fakeGenter({ connected: ["gmail"], results });
+    model = fakeModel([call("execute", { tool: "GMAIL_SEND_EMAIL", args: { to: "a@x.com" } }), answer("Checked Gmail: nothing about it.")]);
+    const out = await agentWith(genter).start({ task: "email anna", mode: "recipes" });
+    assert.equal(genter.executed.length, 0);
+    assert.deepEqual(out.results, []);
+    assert.equal(out.answer, "Checked Gmail: nothing about it.");
+    const text = recipesResultText(out);
+    assert.match(text, /^Checked Gmail: nothing about it\./);
+    assert.deepEqual(JSON.parse(text.slice(text.lastIndexOf("\n") + 1)).recipes, []);
+  });
+
+  it("M6 read_file is saved as a recipe here, and the file comes back decoded", async () => {
+    const text = "export const a = 1;\n";
+    const genter = fakeGenter({ connected: ["github"], results: { GITHUB_GET_REPOSITORY_CONTENT: ({ path }) => ({ content: { path, sha: "s1", content: Buffer.from(text).toString("base64"), encoding: "base64" } }) } });
+    model = fakeModel([
+      call("read_file", { owner: "o", repo: "r", path: "src/a.js" }),
+      (body) => {
+        assert.equal(JSON.parse(lastOf(body, "tool")).id, "rcp_1");
+        return answer("rcp_1");
+      },
+    ]);
+    const out = await agentWith(genter).start({ task: "read src/a.js of o/r", mode: "recipes" });
+    assert.equal(genter.executed[0].remember, undefined); // saved, unlike in a find
+    assert.deepEqual(out.results.map((r) => r.id), ["rcp_1"]);
+    assert.deepEqual(out.saved, [{ id: "rcp_1", created: true, changed: false }]);
+    assert.equal(readable(out.results[0].data).content.content, text);
+    assert.match(recipesResultText(out), /"content":"export const a = 1;\\n"/);
+  });
+
+  it("M7 the model failing at the end loses nothing that was read", async () => {
+    const genter = fakeGenter({ connected: ["github"], results });
+    model = fakeModel([call("execute", { tool: "GITHUB_LIST_COMMITS", args: { owner: "o", repo: "r" } })]); // the second call throws
+    const out = await agentWith(genter).start({ task: "recent commits", mode: "recipes" });
+    assert.equal(out.status, "done");
+    assert.deepEqual(out.results.map((r) => r.id), ["rcp_1"]);
+  });
+
+  it("M9 a named recipe that failed in this round is not run again", async () => {
+    const genter = fakeGenter({ connected: ["github"], recipes: [COMMITS], results: {} });
+    model = fakeModel([call("execute", { id: "rcp_commits" }), answer("rcp_commits")]);
+    const out = await agentWith(genter).start({ task: "recent commits", mode: "recipes" });
+    assert.equal(genter.executed.length, 1);
+    assert.deepEqual(out.results, []);
+    assert.equal(out.answer, "Nothing was found: no call held anything for this.");
+  });
+
+  it("M8 a continued run hands over that round's results too", async () => {
+    const genter = fakeGenter({ connected: ["github", "gmail"], results });
+    model = fakeModel([call("execute", { tool: "GITHUB_LIST_COMMITS", args: { owner: "o", repo: "r" } }), answer("rcp_1"), call("execute", { tool: "GMAIL_FETCH_EMAILS", args: {} }), answer("rcp_2")]);
+    const agent = agentWith(genter);
+    const first = await agent.start({ task: "recent commits", mode: "recipes" });
+    const next = await agent.send({ run_id: first.run_id, message: "and my emails" });
+    assert.deepEqual(next.results.map((r) => r.tool), ["GMAIL_FETCH_EMAILS"]);
+  });
+});
+
+describe("MCP raw recipes text", () => {
+  const result = (extra = {}) => ({ id: "rcp_1", tool: "GMAIL_FETCH_EMAILS", args: { query: "from:anna" }, data: { messages: [{ id: "m1" }] }, created: true, changed: false, ...extra });
+
+  it("each result under a line naming its call, then the JSON line with the recipes in that order", () => {
+    const text = recipesResultText({ run_id: "r1", status: "done", answer: "rcp_1", results: [result({ account: "work" }), result({ id: "rcp_2", tool: "GITHUB_LIST_COMMITS", args: {}, data: [], created: false, title: "Commits" })], credits: 2 });
+    const parts = text.split("\n\n");
+    assert.equal(parts[0], 'Recipe 1: rcp_1 · GMAIL_FETCH_EMAILS {"query":"from:anna"} (account work)\n{"messages":[{"id":"m1"}]}');
+    assert.equal(parts[1], "Recipe 2: rcp_2 · GITHUB_LIST_COMMITS — Commits\n[]");
+    const meta = JSON.parse(parts.at(-1));
+    assert.deepEqual(meta, { run_id: "r1", status: "done", recipes: [{ id: "rcp_1", tool: "GMAIL_FETCH_EMAILS", created: true }, { id: "rcp_2", tool: "GITHUB_LIST_COMMITS" }], credits: 2 });
+    assert.doesNotMatch(text, /^rcp_1$/m); // the model's ids are not repeated as an answer
+  });
+
+  it("the person's prompt and the projects' prompts go along as instructions, once each", () => {
+    const text = recipesResultText({ status: "done", results: [result({ instructions: "Group by author." }), result({ id: "rcp_2", instructions: "Group by author." })] }, { instructions: "Answer in Russian." });
+    assert.equal(JSON.parse(text.slice(text.lastIndexOf("\n") + 1)).instructions, "Answer in Russian.\n\nGroup by author.");
+  });
+
+  it("a run that stopped for a connection says so first and tells what to do next", () => {
+    const text = recipesResultText({ run_id: "r1", status: "needs_connection", answer: "Connect gmail: https://c — then continue this run.", connect_url: "https://c", results: [] });
+    assert.match(text, /^Connect gmail: https:\/\/c/);
+    const meta = JSON.parse(text.slice(text.lastIndexOf("\n") + 1));
+    assert.equal(meta.connect_url, "https://c");
+    assert.match(meta.next, /GENTER_CONTINUE_TASK/);
+  });
+
+  it("references with write on: how to write there", () => {
+    const refs = [{ n: 1, app: "gmail", kind: "email", title: "Contract draft", where: { message_id: "m1" }, write: [{ tool: "GMAIL_REPLY_TO_THREAD", needs: ["message_body"], args: {} }] }];
+    const text = recipesResultText({ run_id: "r1", status: "done", results: [result()], references: refs }, { write: true });
+    assert.match(text, /References:\n\[1\] gmail email Contract draft/);
+    assert.match(text, /write GMAIL_REPLY_TO_THREAD\(message_body\)/);
+    assert.match(JSON.parse(text.slice(text.lastIndexOf("\n") + 1)).next, /GENTER_WRITE/);
+  });
+
+  it("base64 file contents are decoded; binary ones and everything else stay as they came", () => {
+    const file = { content: { path: "a.js", encoding: "base64", content: Buffer.from("x = 1").toString("base64") } };
+    assert.deepEqual(readable(file), { content: { path: "a.js", encoding: "utf-8", content: "x = 1" } });
+    const binary = { content: { path: "a.png", encoding: "base64", content: Buffer.from([0, 255, 1]).toString("base64") } };
+    assert.equal(readable(binary), binary);
+    const list = [{ a: 1 }];
+    assert.equal(readable(list), list);
+  });
+
+  it("GENTER_FIND says it returns raw data to answer from", () => {
+    assert.match(agentTools().GENTER_FIND.description, /raw data, not a written answer/);
   });
 });
 

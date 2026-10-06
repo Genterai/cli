@@ -76,13 +76,14 @@ const APPS =
 
 export const agentInstructions = `Genter connects the user's apps (${APPS}) in one place and works in them with a fast agent that remembers what worked:
 every successful call becomes a recipe (one call with fixed args), found next time by what it returned; the real call is always re-run for fresh data.
-- GENTER_FIND: any question about the user's own data (emails, events, files, issues, messages, contacts). Read-only.
+- GENTER_FIND: any question about the user's own data (emails, events, files, issues, messages, contacts). Read-only. Returns raw data:
+  the live results of the recipes that hold the answer (a saved one that fits, or new ones a fast agent finds and saves), each under a line naming its call. Answer from them yourself.
 - GENTER_RUN_TASK: anything that does something in an app: send, reply, create, update, schedule, post, move, multi-app workflows.
 - GENTER_CONTINUE_TASK: answer a run's question, continue after the user connected an app, or a follow-up on the same result.
 Call them whenever the user mentions or implies an app, an account or their own data. Never say you have no access before trying.
 Pass the whole task with every known detail in one call, in the user's words; do not split it or call app tools step by step.
 Show connect links to the user as Markdown links.
-Answers cite their sources as [n]; References under the answer say what each is and where: a path, a link, the ids that point to it.`;
+GENTER_RUN_TASK answers cite their sources as [n]; References (also under GENTER_FIND's results, whose items carry _ref: n) say what each is and where: a path, a link, the ids that point to it.`;
 
 // Temporary: writing at a reference over MCP (GENTER_WRITE), added to the instructions where it is on.
 export const writeInstructions = `- GENTER_WRITE: write where a result pointed: run_id + ref (the [n] of its References) + the change. Each reference's "write" line names the app's write tools for that exact place, args already known. A file: pass edits ([{find, replace}], exact pieces of its text) and message: one commit, only those pieces change.`;
@@ -118,8 +119,10 @@ export function agentTools({ connected = [], write = false } = {}) {
       description:
         "Find anything in the user's apps and past results: emails, messages, meetings, files, docs, issues, PRs, contacts, deals, invoices. " +
         "Read-only and safe — nothing is sent or changed.\n" +
-        "Searches by meaning across calls made before (what their results meant) to pick the right call, " +
-        "then reads live data from the apps, so answers are always current.\n" +
+        "Returns raw data, not a written answer: the live results of the recipes (saved calls with fixed args) that hold what was asked, " +
+        "best first, each under a line naming its call (recipe id, tool, args), then a JSON line. Read them and answer the user yourself.\n" +
+        "A saved recipe that clearly fits runs at once; otherwise a fast agent finds the right calls in the apps and saves them as recipes, " +
+        "so the next such question takes one step. The data is always read live from the apps, so it is current.\n" +
         "Call it before answering any question about the user's own data instead of guessing or saying you can't see it: " +
         "\"what did Anna write about the contract\", \"my meetings tomorrow\", \"PRs waiting for my review\", \"the invoice from March\"." +
         have,
@@ -182,18 +185,22 @@ export function agentTools({ connected = [], write = false } = {}) {
   };
 }
 
+// What the client does next with a run's result: answer its question, connect an app, or write at a reference.
+const PAUSED = {
+  needs_input: "Ask the user this question, then call GENTER_CONTINUE_TASK with run_id and their answer.",
+  needs_connection: "Show the connect link to the user as a Markdown link; when they have connected, call GENTER_CONTINUE_TASK with run_id.",
+};
+const nextOf = (out, refs, write) =>
+  PAUSED[out.status] ??
+  (write && out.run_id && refs.some((r) => r.write?.length)
+    ? "To write at a reference: GENTER_WRITE {run_id, ref: n, change}; a file: {run_id, ref, edits: [{find, replace}], message}, one commit with only those pieces changed; an exact call: tool + args from its write line (the reference's args are filled in)."
+    : undefined);
+
 // The agent's result as MCP tool text: the answer first, its References (what each [n] is, where, and with write on,
 // how to write there), then what the client needs to continue.
 export function agentResultText(out, { write = false } = {}) {
   const refs = out.references ?? [];
-  const next =
-    {
-      needs_input: "Ask the user this question, then call GENTER_CONTINUE_TASK with run_id and their answer.",
-      needs_connection: "Show the connect link to the user as a Markdown link; when they have connected, call GENTER_CONTINUE_TASK with run_id.",
-    }[out.status] ??
-    (write && out.run_id && refs.some((r) => r.write?.length)
-      ? "To write at a reference: GENTER_WRITE {run_id, ref: n, change}; a file: {run_id, ref, edits: [{find, replace}], message}, one commit with only those pieces changed; an exact call: tool + args from its write line (the reference's args are filled in)."
-      : undefined);
+  const next = nextOf(out, refs, write);
   const meta = {
     run_id: out.run_id,
     status: out.status,
@@ -206,6 +213,55 @@ export function agentResultText(out, { write = false } = {}) {
   };
   const listed = refs.length ? `\n\nReferences:\n${refs.map((r) => referenceText(r, write)).join("\n")}` : "";
   return `${out.answer ?? ""}${listed}\n\n${JSON.stringify(meta)}`;
+}
+
+// GENTER_FIND's result: the raw results of the recipes that hold the answer, best first: { results: [{ id, tool, args,
+// title?, account?, score?, created, changed, instructions?, data }] }. Each is a saved call run live just now: a saved
+// recipe that fits (out.direct: no model at all), or the calls an agent run in mode "recipes" found and saved. Each comes
+// under a line naming its call, as it came (file contents sent as base64 decoded); then their References (with write on,
+// how to write there) and a JSON line. No model wrote an answer: the client's own model answers from the data, so the
+// person's prompt (instructions) and the prompts of the recipes' projects go along in the JSON as `instructions`.
+// A run that found nothing, or stopped to ask or for a connection, says so first, in the agent's words.
+export function recipesResultText(out, { write = false, instructions } = {}) {
+  const results = out.results ?? [];
+  const refs = out.references ?? [];
+  const said = String(out.answer ?? "").trim();
+  const note = said && (!results.length || out.status !== "done") ? said : "";
+  const blocks = results.map((r, i) => `${recipeLine(r, i + 1)}\n${JSON.stringify(readable(r.data) ?? null)}`);
+  const told = [instructions, ...results.map((r) => r.instructions)].map((t) => String(t ?? "").trim()).filter((t, i, all) => t && all.indexOf(t) === i);
+  const next = nextOf(out, refs, write);
+  const meta = {
+    ...(out.run_id && { run_id: out.run_id }),
+    status: out.status ?? "done",
+    ...(out.direct && { direct: true }),
+    recipes: results.map((r) => ({ id: r.id, tool: r.tool, ...(r.score != null && { score: r.score }), ...(r.created && { created: true }), ...(r.changed && { changed: true }) })),
+    ...(told.length && { instructions: told.join("\n\n") }),
+    ...(out.connect_url && { connect_url: out.connect_url }),
+    ...(out.suggestions?.length && { suggestions: out.suggestions }),
+    ...(out.credits != null && { credits: out.credits }),
+    ...(out.usage?.ms != null && { ms: out.usage.ms }),
+    ...(next && { next }),
+  };
+  const listed = refs.length ? `References:\n${refs.map((r) => referenceText(r, write)).join("\n")}` : "";
+  return [note, ...blocks, listed, JSON.stringify(meta)].filter(Boolean).join("\n\n");
+}
+
+// Recipe 1: rcp_… · GMAIL_FETCH_EMAILS {"query":"from:anna"} — Emails from Anna (account work)
+const recipeLine = (r, i) =>
+  `Recipe ${i}: ${[r.id, r.tool].filter(Boolean).join(" · ")}${Object.keys(r.args ?? {}).length ? ` ${JSON.stringify(r.args)}` : ""}${r.title ? ` — ${r.title}` : ""}${r.account ? ` (account ${r.account})` : ""}`;
+
+// A result as the app sent it, except file contents sent as base64 (GitHub's {encoding: "base64", content}, at the top
+// or one level down): decoded, so a model can read them. Contents that are not text stay as they came.
+export function readable(data) {
+  const decoded = (v) => {
+    if (!v || typeof v !== "object" || Array.isArray(v) || v.encoding !== "base64" || typeof v.content !== "string") return v;
+    const text = Buffer.from(v.content, "base64").toString("utf8");
+    return /[\u0000\uFFFD]/.test(text) ? v : { ...v, encoding: "utf-8", content: text };
+  };
+  const top = decoded(data);
+  if (top !== data || !top || typeof top !== "object" || Array.isArray(top)) return top;
+  const inner = Object.entries(top).map(([k, v]) => [k, decoded(v)]);
+  return inner.some(([k, v]) => v !== top[k]) ? Object.fromEntries(inner) : top;
 }
 
 // [3] github file Genterai/genter-cli/src/agent.js — https://github.com/...

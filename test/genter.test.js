@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
-import { addQuery, appsMeant, createGenter } from "../src/genter.js";
+import { addQuery, appsMeant, cipher, createGenter } from "../src/genter.js";
 
 // The real createGenter on a Composio stand-in: tool calls are answered over fetch, so execute runs its own code
 // (the agent tests replace genter as a whole and never reach it).
@@ -176,6 +176,53 @@ describe("genter.execute", () => {
     const recipe = (await genter.search({ query: "когда уборка" })).find((r) => r.id === out.id);
     assert.ok(recipe, "found by the word in its result");
     assert.ok(recipe.score >= 0.25 && recipe.score < 0.45); // offered, but not so sure that tools are skipped
+  });
+
+  it("G5a the model's terms joined in one string count one by one", async () => {
+    fakeComposio(
+      { items: [{ subject: "Contract" }] },
+      {
+        chat: (prompt) =>
+          /Translate it for searching/.test(prompt)
+            ? { en: "what Anna wrote about the contract", terms: ["Анна; договор", "Anna, contract, agreement"] }
+            : { title: "Emails from Anna", summary: "Two emails from Anna: the contract draft and a call.", relevant: true },
+        vector: (t) => (t.startsWith("что") ? [1, 0, 0] : [0, 1, 0]), // nothing is close by meaning
+      },
+    );
+    const store = memoryStore();
+    const deferred = [];
+    const genter = createGenter({ composioApiKey: "k", openrouterApiKey: "o", userId: "u", secret: "s", store, defer: (p) => deferred.push(p) });
+    const out = await genter.execute({ tool: "GMAIL_FETCH_EMAILS", args: { query: "from:anna" } });
+    await Promise.all(deferred);
+    assert.deepEqual((await genter.translate("что Анна писала про договор")).terms, ["Анна", "договор", "Anna", "contract", "agreement"]);
+    assert.ok((await genter.search({ query: "что Анна писала про договор" })).some((r) => r.id === out.id), "found by \"contract\" in its summary");
+  });
+
+  // "Код продуктовнер в Evallens?" (a dictated "Кто продакт-оунер") went to Google Drive: the site's 72 pages were saved,
+  // but no page was close by meaning and the model's terms left the name out.
+  it("G5b a request that names a site gets its closest pages first, before anything only close by meaning", async () => {
+    const calls = fakeComposio(
+      {},
+      {
+        chat: (prompt) => (/Translate it for searching/.test(prompt) ? { en: "Product owner code in Evallens?", terms: ["Код продуктовнер", "product owner code, owner code"] } : null),
+        vector: (t) => (t.startsWith("Код") ? [1, 0, 0] : [0, 1, 0]),
+      },
+    );
+    const store = memoryStore();
+    const { seal } = cipher("s:u");
+    const put = (id, tool, args, title, summaryEmbedding) =>
+      store.put({ id, remembered: true, blob: seal({ id, tool, args, title, summary: title, scope: { account: "", toolkit: tool === "WEBSITE_READ_PAGE" ? "website" : "googledrive" }, status: "fresh", summaryEmbedding }) });
+    await put("rcp_drive", "GOOGLEDRIVE_FIND_FILE", { q: "" }, "Files in Google Drive", [0.4, 0.9, 0]); // 0.41: offered by meaning
+    await put("rcp_team", "WEBSITE_READ_PAGE", { url: "https://www.evallens.io/team" }, "EvalLens team", [0.1, 0, 1]);
+    await put("rcp_news", "WEBSITE_READ_PAGE", { url: "https://evallens.io/news" }, "EvalLens All News page", [0, 0, 1]);
+    await put("rcp_terms", "WEBSITE_READ_PAGE", { url: "https://evallens.io/terms" }, "EvalLens terms", [0, 0, 1]);
+    await put("rcp_other", "WEBSITE_READ_PAGE", { url: "https://example.org/team" }, "Another site's team", [0.1, 0, 1]);
+    const genter = createGenter({ composioApiKey: "k", openrouterApiKey: "o", userId: "u", secret: "s", store, defer: () => {} });
+
+    const found = await genter.search({ query: "Код продуктовнер в Evallens?", limit: 4 });
+    assert.deepEqual(found.filter((r) => r.id).map((r) => r.id), ["rcp_team", "rcp_news", "rcp_drive"]); // half the places, the closest page first
+    assert.ok(found[0].score >= 0.45 && found[1].score >= 0.45);
+    assert.ok(calls.some((u) => u.includes("/tools?") && u.includes("search=")), "tools are still searched");
   });
 
 });
