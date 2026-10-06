@@ -60,6 +60,14 @@ describe("genter.execute", () => {
     await Promise.all(deferred);
   });
 
+  it("G1a a recipe knows the area its call reads in (the repository), so a project can be offered for it", async () => {
+    fakeComposio({ content: { content: "YQ==", encoding: "base64" } });
+    const store = memoryStore();
+    const genter = createGenter({ composioApiKey: "k", userId: "u", secret: "s", store, defer: () => {} });
+    const out = await genter.execute({ tool: "GITHUB_GET_REPOSITORY_CONTENT", args: { owner: "o", repo: "r", path: "a" } });
+    assert.deepEqual((await genter.recipes.get(out.id)).scope, { account: "", toolkit: "github", area: { id: "o/r", label: "o/r", kind: "repository", where: { owner: "o", repo: "r" } } });
+  });
+
   it("G2 remember: false runs it without saving it", async () => {
     fakeComposio({ content: { content: "YQ==", encoding: "base64" } });
     const store = memoryStore();

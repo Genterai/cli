@@ -130,6 +130,90 @@ export function sourceOf({ tool = "", args = {}, toolkit, data } = {}) {
   return { app: slug ? appName(slug) : null, path: path.slice(0, 6), url };
 }
 
+// ---- The area a call reads in (specs/recipes.md "Suggesting a project") ----
+
+// Containers an arg can name, outermost first, each with what such a container is called. A call is inside an area when
+// its args name one of them: the innermost one named is the area, the ones around it and the owner / organization /
+// workspace (AROUND) are part of where it is. An owner or a workspace alone is no area: that is the whole app.
+// Arg names only: no connector knows more.
+const AROUND = ["workspace", "workspace_id", "workspace_slug", "workspace_gid", "org", "organization", "owner"];
+const CONTAINERS = [
+  ["team", ["team", "team_id", "teamId"]],
+  ["space", ["space", "space_id", "spaceId", "space_key"]],
+  ["project", ["project", "project_id", "projectId", "project_key", "project_gid"]],
+  ["drive", ["drive_id", "driveId"]],
+  ["base", ["base_id", "baseId"]],
+  ["database", ["database_id", "databaseId"]],
+  ["board", ["board_id", "boardId", "idBoard"]],
+  ["folder", ["folder_id", "folderId", "folder", "folder_path"]],
+  ["list", ["list_id", "listId", "idList"]],
+  ["task list", ["tasklist_id", "tasklist", "task_list_id"]],
+  ["spreadsheet", ["spreadsheet_id", "spreadsheetId"]],
+  ["calendar", ["calendarId", "calendar_id"]],
+  ["channel", ["channel", "channel_id", "channelId", "channel_name"]],
+  ["repository", ["repo", "repository", "repo_name", "repository_name"]],
+];
+
+const placeValue = (v) =>
+  (typeof v === "string" || typeof v === "number") && String(v).trim() !== "" && !String(v).includes("{{") && String(v).length <= 200 ? String(v).trim() : null;
+const shortValue = (v) => (v.length > 32 ? `${v.slice(0, 12)}…` : v);
+
+// Where the items of a result sit, when the args name no container: the one folder (or database) every item it returned
+// is in, by the fields that say so (Drive's parents, OneDrive's parentReference, folder_id, Notion's parent.database_id).
+// Items in several places (a search over the whole drive): none.
+function parentOf(item) {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+  const one = (v) => placeValue(v);
+  if (Array.isArray(item.parents) && item.parents.length === 1 && one(item.parents[0])) return { key: "folder_id", kind: "folder", value: one(item.parents[0]) };
+  for (const key of ["folder_id", "folderId"]) if (one(item[key])) return { key: "folder_id", kind: "folder", value: one(item[key]) };
+  if (one(item.parentReference?.id)) return { key: "folder_id", kind: "folder", value: one(item.parentReference.id) };
+  if (one(item.parent?.database_id)) return { key: "database_id", kind: "database", value: one(item.parent.database_id) };
+  return null;
+}
+
+function resultArea(data) {
+  const parents = [];
+  let named = null;
+  const walk = (v, depth) => {
+    if (parents.length > 200 || depth > 4 || v == null || typeof v !== "object") return;
+    if (Array.isArray(v)) return v.forEach((x) => walk(x, depth + 1));
+    const p = parentOf(v);
+    if (p) {
+      parents.push(p);
+      named ??= placeValue(v.name ?? v.title ?? v.filename);
+      return;
+    }
+    for (const x of Object.values(v)) walk(x, depth + 1);
+  };
+  walk(data, 0);
+  if (!parents.length || parents.some((p) => p.value !== parents[0].value)) return null;
+  const { key, kind, value } = parents[0];
+  return { id: value, label: parents.length === 1 && named ? `${kind} of “${named}”` : shortValue(value), kind, where: { [key]: value } };
+}
+
+// The area a call reads in: { id, label, kind, where } or null (a call over the whole app: a search of the inbox).
+//   id: what tells one area from another (the values of where, joined with "/"), label: the same for people, kind: what the
+//   area is ("repository", "folder", "calendar", "channel"...), where: the args that point at it, for listing it later.
+// GITHUB_GET_REPOSITORY_CONTENT { owner: "Genterai", repo: "specs", path: "README.md" } is in the repository
+// { id: "Genterai/specs", kind: "repository", where: { owner: "Genterai", repo: "specs" } }; a Drive file found by name is
+// in the folder its result says it is in.
+export function areaOf({ args = {}, data } = {}) {
+  const where = {};
+  for (const key of AROUND) if (placeValue(args?.[key])) where[key] = placeValue(args[key]);
+  let kind = null;
+  for (const [name, keys] of CONTAINERS) {
+    const key = keys.find((k) => placeValue(args?.[k]));
+    if (!key) continue;
+    where[key] = placeValue(args[key]);
+    kind = name;
+  }
+  if (kind) {
+    const values = Object.values(where);
+    return { id: values.join("/"), label: values.map(shortValue).join("/"), kind, where };
+  }
+  return data === undefined ? null : resultArea(data);
+}
+
 // A stored record as the current model needs it. Legacy records ({ memory, kind, alias, live }) map onto it; alias,
 // sync records and records that were never recipes (no memory: unlisted results) return null. Embeddings and
 // summaries of ordinary recipes are kept. Non-destructive: the stored row is only replaced on the next execute.

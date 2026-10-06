@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { canonicalArgs, classifyFailure, contentHash, isPartial, normalizeLegacy, publicRecipe, recipeId, sourceOf } from "../src/recipe.js";
+import { areaOf, canonicalArgs, classifyFailure, contentHash, isPartial, normalizeLegacy, publicRecipe, recipeId, sourceOf } from "../src/recipe.js";
 
 describe("canonicalArgs", () => {
   it("sorts keys recursively and drops undefined, null and empty strings", () => {
@@ -114,5 +114,45 @@ describe("normalizeLegacy", () => {
     const now = { id: "rcp_1", tool: "T", args: {}, scope: { account: "", toolkit: "t" }, status: "gone", summaryEmbedding: [1], itemEmbeddings: [[1]] };
     assert.equal(normalizeLegacy(now), now);
     assert.deepEqual(publicRecipe(now), { id: "rcp_1", tool: "T", args: {}, scope: { account: "", toolkit: "t" }, status: "gone" });
+  });
+});
+
+describe("areaOf", () => {
+  it("finds the repository a GitHub call reads in, whatever file or page of it", () => {
+    const repo = { id: "Genterai/specs", label: "Genterai/specs", kind: "repository", where: { owner: "Genterai", repo: "specs" } };
+    assert.deepEqual(areaOf({ args: { owner: "Genterai", repo: "specs", path: "README.md" } }), repo);
+    assert.deepEqual(areaOf({ args: { owner: "Genterai", repo: "specs", per_page: 5, sha: "main" } }), repo);
+  });
+  it("names other containers by their arg names, the innermost one being the area", () => {
+    assert.deepEqual(areaOf({ args: { calendarId: "primary", timeMin: "{{today}}" } }), { id: "primary", label: "primary", kind: "calendar", where: { calendarId: "primary" } });
+    assert.equal(areaOf({ args: { channel: "C123", limit: 20 } }).kind, "channel");
+    assert.equal(areaOf({ args: { folder_id: "1AbC" } }).kind, "folder");
+    const teams = areaOf({ args: { team_id: "T1", channel_id: "C9" } });
+    assert.equal(teams.kind, "channel");
+    assert.deepEqual(teams.where, { team_id: "T1", channel_id: "C9" });
+    assert.equal(teams.id, "T1/C9");
+  });
+  it("an owner, a workspace or a search over the whole app is no area", () => {
+    assert.equal(areaOf({ args: { owner: "Genterai" } }), null);
+    assert.equal(areaOf({ args: { query: "is:unread", max_results: 10 } }), null);
+    assert.equal(areaOf({ args: { repo: "{{repo}}" } }), null);
+    assert.equal(areaOf(), null);
+  });
+  it("finds the folder a found file sits in from the result, and none when the files are in several", () => {
+    const one = areaOf({ args: { q: "name contains 'plan'" }, data: { files: [{ id: "f1", name: "Q3 plan", parents: ["fold1"] }] } });
+    assert.deepEqual(one, { id: "fold1", label: "folder of “Q3 plan”", kind: "folder", where: { folder_id: "fold1" } });
+    const same = areaOf({ args: {}, data: { files: [{ id: "a", parents: ["fold1"] }, { id: "b", parents: ["fold1"] }] } });
+    assert.equal(same.id, "fold1");
+    assert.equal(same.label, "fold1");
+    assert.equal(areaOf({ args: {}, data: { files: [{ id: "a", parents: ["x"] }, { id: "b", parents: ["y"] }] } }), null);
+    assert.equal(areaOf({ args: {}, data: { results: [{ id: "p", parent: { type: "database_id", database_id: "db1" } }] } }).kind, "database");
+    assert.equal(areaOf({ args: {}, data: { messages: [{ id: "m1", subject: "hi" }] } }), null);
+  });
+  it("long ids are cut in the label, never in id or where", () => {
+    const long = "1".repeat(40);
+    const a = areaOf({ args: { folder_id: long } });
+    assert.equal(a.id, long);
+    assert.equal(a.where.folder_id, long);
+    assert.equal(a.label, `${"1".repeat(12)}…`);
   });
 });

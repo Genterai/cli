@@ -933,8 +933,11 @@ const MODE_NOTES = {
   find: "Mode: find (read-only: answer the question; only execute tools that read data).",
   run: "Mode: run (do the task).",
   prepare:
-    "Mode: prepare. The task names an area (a repository, a folder, a channel, a list). Your only job is to read it: discover what is in it with list/search tools, then fan out the reads with execute_many " +
-    "(up to 100 calls each, 4 at a time; several rounds if it is bigger; read-only calls only). Every successful read is saved as its own recipe automatically. Do not summarize the content: finish with the counts execute_many returned.",
+    "Mode: prepare. The task names an area (a repository, a folder, a calendar, a channel, a list) and the args that point at it. Your only job is to read ALL of it, one recipe per item: " +
+    "first list every item with the app's list tool and those args (a repository: its whole file tree, recursively; a folder: its files; a calendar: its events of the last and the next months; a channel: its messages), " +
+    "then read each item with its own call (the tool that returns that one item's full content, e.g. one file of the repository) in execute_many " +
+    "(up to 100 calls each, 4 at a time; several rounds if it is bigger; read-only calls only). read_file saves nothing: do not use it for the reads. Leave out what holds no text (images, binaries, lock files). " +
+    "Every successful read is saved as its own recipe automatically. Do not summarize the content: finish with the counts execute_many returned.",
   event:
     "Mode: event. The task carries an event from an app and the recipes it may have changed. Re-read ONLY those recipes with recheck_recipe (all in one step). A recipe whose object was deleted: forget_recipe. " +
     "Create new recipes (execute with the real read tool) for NEW objects only when the event is inside an area that was prepared (the task says so); otherwise do not. Finish with one line: what changed, what was forgotten.",
