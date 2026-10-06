@@ -274,6 +274,19 @@ describe("search", () => {
     assert.ok(!again.some((f) => f.kind === "skill" && f.recipe_id === read.id));
   });
 
+  it("S12 within (a person limited to some projects): only those recipes, a piece only as its recipe there", async () => {
+    net();
+    const { genter, skill, flush } = setup();
+    const install = await genter.execute({ tool: SKILL_TOOLS.chunk, args: chunkArgs(skill, "Install"), task: "install" });
+    await genter.execute({ tool: SKILL_TOOLS.chunk, args: chunkArgs(skill, "Rollback"), task: "rollback" });
+    await flush();
+    const found = await genter.search({ query: "how to deploy and roll back", limit: 10, within: new Set([install.id]) });
+    assert.deepEqual(
+      found.map((f) => [f.id, f.kind ?? null]),
+      [[install.id, null]],
+    );
+  });
+
   it("S11 an unrelated request does not find skill pieces", async () => {
     net();
     const { genter } = setup();

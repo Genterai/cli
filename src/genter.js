@@ -478,9 +478,10 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
   }
 
   // Pieces of skills as search candidates: the skill is chosen by its description vector, the piece by its own. Pieces
-  // already saved as recipes come through the recipes (same call = same id), the rest are offered as new calls with
+  // already saved as recipes are offered as those recipes by search (same call = same id), the rest as new calls with
   // fixed args. { id: null, kind: "skill", tool, args, title, description, skill, score, status: "new" }.
-  async function skillCandidates(vector, limit) {
+  // keep(recipe_id) (optional): false leaves a piece out before the best `limit` are taken (a person limited to some projects).
+  async function skillCandidates(vector, limit, keep) {
     const found = [];
     for (const s of await skills.list()) {
       const whole = s.embedding ? cosine(vector, s.embedding) : 0;
@@ -489,6 +490,8 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         const score = Math.max(own, 0.6 * own + 0.4 * whole);
         if (score < minScore) continue;
         const call = chunkCall(s.id, s.version, c.id);
+        const recipe_id = recipeId({ workspaceId, scope: "", tool: call.tool, args: call.args });
+        if (keep && !keep(recipe_id)) continue;
         found.push({
           id: null,
           kind: "skill",
@@ -497,7 +500,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
           title: `${s.name} › ${c.headings.join(" › ")}`,
           description: `Reads this section of the skill "${s.name}" (file ${c.path}). Execute it with exactly these args; the result lists the files it points to.`,
           skill: { id: s.id, name: s.name, version: s.version },
-          recipe_id: recipeId({ workspaceId, scope: "", tool: call.tool, args: call.args }),
+          recipe_id,
           score: Number(score.toFixed(2)),
           status: "new",
         });
@@ -595,7 +598,9 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     // all apps gave CLARIFY_MCP_GET_CALENDAR_EVENTS for "What's on my calendar today" with Google Calendar connected,
     // and the agent ran it. So the apps the query means by a word of their name ("calendar") give their tools first,
     // and without one the connected apps' tools are ranked by the query's words.
-    async search({ query, limit = 5, apps = [], toolkits: also = [], tools: withTools = false, connected = false }) {
+    // `within`: a Set of recipe ids, the only recipes offered (a person limited to some projects): they are ranked among
+    // themselves, so recipes outside it do not take the places, and a skill's piece is offered only as its recipe there.
+    async search({ query, limit = 5, apps = [], toolkits: also = [], tools: withTools = false, connected = false, within = null }) {
       const english = await translate(query);
       const text = `${query} ${english?.en ?? ""}`;
       const only = connected && apps.length ? new Set(apps.map((a) => String(a).toLowerCase())) : null;
@@ -606,7 +611,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       const terms = (english?.terms ?? []).map((t) => t.toLowerCase().trim()).filter((t) => t.length >= 4);
       const scored = vector
         ? (await everyRecipe())
-            .filter((r) => r.status === "fresh" && !r.disabled && r.summaryEmbedding && (!allow || allow(r)))
+            .filter((r) => r.status === "fresh" && !r.disabled && r.summaryEmbedding && (!allow || allow(r)) && (!within || within.has(r.id)))
             .map((r) => ({ r, ...resultMatch(r, vector, terms) }))
         : [];
       // A site the request names ("Evallens" for evallens.io) is where to look: its closest pages come first, up to half
@@ -618,30 +623,37 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         .slice(0, Math.ceil(limit / 2));
       for (const m of named) [m.closeness, m.score] = [m.score, Math.max(m.score, strongScore)];
       const onSite = new Set(named.map((m) => m.r.id));
+      const shown = ({ r, score, matched = [] }) => ({
+        id: r.id,
+        tool: r.tool,
+        args: r.args,
+        title: r.title,
+        short: r.short,
+        summary: r.summary,
+        ...(r.keywords && { keywords: r.keywords }),
+        ...(matched.length && { matched }),
+        score: Number(score.toFixed(2)),
+        status: r.status,
+        updated_at: r.updated_at,
+        checked_at: r.checked_at,
+        trigger: { active: Boolean(r.trigger?.active) },
+      });
       const memories = scored
         .filter(({ score }) => score >= minScore)
         .sort((a, b) => b.score - a.score || (b.closeness ?? b.score) - (a.closeness ?? a.score))
         .slice(0, limit)
-        .map(({ r, score, matched }) => ({
-          id: r.id,
-          tool: r.tool,
-          args: r.args,
-          title: r.title,
-          short: r.short,
-          summary: r.summary,
-          ...(r.keywords && { keywords: r.keywords }),
-          ...(matched.length && { matched }),
-          score: Number(score.toFixed(2)),
-          status: r.status,
-          updated_at: r.updated_at,
-          checked_at: r.checked_at,
-          trigger: { active: Boolean(r.trigger?.active) },
-        }));
-      // Skills: pieces found by meaning next to the saved recipes (a piece that is already a recipe is not offered twice).
+        .map(shown);
+      // Skills: pieces found by meaning next to the saved recipes. A piece that is already a recipe is offered as that recipe
+      // (once, with the better of the two scores), never as a second, new candidate; with `within`, only those.
       if (skills && vector) {
+        const saved = new Map(scored.map((m) => [m.r.id, m]));
         const have = new Set(memories.map((m) => m.id));
-        const pieces = (await skillCandidates(vector, limit).catch(() => [])).filter((p) => !have.has(p.recipe_id));
-        memories.push(...pieces);
+        for (const p of await skillCandidates(vector, limit, within && ((id) => saved.has(id))).catch(() => [])) {
+          if (have.has(p.recipe_id)) continue;
+          have.add(p.recipe_id);
+          const m = saved.get(p.recipe_id);
+          memories.push(m ? shown({ ...m, score: Math.max(m.score, p.score) }) : p);
+        }
         memories.sort((a, b) => b.score - a.score);
         memories.splice(limit);
       }
