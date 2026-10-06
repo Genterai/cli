@@ -237,7 +237,8 @@ Composio schemas (`test/fixtures/catalogues.json`: Linear, Slack, Jira, Trello, 
 | N1 | no answer | an empty ending is asked once on the strong model; empty again is a failure naming what ran, never "Done." with references |
 | G1–G2, G4–G5 | `genter.execute` itself (Composio answered over fetch) | a saved call returns its result and a deterministic id; `remember: false` saves nothing; a line of a result finds its anchor |
 | R1–R10 | anchors | one record per call whatever the arg order; an unchanged result calls no model and only bumps `checked_at`; a changed one regenerates the same anchor; a failed call creates nothing; gone / denied are never offered; two accounts, two anchors; partial pages; recheck, triggers, scopes; recheck never runs again a call that changes something (a saved send is not sent again) |
-| N2–N7 | anchors in the agent | `recipe: {id, created, changed}` on steps, `saved`, `recipes_used`; the prompt (no tool name begins with another's, free-form args have no type); `suggest_prepare`; `read_many` and `read_each` in a prepare task (every listed file, folders and binaries left out; called through execute too; args as JSON text); event tasks |
+| N2–N7 | anchors in the agent | `recipe: {id, created, changed}` on steps, `saved`, `recipes_used`; the prompt (no tool name begins with another's, free-form args have no type); `suggest_prepare`; `read_many` and `read_each` in a prepare task (every listed file, folders and binaries left out; called through execute too; args as JSON text; the run's `listing`); event tasks |
+| R1–R3 (reconcile) | an area kept whole (`genter.recipes.reconcile`) | a new file gets its anchor, a changed sha is checked again, a removed file is gone and comes back fresh, a deleted anchor stays deleted, an image is never read; a budget with the rest pending; a read that keeps failing is given up; a failed or empty list touches nothing, a cut one marks nothing gone; `inArea` |
 | recipe.test.js | pure `src/recipe.js` | canonical args, ids, content hash, partial detection, failure classes, provenance, legacy records |
 | C1–C4 | the agent's tool search (`connected: true`) | only tools of connected apps: "What's on my calendar today" gets Google Calendar's, never another app's calendar tool (Clarify); an app meant by a word ("calendar", "meetings", "drive"); without `connected` Composio's search over all apps is as before |
 | H1–H4 | gpt-oss calls as text | a call written as harmony text (`to=functions.execute json{…}`) is made, not shown; the final channel is the answer, reasoning alone is sent back once then fails; a slug called as a function is an execute; a tool of an app that is not connected names the connected apps and their tools |
@@ -255,6 +256,17 @@ files with no text, images, archives, lock files, left out; 4 at a time, up to 3
 out (it cut a hundred short, and saw a long tree only in part). `read_many` takes calls the model writes itself (up to 100).
 Each success is an ordinary atomic anchor. `genter.recipes.prepareScope` keeps a minimal area record in the optional
 `scopes` store so events know the area was prepared.
+
+**Keeping an area whole** (`src/area.js`). A prepare run hands over how it read the area, `listing = {recipe_id, tool, args,
+account, read_tool, shared_args, item_arg, item_field, versions}`: the list call's anchor, the read each item got, and every
+item read with the version the list gave it (a tree's `sha`, a modified time; `""` with none). The host keeps it with the
+area. `genter.recipes.reconcile({listing, budget = 40})` compares the area with its anchors with no model: the list call
+runs again (the real call), and an item with no anchor yet is read (a new anchor), one whose version moved or whose anchor is
+`gone`/`stale` is checked again, one no longer listed is marked `gone` (no call; not when the list was cut), and one read
+before whose anchor is no longer there (a person deleted or forgot it) is left out. At most `budget` calls, new items first;
+the rest is `pending` for the next time; a read that failed 3 times is given up. An area's anchors are known by their id
+(the read's call: `itemId`), never by guessing. It answers `{status, listing (to keep), created, changed, gone, unchanged,
+pending, failed, excluded, listed, partial}`. `genter.recipes.inArea({listing, ids})` tells which anchors are the area's reads.
 
 Two things about gpt-oss on Groq (the quickest provider, OpenRouter's pick by latency) shape the tool list: no tool's name
 begins with another's (`execute_many` came out as `execute<|channel|>...` and Groq refused the call: hence `read_many`,
@@ -314,7 +326,7 @@ await genter.search({ query: "send a slack message" });
 const out = await genter.execute({ tool: "GMAIL_FETCH_EMAILS", args: { query: "is:unread" } }); // { id, result, created, changed, unchanged, pending }
 await genter.recipes.list(); // get(id), remove(id), recheck(id), invalidateAccount({account|toolkit}), markGone(id),
                              // recommendTrigger(id), setTrigger({id, active}), setTriggers({ids, active}), byTrigger({triggerId}),
-                             // prepareScope(...), scopes()
+                             // reconcile({listing, budget}), inArea({listing, ids}), prepareScope(...), scopes()
 ```
 
 ## License

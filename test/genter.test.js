@@ -662,3 +662,84 @@ describe("tool search of the agent: only connected apps", () => {
     assert.deepEqual(appsMeant("open pull requests", ["googlecalendar", "gmail"]), []);
   });
 });
+
+describe("genter.recipes.reconcile: an area kept whole with no model", () => {
+  const files = (list) => ({ sha: "t", truncated: false, tree: list.map(([path, sha]) => ({ path, type: path.includes(".") ? "blob" : "tree", sha })) });
+  const setup = (tree) => {
+    let current = tree;
+    const calls = fakeComposio((sent, u) => (u.includes("GITHUB_GET_A_TREE") ? current : sent.arguments?.path === "broken.md" ? { __error: "500 server error" } : { path: sent.arguments.path, content: `text of ${sent.arguments.path}` }));
+    const store = memoryStore();
+    const genter = createGenter({ composioApiKey: "k", userId: "u", secret: "s", store, defer: () => {} });
+    return { calls, store, genter, set: (t) => (current = t) };
+  };
+  const reads = (calls) => calls.filter((u) => u.includes("/tools/execute/GITHUB_GET_REPOSITORY_CONTENT")).length;
+
+  it("R1 a new file gets its anchor, a changed sha is checked again, a removed file is gone, a deleted anchor stays deleted", async () => {
+    const { calls, genter, set } = setup(files([["a.md", "1"], ["b.md", "1"], ["c.md", "1"], ["src", "d"]]));
+    const tree = await genter.execute({ tool: "GITHUB_GET_A_TREE", args: { owner: "o", repo: "r", tree_sha: "main", recursive: true } });
+    const ids = {};
+    for (const path of ["a.md", "b.md", "c.md"]) ids[path] = (await genter.execute({ tool: "GITHUB_GET_REPOSITORY_CONTENT", args: { owner: "o", repo: "r", path } })).id;
+    const listing = { recipe_id: tree.id, tool: "GITHUB_GET_A_TREE", args: { owner: "o", repo: "r", tree_sha: "main", recursive: true }, account: "", read_tool: "GITHUB_GET_REPOSITORY_CONTENT", shared_args: { owner: "o", repo: "r" }, item_arg: "path", item_field: "path", versions: { "a.md": "1", "b.md": "1", "c.md": "1" } };
+
+    // Nothing changed: the tree is listed again and nothing is read.
+    let before = reads(calls);
+    let out = await genter.recipes.reconcile({ listing });
+    assert.equal(out.status, "done");
+    assert.deepEqual([out.created, out.changed, out.gone], [[], [], []]);
+    assert.equal(reads(calls), before);
+
+    // A person deleted c.md's anchor; then a.md changed (new sha), b.md was removed, new.md and an image were added.
+    await genter.recipes.remove(ids["c.md"]);
+    set(files([["a.md", "2"], ["c.md", "1"], ["new.md", "1"], ["logo.png", "1"]]));
+    before = reads(calls);
+    out = await genter.recipes.reconcile({ listing: out.listing });
+    assert.equal(out.created.length, 1);
+    assert.equal((await genter.recipes.get(out.created[0])).args.path, "new.md");
+    assert.deepEqual(out.gone, [ids["b.md"]]);
+    assert.equal((await genter.recipes.get(ids["b.md"])).status, "gone");
+    assert.equal(out.excluded, 1); // c.md: its anchor was deleted on purpose, it does not come back
+    assert.equal(reads(calls) - before, 2); // new.md read, a.md checked again; not c.md, not the image
+    assert.equal(out.listing.versions["a.md"], "2");
+    assert.equal(out.listing.versions["b.md"], undefined);
+
+    // b.md comes back: its gone anchor is checked again and is fresh.
+    set(files([["a.md", "2"], ["b.md", "1"], ["c.md", "1"], ["new.md", "1"]]));
+    out = await genter.recipes.reconcile({ listing: out.listing });
+    assert.equal((await genter.recipes.get(ids["b.md"])).status, "fresh");
+    assert.deepEqual(out.gone, []);
+  });
+
+  it("R2 at most `budget` calls (new files first); the rest is pending; a read that keeps failing is given up", async () => {
+    const { genter, set } = setup(files([["a.md", "1"]]));
+    const tree = await genter.execute({ tool: "GITHUB_GET_A_TREE", args: { owner: "o", repo: "r" } });
+    let listing = { recipe_id: tree.id, read_tool: "GITHUB_GET_REPOSITORY_CONTENT", shared_args: { owner: "o", repo: "r" }, item_arg: "path", item_field: "path", account: "", versions: {} };
+    set(files([["a.md", "1"], ["broken.md", "1"], ...Array.from({ length: 5 }, (_, i) => [`f${i}.md`, "1"])]));
+    let out = await genter.recipes.reconcile({ listing, budget: 3 });
+    assert.equal(out.created.length + out.failed, 3);
+    assert.equal(out.pending, 4);
+    for (let i = 0; i < 6; i++) out = await genter.recipes.reconcile({ listing: out.listing, budget: 3 });
+    assert.equal(Object.keys(out.listing.versions).length, 6); // a.md and the five new ones
+    assert.equal(out.listing.failed["broken.md"], 3);
+    assert.equal(out.pending, 0);
+  });
+
+  it("R3 a list that failed or listed nothing touches nothing; a cut list marks nothing gone; inArea knows the area's reads", async () => {
+    const { genter, set } = setup(files([["a.md", "1"], ["b.md", "1"]]));
+    const tree = await genter.execute({ tool: "GITHUB_GET_A_TREE", args: { owner: "o", repo: "r" } });
+    const a = (await genter.execute({ tool: "GITHUB_GET_REPOSITORY_CONTENT", args: { owner: "o", repo: "r", path: "a.md" } })).id;
+    const other = (await genter.execute({ tool: "GITHUB_GET_REPOSITORY_CONTENT", args: { owner: "o", repo: "other", path: "a.md" } })).id;
+    const listing = { recipe_id: tree.id, read_tool: "GITHUB_GET_REPOSITORY_CONTENT", shared_args: { owner: "o", repo: "r" }, item_arg: "path", item_field: "path", account: "", versions: { "a.md": "1" } };
+    assert.deepEqual(await genter.recipes.inArea({ listing, ids: [a, other, tree.id] }), [a]);
+    set({ __error: "404 Not Found" });
+    let out = await genter.recipes.reconcile({ listing });
+    assert.equal(out.status, "failed");
+    set({ message: "nothing here" });
+    out = await genter.recipes.reconcile({ listing });
+    assert.equal(out.status, "failed");
+    assert.equal((await genter.recipes.get(a)).status, "fresh");
+    set({ sha: "t", truncated: true, tree: [{ path: "b.md", type: "blob", sha: "1" }, { path: "z.md", type: "blob", sha: "1" }] });
+    out = await genter.recipes.reconcile({ listing });
+    assert.equal(out.partial, true);
+    assert.deepEqual(out.gone, []);
+  });
+});
