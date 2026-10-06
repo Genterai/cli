@@ -30,7 +30,7 @@ export const answer = (content) => ({ content });
 export const briefingOf = (body) => body.messages.find((m) => m.role === "user").content;
 export const lastOf = (body, role) => [...body.messages].reverse().find((m) => m.role === role)?.content;
 
-// A genter stand-in for the agent: recipes, tool results and catalogues given per test.
+// A genter stand-in for the agent: anchors, tool results and catalogues given per test.
 // execute(tool, args) answers from `results` (a value or a function of args); every call is kept in `executed`.
 export function fakeGenter({ connected = [], recipes = [], results = {}, catalogs = {} } = {}) {
   const executed = [];

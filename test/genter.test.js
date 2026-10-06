@@ -44,7 +44,7 @@ const memoryStore = () => {
 };
 
 describe("genter.execute", () => {
-  it("G1 a call that is saved as a recipe returns its result and a deterministic id", async () => {
+  it("G1 a call that is saved as an anchor returns its result and a deterministic id", async () => {
     const calls = fakeComposio({ commits: [{ sha: "c1", commit: { message: "m" } }] });
     const store = memoryStore();
     const deferred = [];
@@ -60,7 +60,7 @@ describe("genter.execute", () => {
     await Promise.all(deferred);
   });
 
-  it("G1a a recipe knows the area its call reads in (the repository), so a project can be offered for it", async () => {
+  it("G1a an anchor knows the area its call reads in (the repository), so a project can be offered for it", async () => {
     fakeComposio({ content: { content: "YQ==", encoding: "base64" } });
     const store = memoryStore();
     const genter = createGenter({ composioApiKey: "k", userId: "u", secret: "s", store, defer: () => {} });
@@ -79,8 +79,8 @@ describe("genter.execute", () => {
   });
 
   // "Уборка" was one of ten events in the summary of "Events of the past 7 days": as one vector it scored 0.20 against
-  // the request, under the 0.25 a recipe needs, and the agent searched mail, tasks and calendars for 44 s instead.
-  it("G4 one thing among many in a result finds its recipe by its own line, and says so", async () => {
+  // the request, under the 0.25 an anchor needs, and the agent searched mail, tasks and calendars for 44 s instead.
+  it("G4 one thing among many in a result finds its anchor by its own line, and says so", async () => {
     const cleaning = (t) => /убир|уборк|clean/i.test(t);
     fakeComposio(
       { items: [{ summary: "Оплатить подписки" }, { summary: "Уборка" }] },
@@ -101,13 +101,13 @@ describe("genter.execute", () => {
     assert.equal(cleaning("Ten events: payments, LinkedIn, a demo."), false);
     const found = await genter.search({ query: "когда мне убираться надо" });
     const recipe = found.find((r) => r.id === out.id);
-    assert.ok(recipe, "the calendar recipe is offered");
+    assert.ok(recipe, "the calendar anchor is offered");
     assert.ok(recipe.score >= 0.45); // known ground: the fast model answers from it
     assert.deepEqual(recipe.matched, ['Calendar event "Уборка" on 2026-10-03 13:00']);
   });
 
   // The table shows one sentence about the result (`short`); retrieval embeds the richer summary, not that sentence.
-  it("G4b a new recipe gets a one-sentence result description apart from its title, and is found by its result summary", async () => {
+  it("G4b a new anchor gets a one-sentence result description apart from its title, and is found by its result summary", async () => {
     const SUMMARY = "Three open pull requests: #12 fix login, #15 add billing page, #18 bump deps.";
     fakeComposio(
       { items: [{ title: "fix login" }] },
@@ -128,12 +128,12 @@ describe("genter.execute", () => {
     assert.ok(recipe, "found through its result summary");
     assert.equal(recipe.short, "Titles and numbers of pull requests still waiting for review.");
     assert.notEqual(recipe.short, "Open pull requests of o/r");
-    assert.equal(recipe.summary, SUMMARY); // the rich text is kept for retrieval and the recipe page
+    assert.equal(recipe.summary, SUMMARY); // the rich text is kept for retrieval and the anchor page
   });
 
   // An inbox described in English ("Unread emails from today") has no "почта" in it: the keywords written with the
   // summary carry it, in the summary's vector and as a key term.
-  it("G4c a recipe is found by the search keywords written with its summary", async () => {
+  it("G4c an anchor is found by the search keywords written with its summary", async () => {
     const SUMMARY = "Five unread emails from today: an invoice from Acme, a meeting invite from Anna.";
     const TEXT = `${SUMMARY}\nKeywords: email, inbox, unread, почта, письма`;
     fakeComposio(
@@ -157,7 +157,7 @@ describe("genter.execute", () => {
     assert.ok(recipe.score >= 0.45);
   });
 
-  it("G5 a key term of the request written in a recipe's result puts it among the recipes, items or not", async () => {
+  it("G5 a key term of the request written in an anchor's result puts it among the anchors, items or not", async () => {
     fakeComposio(
       { items: [{ summary: "Уборка" }] },
       {
@@ -227,7 +227,7 @@ describe("genter.execute", () => {
 
 });
 
-// Recipe = one successful call with fixed args + knowledge about its result: identity, upsert, change detection.
+// Anchor = one successful call with fixed args + knowledge about its result: identity, upsert, change detection.
 describe("recipes", () => {
   const SUMMARY = (n) => `Open pull requests: ${n}.`;
   // A model that counts its calls: chat describes the result by how many items it holds, vectors are constant.
@@ -298,7 +298,7 @@ describe("recipes", () => {
     assert.equal(after.digest, before.digest);
   });
 
-  it("R3 a changed result regenerates the same recipe", async () => {
+  it("R3 a changed result regenerates the same anchor", async () => {
     let titles = ["fix login"];
     const { genter, seen } = setup(() => prs(...titles));
     const first = await run(genter, {});
@@ -317,7 +317,7 @@ describe("recipes", () => {
     assert.equal(seen.chats.length, 2);
   });
 
-  it("R4 a failed call creates no recipe", async () => {
+  it("R4 a failed call creates no anchor", async () => {
     const { genter, store } = setup(() => ({ __error: "Something broke" }));
     const out = await genter.execute({ tool: "GITHUB_LIST_PULL_REQUESTS", args: { owner: "o", repo: "r" } });
     assert.equal(out.result.successful, false);
@@ -325,7 +325,7 @@ describe("recipes", () => {
     assert.equal(store.rows.size, 0);
   });
 
-  it("R5 a failure on an existing recipe marks it gone or denied, and search stops offering it", async () => {
+  it("R5 a failure on an existing anchor marks it gone or denied, and search stops offering it", async () => {
     let failure = null;
     const { genter } = setup(() => failure ?? prs("fix login"));
     const gone = await run(genter, { args: { owner: "o", repo: "deleted" } });
@@ -340,20 +340,20 @@ describe("recipes", () => {
     assert.equal(b.recipe_status, "denied");
     failure = { __error: "request timed out" };
     const c = await genter.execute({ id: denied.id });
-    assert.equal(c.recipe_status, undefined); // a timeout says nothing about the recipe
+    assert.equal(c.recipe_status, undefined); // a timeout says nothing about the anchor
 
     assert.equal((await genter.recipes.get(gone.id)).status, "gone");
     assert.equal((await genter.recipes.get(denied.id)).status, "denied");
     const found = await genter.search({ query: "open pull requests" });
     assert.ok(!found.some((x) => x.id === gone.id || x.id === denied.id));
 
-    failure = null; // the object is back: the same call makes the recipe fresh again
+    failure = null; // the object is back: the same call makes the anchor fresh again
     const back = await genter.execute({ id: gone.id });
     assert.equal(back.recipe_status, "fresh");
     assert.equal((await genter.recipes.get(gone.id)).status, "fresh");
   });
 
-  it("R6 two accounts of one app are two recipes, and revoking one denies only its own", async () => {
+  it("R6 two accounts of one app are two anchors, and revoking one denies only its own", async () => {
     const { genter } = setup(prs("fix login"));
     const a = await run(genter, { account: "ca_work" });
     const b = await run(genter, { account: "ca_home" });
@@ -375,7 +375,7 @@ describe("recipes", () => {
     assert.match(seen.chats[0], /claim ONLY what was returned/);
   });
 
-  it("R8 search returns fresh recipes with their calls, summaries and times, not tool descriptions", async () => {
+  it("R8 search returns fresh anchors with their calls, summaries and times, not tool descriptions", async () => {
     const { genter, seen } = setup(prs("fix login"));
     const out = await run(genter, {});
     const [hit] = await genter.search({ query: "open pull requests" });
@@ -427,7 +427,7 @@ describe("recipes", () => {
   });
 });
 
-describe("triggers of many recipes", () => {
+describe("triggers of many anchors", () => {
   // Composio's trigger endpoints over fetch, on top of fakeComposio: one trigger type (a commit in a repository), an upsert
   // that makes a NEW trigger each time (so sharing is Genter's doing), enable and disable.
   function fakeTriggers() {
@@ -469,7 +469,7 @@ describe("triggers of many recipes", () => {
     return { genter, seen, file, set: (path, value) => (text = { ...text, [path]: value }) };
   };
 
-  it("T1 each recipe keeps its own trigger; the same subscription is one Composio trigger, disabled when nobody keeps it", async () => {
+  it("T1 each anchor keeps its own trigger; the same subscription is one Composio trigger, disabled when nobody keeps it", async () => {
     const { genter, seen, file } = setup();
     const [a, b, c] = [await file("a"), await file("b"), await file("c")];
     const on = await genter.recipes.setTriggers({ ids: [a, b], active: true });
@@ -498,16 +498,16 @@ describe("triggers of many recipes", () => {
     assert.equal((await genter.recipes.get(c)).trigger.active, true);
   });
 
-  it("T2 a recipe that cannot be turned on says why and stays off; the others are turned on", async () => {
+  it("T2 an anchor that cannot be turned on says why and stays off; the others are turned on", async () => {
     const { genter, file } = setup();
     const a = await file("a");
     const out = await genter.recipes.setTriggers({ ids: [a, "rcp_missing"], active: true });
     assert.equal(out[0].active, true);
-    assert.deepEqual(out[1], { id: "rcp_missing", active: false, label: null, error: "Unknown recipe" });
-    await assert.rejects(genter.recipes.setTrigger({ id: "rcp_missing", active: true }), /Unknown recipe/);
+    assert.deepEqual(out[1], { id: "rcp_missing", active: false, label: null, error: "Unknown anchor" });
+    await assert.rejects(genter.recipes.setTrigger({ id: "rcp_missing", active: true }), /Unknown anchor/);
   });
 
-  it("T3 a changed result keeps what the recipe said before", async () => {
+  it("T3 a changed result keeps what the anchor said before", async () => {
     const { genter, file, set } = setup();
     const a = await file("a");
     assert.equal((await genter.recipes.get(a)).previous, undefined);
@@ -540,7 +540,7 @@ describe("queryEmbeddings", () => {
   };
   const call = { tool: "GITHUB_LIST_PULL_REQUESTS", args: { owner: "o", repo: "r" } };
 
-  it("Q1 a new question close to a past request (far from the summary) finds the recipe through it", async () => {
+  it("Q1 a new question close to a past request (far from the summary) finds the anchor through it", async () => {
     const { genter } = setup();
     await genter.search({ query: "old question about waiting reviews" });
     const out = await genter.execute({ ...call, task: "old question about waiting reviews" });
@@ -563,7 +563,7 @@ describe("queryEmbeddings", () => {
     assert.ok((await genter.search({ query: "clumsy way to ask it" })).some((r) => r.tool === call.tool));
   });
 
-  it("Q4 asked keeps a request on the recipes an answer used, after the calls, and only on them", async () => {
+  it("Q4 asked keeps a request on the anchors an answer used, after the calls, and only on them", async () => {
     const { genter } = setup();
     const answerCall = await genter.execute(call);
     const lookup = await genter.execute({ tool: "GITHUB_LIST_REPOSITORIES", args: { owner: "o" } });

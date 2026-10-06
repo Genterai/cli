@@ -32,7 +32,7 @@ const memoryScopes = () => {
 };
 
 describe("Websites", () => {
-  it("W1 a site is a prepared area: each page a recipe; again, a changed page is described again and a removed one is gone", async () => {
+  it("W1 a site is a prepared area: each page an anchor; again, a changed page is described again and a removed one is gone", async () => {
     const pages = {
       "/docs/": `<title>Docs</title><h1>Docs</h1><p>Start here.</p><a href="a">A</a> <a href="/docs/b">B</a> <a href="/blog/x">out of the folder</a>`,
       "/docs/a": `<title>A</title><p>Install it.</p>`,

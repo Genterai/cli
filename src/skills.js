@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { inflateRawSync } from "node:zlib";
 
 // Skills: a folder (SKILL.md, other markdown, artifacts, scripts) that Genter turns into search-able pieces.
-// This file is the pure part: no I/O, no models, no execution. A skill NEVER becomes one Recipe: each Recipe is one call
+// This file is the pure part: no I/O, no models, no execution. A skill NEVER becomes one Anchor: each Anchor is one call
 // that reads ONE piece ("read section X of skill Y at version Z", SKILL_READ_CHUNK) or hands over ONE file
 // (SKILL_GET_FILE), with fixed args, exactly like any other call (see specs/skills.md).
 
@@ -267,7 +267,7 @@ export const skillVersion = (files) =>
 // What the pieces of a skill are, from its (normalized) files: no I/O, no model.
 // { name, description, version, files: [{ path, kind, mime, size, sha }], chunks: [{ id, path, title, headings, level, start,
 //   end, refs: [artifact/script paths], see: [chunk ids of other markdown files] }], texts: Map(path -> text),
-//   recipes: { chunks, files } } (recipes: what "Generate project" would make).
+//   recipes: { chunks, files } } (anchors: what "Generate project" would make).
 export function buildSkill(files, { fallbackName = "skill" } = {}) {
   const texts = new Map(files.filter((f) => f.kind === "markdown").map((f) => [f.path, f.bytes.toString("utf8").replace(/^﻿/, "").replace(/\r\n?/g, "\n")]));
   const meta = parseSkillMd(texts.get("SKILL.md") ?? "");
@@ -321,14 +321,14 @@ export function chunkEmbeddingText(skill, chunk, text) {
   return `${skill.name} › ${chunk.headings.join(" › ")}\n${text.slice(chunk.start, chunk.end).slice(0, 1800)}`;
 }
 
-// The Recipe call that reads a piece / hands over a file at a version. Fixed args, nothing to fill in.
+// The Anchor call that reads a piece / hands over a file at a version. Fixed args, nothing to fill in.
 export const chunkCall = (skillId, version, chunkId) => ({ tool: SKILL_TOOLS.chunk, args: { skill: skillId, version, chunk: chunkId } });
 export const fileCall = (skillId, version, path) => ({ tool: SKILL_TOOLS.file, args: { skill: skillId, version, path } });
 
 // The label a script carries wherever it is offered: Genter only hands code over.
 export const SCRIPT_NOTE = "Executable code. Genter does NOT run it: read it, or run it yourself where you may.";
 
-// Intent keys of a recipe: the requests it answered, as text, no duplicates (case and spacing aside), newest last, at most MAX.
+// Intent keys of an anchor: the requests it answered, as text, no duplicates (case and spacing aside), newest last, at most MAX.
 export const MAX_INTENTS = 12;
 export function addIntent(list = [], task) {
   const text = String(task ?? "").replace(/\s+/g, " ").trim().slice(0, 300);

@@ -1,7 +1,7 @@
 {
   "name": "genter-cli",
   "version": "0.2.0",
-  "description": "Composio tools with saved call recipes and a fast agent that works from them.",
+  "description": "Composio tools with saved call anchors and a fast agent that works from them.",
   "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "bin": { "genter": "bin/genter.js" },

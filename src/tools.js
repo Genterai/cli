@@ -2,10 +2,10 @@ import { z } from "zod";
 import { fileEditor, refLabel } from "./refs.js";
 
 // Shared by the CLI and the MCP server.
-export const instructions = `Genter runs Composio tools and remembers each successful call as a recipe: one call with fixed args, plus what it returned.
-1. search first: a saved recipe says which call (tool + args) answers a question. Its summary is what the call returned when it was saved, not the current value.
-2. execute with tool + args, or with id to repeat a recipe (override args as needed). The real tool always runs, so the data is fresh.
-3. Every successful call is saved automatically; the same call updates the same recipe, and only when its result changed. A failed call saves nothing.
+export const instructions = `Genter runs Composio tools and remembers each successful call as an anchor: one call with fixed args, plus what it returned.
+1. search first: a saved anchor says which call (tool + args) answers a question. Its summary is what the call returned when it was saved, not the current value.
+2. execute with tool + args, or with id to repeat an anchor (override args as needed). The real tool always runs, so the data is fresh.
+3. Every successful call is saved automatically; the same call updates the same anchor, and only when its result changed. A failed call saves nothing.
 4. An app can be connected several times (e.g. work and personal gmail): login lists the connections,
    pass \`account\` to execute to pick one; without it the default connection is used.`;
 
@@ -31,8 +31,8 @@ export const tools = {
   },
   search: {
     description:
-      "Find which call to make: a saved recipe by what its result meant ({id, tool, args, title, short, summary, status, updated_at, checked_at}), " +
-      "or Composio tools (id: null, args = JSON schema). A recipe's summary is not the current value: execute it.",
+      "Find which call to make: a saved anchor by what its result meant ({id, tool, args, title, short, summary, status, updated_at, checked_at}), " +
+      "or Composio tools (id: null, args = JSON schema). An anchor's summary is not the current value: execute it.",
     input: z.object({
       query: z.string().describe("What you want to do, in plain words"),
       limit: z.number().int().min(1).max(20).optional(),
@@ -41,10 +41,10 @@ export const tools = {
   },
   execute: {
     description:
-      "Run a tool. Pass `tool` + `args`, or `id` from search to repeat a recipe (args override). " +
-      "Every successful call is saved as a recipe automatically (the same call updates the same one).",
+      "Run a tool. Pass `tool` + `args`, or `id` from search to repeat an anchor (args override). " +
+      "Every successful call is saved as an anchor automatically (the same call updates the same one).",
     input: z.object({
-      id: z.string().optional().describe("id of a saved recipe to repeat"),
+      id: z.string().optional().describe("id of a saved anchor to repeat"),
       tool: z.string().optional().describe("Tool slug, e.g. GMAIL_FETCH_EMAILS"),
       args: z.record(z.string(), z.any()).optional(),
       account: z.string().optional().describe("Connection to use (account id or alias from login) when the app is connected several times"),
@@ -52,23 +52,23 @@ export const tools = {
     annotations: { readOnlyHint: false, openWorldHint: true },
   },
   recipes: {
-    description: "List saved recipes (id, title, source, status, updated and checked times, trigger state).",
+    description: "List saved anchors (id, title, source, status, updated and checked times, trigger state).",
     input: z.object({}),
     annotations: { readOnlyHint: true },
   },
   recheck_recipe: {
-    description: "Run a saved recipe's call again: updated only if its result changed. Returns { recipe, changed, status }.",
+    description: "Run a saved anchor's call again: updated only if its result changed. Returns { recipe (the anchor), changed, status }.",
     input: z.object({ id: z.string() }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   },
   remove_recipe: {
-    description: "Delete a saved recipe.",
+    description: "Delete a saved anchor.",
     input: z.object({ id: z.string() }),
     annotations: { readOnlyHint: false, destructiveHint: true },
   },
 };
 
-// MCP surface: only agent tools. Each one starts or continues a fast server-side agent that works from recipes first.
+// MCP surface: only agent tools. Each one starts or continues a fast server-side agent that works from anchors first.
 // GENTER_FIND and GENTER_CONTINUE_TASK only read; GENTER_RUN_TASK and GENTER_WRITE change things and come only with actions.
 // Names carry the GENTER_ prefix so they stay recognizable in clients that flatten tools from many servers.
 const APPS =
@@ -79,11 +79,11 @@ const APPS =
 // an action the client has fully decided); the client's model reads, thinks and writes every text itself. Genter never
 // writes, rewrites, summarizes or translates anything for it.
 export const agentInstructions = `Genter connects the user's apps (${APPS}) in one place and finds what is in them, fast:
-every successful call becomes a recipe (one call with fixed args), found next time by what it returned; the real call is always re-run for fresh data.
+every successful call becomes an anchor (one call with fixed args), found next time by what it returned; the real call is always re-run for fresh data.
 Genter finds; you think and write. Genter returns the raw data from the user's apps and never writes, rewrites, summarizes, translates or drafts anything:
 do all of that yourself from the data it returns. Never ask Genter to change, rewrite, improve, shorten or compose a text.
 - GENTER_FIND: any question about the user's own data (emails, events, files, issues, messages, contacts, docs, pages). Read-only. Returns raw data:
-  the live results of the recipes that hold the answer (a saved one that fits, or new ones a fast agent finds and saves), each under a line naming its call. Answer from them yourself.
+  the live results of the anchors that hold the answer (a saved one that fits, or new ones a fast agent finds and saves), each under a line naming its call. Answer from them yourself.
   Optional goal (what the task is for, e.g. "writing product docs"): also returns the user's matching skills and guides in a separate
   "Skills for the goal" section, never among the data, each once per chat (pass the same optional conversation_id in every call of a chat, a new one in a new chat). Leave it out when you only look something up.
   Ask only for what to find (who, what, when, which app), never for what to do with it: for "rewrite the intro of our README", find "the README of <repo>" and rewrite it yourself.
@@ -113,12 +113,12 @@ export function agentTools({ connected = [], actions = false } = {}) {
       description:
         "Find anything in the user's apps: emails, messages, meetings, files, docs, pages, issues, PRs, contacts, deals, invoices. " +
         "Read-only and safe: nothing is sent or changed.\n" +
-        "Returns raw data, not a written answer: the live results of the recipes (saved calls with fixed args) that hold what was asked, " +
-        "best first, each under a line naming its call (recipe id, tool, args), then a JSON line. Read them and answer the user yourself.\n" +
+        "Returns raw data, not a written answer: the live results of the anchors (saved calls with fixed args) that hold what was asked, " +
+        "best first, each under a line naming its call (anchor id, tool, args), then a JSON line (its `recipes` field lists those anchors). Read them and answer the user yourself.\n" +
         "Genter only finds. It never writes, rewrites, summarizes or translates: ask it for the data, then do that yourself. " +
         "Say what to find, not what to do with it: \"the README of genter-cli\", not \"rewrite the README of genter-cli\"; " +
         "\"Anna's last email about the contract\", not \"draft a reply to Anna\".\n" +
-        "A saved recipe that clearly fits runs at once; otherwise a fast agent finds the right calls in the apps and saves them as recipes, " +
+        "A saved anchor that clearly fits runs at once; otherwise a fast agent finds the right calls in the apps and saves them as anchors, " +
         "so the next such question takes one step. The data is always read live from the apps, so it is current.\n" +
         "Call it before answering any question about the user's own data instead of guessing or saying you can't see it: " +
         "\"what did Anna write about the contract\", \"my meetings tomorrow\", \"PRs waiting for my review\", \"the invoice from March\".\n" +
@@ -228,7 +228,7 @@ export function agentResultText(out, { write = false } = {}) {
     run_id: out.run_id,
     status: out.status,
     ...(out.connect_url && { connect_url: out.connect_url }),
-    ...(out.steps?.length && { steps: out.steps.map((s) => `${s.ok ? "✓" : "✗"} ${s.tool}${s.recipe ? " (recipe)" : ""}`) }),
+    ...(out.steps?.length && { steps: out.steps.map((s) => `${s.ok ? "✓" : "✗"} ${s.tool}${s.recipe ? " (anchor)" : ""}`) }),
     ...(out.suggestions?.length && { suggestions: out.suggestions }),
     ...(out.credits != null && { credits: out.credits }),
     ...(out.usage?.ms != null && { ms: out.usage.ms }),
@@ -238,12 +238,12 @@ export function agentResultText(out, { write = false } = {}) {
   return `${out.answer ?? ""}${listed}\n\n${JSON.stringify(meta)}`;
 }
 
-// GENTER_FIND's result: the raw results of the recipes that hold the answer, best first: { results: [{ id, tool, args,
+// GENTER_FIND's result: the raw results of the anchors that hold the answer, best first: { results: [{ id, tool, args,
 // title?, account?, score?, created, changed, instructions?, data }] }. Each is a saved call run live just now: a saved
-// recipe that fits (out.direct: no model at all), or the calls an agent run in mode "recipes" found and saved. Each comes
+// anchor that fits (out.direct: no model at all), or the calls an agent run in mode "recipes" found and saved. Each comes
 // under a line naming its call, as it came (file contents sent as base64 decoded); then their References (with write on,
 // how to write there) and a JSON line. No model wrote an answer: the client's own model answers from the data, so the
-// person's prompt (instructions) and the prompts of the recipes' projects go along in the JSON as `instructions`.
+// person's prompt (instructions) and the prompts of the anchors' projects go along in the JSON as `instructions`.
 // A run that found nothing, or stopped to ask or for a connection, says so first, in the agent's words.
 export function recipesResultText(out, { write = false, instructions } = {}) {
   const results = out.results ?? [];
@@ -251,10 +251,10 @@ export function recipesResultText(out, { write = false, instructions } = {}) {
   const said = String(out.answer ?? "").trim();
   const note = said && (!results.length || out.status !== "done") ? said : "";
   const blocks = results.map((r, i) => `${recipeLine(r, i + 1)}\n${JSON.stringify(readable(r.data) ?? null)}`);
-  // Skills and guides picked by GENTER_FIND's goal: their own section after the data, never counted among the recipes.
+  // Skills and guides picked by GENTER_FIND's goal: their own section after the data, never counted among the anchors.
   const skills = out.skills ?? [];
   const skillBlocks = skills.length
-    ? [`Skills for the goal (guides on how to do it, not data to answer from):\n\n${skills.map((r, i) => `Skill ${i + 1}: ${recipeLine(r, i + 1).replace(/^Recipe \d+: /, "")}\n${JSON.stringify(readable(r.data) ?? null)}`).join("\n\n")}`]
+    ? [`Skills for the goal (guides on how to do it, not data to answer from):\n\n${skills.map((r, i) => `Skill ${i + 1}: ${recipeLine(r, i + 1).replace(/^Anchor \d+: /, "")}\n${JSON.stringify(readable(r.data) ?? null)}`).join("\n\n")}`]
     : [];
   const told = [instructions, ...results.map((r) => r.instructions)].map((t) => String(t ?? "").trim()).filter((t, i, all) => t && all.indexOf(t) === i);
   const next = nextOf(out, refs, write);
@@ -276,9 +276,9 @@ export function recipesResultText(out, { write = false, instructions } = {}) {
   return [note, ...blocks, ...skillBlocks, listed, JSON.stringify(meta)].filter(Boolean).join("\n\n");
 }
 
-// Recipe 1: rcp_… · GMAIL_FETCH_EMAILS {"query":"from:anna"} — Emails from Anna (account work)
+// Anchor 1: rcp_… · GMAIL_FETCH_EMAILS {"query":"from:anna"} — Emails from Anna (account work)
 const recipeLine = (r, i) =>
-  `Recipe ${i}: ${[r.id, r.tool].filter(Boolean).join(" · ")}${Object.keys(r.args ?? {}).length ? ` ${JSON.stringify(r.args)}` : ""}${r.title ? ` — ${r.title}` : ""}${r.account ? ` (account ${r.account})` : ""}`;
+  `Anchor ${i}: ${[r.id, r.tool].filter(Boolean).join(" · ")}${Object.keys(r.args ?? {}).length ? ` ${JSON.stringify(r.args)}` : ""}${r.title ? ` — ${r.title}` : ""}${r.account ? ` (account ${r.account})` : ""}`;
 
 // A result as the app sent it, except file contents sent as base64 (GitHub's {encoding: "base64", content}, at the top
 // or one level down): decoded, so a model can read them. Contents that are not text stay as they came.
@@ -311,7 +311,7 @@ export function referenceText(r, write = false, { read = false } = {}) {
 }
 
 // The request that reads a reference in full, as Search asks it when a source is clicked: what it is, its name, and where it
-// is (a link, else the ids that point to it), so the agent makes the one call that reads it (a saved recipe of it runs
+// is (a link, else the ids that point to it), so the agent makes the one call that reads it (a saved anchor of it runs
 // at once). A skill's piece: "Read the docs-writing skill: SKILL.md#install".
 export function readQuestion(r) {
   if (!r) return null;

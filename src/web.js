@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { publicFetch, textOf } from "./net.js";
 
-// Websites: a page is read by a local tool, WEBSITE_READ_PAGE {url} -> { url, title, text }, and becomes a recipe like
+// Websites: a page is read by a local tool, WEBSITE_READ_PAGE {url} -> { url, title, text }, and becomes an anchor like
 // any call (genter.js). Connecting a site is preparing an area: crawl() finds its pages (the address and the pages it
 // links to on the same site, up to two links deep), then each page is one execute. Pages the crawl just read are
 // kept for a few minutes, so the executes that follow do not download them again.
@@ -192,8 +192,8 @@ export const forgetPage = (url) => {
   } catch {}
 };
 
-// The tool: one page as { successful, data: { url, title, text } }. A page that is gone answers 404 (its recipe is
-// then marked gone); one that could not be read (down, not text) is a failure that says nothing about the recipe.
+// The tool: one page as { successful, data: { url, title, text } }. A page that is gone answers 404 (its anchor is
+// then marked gone); one that could not be read (down, not text) is a failure that says nothing about the anchor.
 export async function readPage({ url } = {}) {
   let target;
   try {

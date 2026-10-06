@@ -19,7 +19,7 @@ function firstItem(app) {
 const tools = (hints) => hints.map((h) => h.tool);
 
 describe("GitHub: a project synced as knowledge", () => {
-  // A hit of the ready repository recipe (parts about/files/issues), as sources.search returns it.
+  // A hit of the ready repository anchor (parts about/files/issues), as sources.search returns it.
   const hit = (over) =>
     shapeRef({
       app: "github",
@@ -54,7 +54,7 @@ describe("GitHub: a project synced as knowledge", () => {
     assert.equal(fileEditor(shapeRef({ app: "github", url: "https://github.com/a/b/issues/1" })), null);
   });
 
-  it("S1 an item synced before items kept `where`: the path comes from the item id, owner/repo/branch from the recipe", () => {
+  it("S1 an item synced before items kept `where`: the path comes from the item id, owner/repo/branch from the anchor", () => {
     const ref = hit({ where: { owner: "Genterai", repo: "genter-cli", branch: "main", tree_sha: "main" } });
     assert.deepEqual(ref.where, { owner: "Genterai", repo: "genter-cli", path: "src/sync.js", branch: "main" });
   });

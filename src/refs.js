@@ -8,7 +8,7 @@ import { idKeys, inferList, locatorArgs, pick } from "./shape.js";
 //   where  the args that point to it, named the way the app's write tools name them: {owner, repo, path, branch},
 //          {thread_id}, {tasklist_id, task_id}; for other apps the list call's own args plus the item's id fields
 //   via    how the run found it: knowledge (a synced source), item (one item of a list result), call (a call's whole
-//          result), recipe (a saved result), link (a link the user gave)
+//          result), anchor (a saved result), link (a link the user gave)
 // The agent numbers references as it shows them to the model, the answer cites them as [n], and writeHints says which
 // write tools work at a reference, with their args already filled from `where`: known ones for popular apps, and for
 // any other app its own tools, ranked by how much of `where` they take.

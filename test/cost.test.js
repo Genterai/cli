@@ -60,7 +60,7 @@ test("embedMany: one event per request with texts, tokens and a nonzero estimate
   globalThis.fetch = embeddingsFetch({ prompt_tokens: 120 });
   const g = createGenter({ composioApiKey: "k", openrouterApiKey: "k", userId: "u", secret: "s", store: { all: async () => [], get: async () => null, put: async () => {} }, knowledge: { all: async () => [] } });
   assert.ok(g);
-  // the engine's embeddings are reached through recipes.search -> embed; use the public search path
+  // the engine's embeddings are reached through anchors.search -> embed; use the public search path
   await withCost({ org_id: "ws1", user_id: "u1" }, () => g.search({ query: "когда мне убираться" }).catch(() => {}));
   const e = events.find((x) => x.type === "embedding");
   assert.ok(e, `no embedding event; got ${JSON.stringify(events)}`);

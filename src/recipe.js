@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-// Recipe = one successful tool call with fixed, concrete arguments + knowledge about its actual result.
+// Anchor = one successful tool call with fixed, concrete arguments + knowledge about its actual result.
 // This file is the pure part: identity, change detection, failure classes, provenance. No I/O, no models.
 
 const sha = (text) => createHash("sha256").update(text).digest("hex");
@@ -35,7 +35,7 @@ export function canonicalArgs(value, key = "") {
 export const canonicalJson = (args) => JSON.stringify(canonicalArgs(args ?? {}) ?? {});
 
 // "rcp_" + sha256(workspaceId | scope | tool | canonicalArgs)[0..24]. scope = the connected account id ("" when
-// the app's default connection was used): two accounts never share a recipe.
+// the app's default connection was used): two accounts never share an anchor.
 export function recipeId({ workspaceId = "", scope = "", tool, args }) {
   return `rcp_${sha([workspaceId, scope ?? "", tool, canonicalJson(args)].join("|")).slice(0, 24)}`;
 }
@@ -87,7 +87,7 @@ export function isPartial(data) {
 
 // A failed call, classified. "gone": what the call points to is not there any more. "denied": this account may not
 // (or no longer can) see it: forbidden, unauthorized, revoked or expired connection. Anything else (a timeout, a bad
-// argument, a rate limit) is null: a transient failure never changes a recipe.
+// argument, a rate limit) is null: a transient failure never changes an anchor.
 export function classifyFailure(error) {
   const text = typeof error === "string" ? error : error instanceof Error ? error.message : JSON.stringify(error ?? "");
   if (!text) return null;
@@ -215,8 +215,8 @@ export function areaOf({ args = {}, data } = {}) {
 }
 
 // A stored record as the current model needs it. Legacy records ({ memory, kind, alias, live }) map onto it; alias,
-// sync records and records that were never recipes (no memory: unlisted results) return null. Embeddings and
-// summaries of ordinary recipes are kept. Non-destructive: the stored row is only replaced on the next execute.
+// sync records and records that were never anchors (no memory: unlisted results) return null. Embeddings and
+// summaries of ordinary anchors are kept. Non-destructive: the stored row is only replaced on the next execute.
 export function normalizeLegacy(record) {
   if (!record || typeof record !== "object") return null;
   if (record.removed || record.alias || record.kind === "sync") return null;
