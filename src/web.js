@@ -1,3 +1,4 @@
+import { redirectOf } from "./drift.js";
 import { createHash } from "node:crypto";
 import { publicFetch, textOf } from "./net.js";
 
@@ -156,6 +157,7 @@ async function page(url, rules) {
     signal: AbortSignal.timeout(WEBSITE.pageMs),
   });
   const type = res.headers.get("content-type") ?? "";
+  const lastModified = res.headers.get("last-modified") ?? undefined;
   if (res.status === 404 || res.status === 410) {
     await res.body?.cancel().catch(() => {});
     return { missing: res.status };
@@ -170,18 +172,18 @@ async function page(url, rules) {
     const text = raw.trim();
     const heading = /^#{1,3}\s+(.+)$/m.exec(text)?.[1].replace(/\s*\(\/[^)]*\)\s*$/, "").trim();
     const links = [...text.matchAll(/\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)/g)].map((m) => m[1]);
-    return { url: final, title: heading || new URL(final).pathname, text, links, base: final };
+    return { url: final, title: heading || new URL(final).pathname, text, links, base: final, lastModified };
   }
   if (/<meta[^>]+name=["']robots["'][^>]+content=["'][^"']*noindex/i.test(raw)) return null;
   const { title, text, links, base } = htmlText(raw);
-  return { url: final, title: title || new URL(final).pathname, text, links, base: base ? new URL(base, final).toString() : final };
+  return { url: final, title: title || new URL(final).pathname, text, links, base: base ? new URL(base, final).toString() : final, lastModified };
 }
 
 // Pages read lately: url -> { at, page }.
 const recent = new Map();
 const RECENT_MS = 10 * 60_000;
-const remember = (url, got) => {
-  recent.set(url, { at: Date.now(), page: got });
+const remember = (url, got, source) => {
+  recent.set(url, { at: Date.now(), page: got, ...(source && { source }) });
   if (recent.size > 2000) recent.delete(recent.keys().next().value);
 };
 
@@ -190,6 +192,12 @@ export const forgetPage = (url) => {
   try {
     recent.delete(siteUrl(url));
   } catch {}
+};
+
+// { last_modified?, redirect? }: the Last-Modified header, and the final address when it is not the one asked for.
+const pageSource = (asked, got) => {
+  const redirect = redirectOf(asked, got.url);
+  return got.lastModified || redirect ? { ...(got.lastModified && { last_modified: got.lastModified }), ...(redirect && { redirect }) } : undefined;
 };
 
 // The tool: one page as { successful, data: { url, title, text } }. A page that is gone answers 404 (its anchor is
@@ -202,14 +210,16 @@ export async function readPage({ url } = {}) {
     return { successful: false, error: e.message, data: null };
   }
   const hit = recent.get(target);
-  if (hit && Date.now() - hit.at < RECENT_MS) return { successful: true, data: hit.page };
+  if (hit && Date.now() - hit.at < RECENT_MS) return { successful: true, data: hit.page, ...(hit.source && { source: hit.source }) };
   try {
     const got = await page(target, []);
     if (got?.missing) return { successful: false, error: `${target}: not found (${got.missing})`, data: null };
     if (!got?.text) return { successful: false, error: `${target}: no text to read`, data: null };
     const data = { url: got.url, title: got.title, text: got.text };
-    remember(target, data);
-    return { successful: true, data };
+    // Anchor Drift: what the HTTP answer said about the page, kept beside the data (never in it: the digest stays the text's).
+    const source = pageSource(target, got);
+    remember(target, data, source);
+    return { successful: true, data, ...(source && { source }) };
   } catch (e) {
     return { successful: false, error: `${target}: ${e.cause?.message ?? e.message}`, data: null };
   }
@@ -249,8 +259,8 @@ export async function crawl({ url, depth, max = WEBSITE.maxPages, budgetMs = WEB
         if (!got.text || texts.has(hash) || pages.length >= limit) continue;
         texts.add(hash);
         pages.push({ url: got.url, title: got.title, text: got.text, hash, size: got.text.length });
-        remember(url, { url: got.url, title: got.title, text: got.text });
-        if (got.url !== url) remember(got.url, { url: got.url, title: got.title, text: got.text });
+        remember(url, { url: got.url, title: got.title, text: got.text }, pageSource(url, got));
+        if (got.url !== url) remember(got.url, { url: got.url, title: got.title, text: got.text }, pageSource(got.url, got));
         if (d < levels) {
           for (const href of got.links) {
             const link = pageLink(href, got.base, start);

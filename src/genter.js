@@ -6,6 +6,7 @@ import { areaOf, canonicalArgs, canonicalJson, classifyFailure, contentHash, isP
 import { fill, inferList, pick } from "./shape.js";
 import { itemOf, listedItems, planReconcile } from "./area.js";
 import { addIntent, chunkCall, fileCall, isSkillTool, LIMITS as SKILL_LIMITS, SCRIPT_NOTE, SKILL_TOOLS } from "./skills.js";
+import { signalsOf, areaStats } from "./drift.js";
 import { crawl, forgetPage, namesSite, readPage, siteUrl, underSite } from "./web.js";
 
 // Genter = Composio + anchors of past calls.
@@ -747,13 +748,26 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       const intents = (old) => (isSkillTool(tool) ? addIntent(old?.intents, task) : old?.intents);
       // The area the call reads in (a repository, a folder, a calendar), so a project can be offered for it.
       const area = areaOf({ args, data: result.data });
+      // Anchor Drift: dates and a "replaced" mark of the source, read from this result with no model. Never part of the digest.
+      const drift = signalsOf(result.data, { last_modified: result.source?.last_modified, redirect: result.source?.redirect });
+      const withDrift = (r) => {
+        const { source_at, source_created_at, superseded, ...rest } = r;
+        return { ...rest, ...drift };
+      };
+      const shownSignals = (r) => ({
+        ...(r.source_at && { source_at: r.source_at }),
+        ...(r.source_created_at && { source_created_at: r.source_created_at }),
+        ...(r.superseded && { superseded: r.superseded }),
+        updated_at: r.updated_at,
+        source: [r.scope?.toolkit, r.scope?.account, r.scope?.area?.id].map((x) => x ?? "").join("/"),
+      });
       if (existing && existing.digest === digest && (existing.summary || !openrouterApiKey)) {
         // Same result: nothing is described or embedded again.
-        const next = { ...existing, scope: withArea(existing.scope, area), status: "fresh", checked_at: at };
+        const next = { ...withDrift(existing), scope: withArea(existing.scope, area), status: "fresh", checked_at: at };
         if (asked) next.queryEmbeddings = addQuery(existing.queryEmbeddings, asked, at);
         if (isSkillTool(tool) && task) next.intents = intents(existing);
-        if (asked || (isSkillTool(tool) && task) || existing.status !== "fresh" || existing.checked_at !== at) await save(next);
-        return { id: rid, result, created: false, changed: false, unchanged: true, pending: Promise.resolve(publicRecipe(next)), recipe_status: "fresh" };
+        if (asked || (isSkillTool(tool) && task) || existing.status !== "fresh" || existing.checked_at !== at || canonicalJson(driftOf(existing)) !== canonicalJson(drift)) await save(next);
+        return { id: rid, result, created: false, changed: false, unchanged: true, signals: shownSignals(next), pending: Promise.resolve(publicRecipe(next)), recipe_status: "fresh" };
       }
       const created = !existing;
       // An anchor of the old model (random id) re-keys here: its knowledge is kept when the result is the same.
@@ -769,7 +783,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         ...(legacy?.disabled && { disabled: legacy.disabled }),
         ...(kept && { title: kept.title, short: kept.short, summary: kept.summary, items: kept.items, summaryEmbedding: kept.summaryEmbedding, itemEmbeddings: kept.itemEmbeddings, source: kept.source, partial: kept.partial }),
       };
-      const record = { ...base, scope: withArea(base.scope, area), digest, status: "fresh", updated_at: at, checked_at: at };
+      const record = withDrift({ ...base, scope: withArea(base.scope, area), digest, status: "fresh", updated_at: at, checked_at: at });
       // What it said before this change, so a notification can tell what changed (summaries only, never the raw result).
       if (existing?.summary) record.previous = previousOf(existing);
       // A skill's piece says what it is with no model: its title, place and text are there from the first save, so a list
@@ -784,7 +798,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         ? Promise.resolve(publicRecipe(record))
         : (isSkillTool(tool) ? rememberSkill(rid, digest, result.data) : remember(rid, digest, result.data, { created })).then(publicRecipe);
       later(described);
-      return { id: rid, result, created, changed: !created, unchanged: false, pending: described.catch(() => null), recipe_status: "fresh" };
+      return { id: rid, result, created, changed: !created, unchanged: false, signals: shownSignals(record), pending: described.catch(() => null), recipe_status: "fresh" };
     },
 
     // Anchors: everything saved, one by one, or a prepared area.
@@ -997,7 +1011,9 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
           out.gone.push(id);
         }
         const failed = Object.fromEntries(Object.entries(failures).filter(([key]) => items.has(key)));
-        return { status: "done", ...out, listing: { ...listing, versions, failed, at: now() } };
+        // Anchor Drift: how lively the area is, from the versions this listing already gave (no new pass, no model).
+        const stats = areaStats([...items.values()].map((i) => i.version));
+        return { status: "done", ...out, listing: { ...listing, versions, failed, at: now(), ...(stats ? { stats } : { stats: undefined }) } };
       },
       // Which of these anchors are reads of an area kept whole (its listing): their ids.
       async inArea({ listing, ids }) {
@@ -1117,6 +1133,7 @@ const withArea = (scope = {}, area) => {
   const { area: _old, ...rest } = scope ?? {};
   return area ? { ...rest, area } : rest;
 };
+const driftOf = ({ source_at, source_created_at, superseded }) => ({ source_at, source_created_at, superseded });
 export function addQuery(list = [], vector, at = new Date().toISOString()) {
   if (!vector?.length) return list;
   const e = Array.from(vector.slice(0, ITEM_DIMS));

@@ -1,3 +1,4 @@
+import { driftFacts, sourceCount, sourcesLine } from "./drift.js";
 import { z } from "zod";
 import { fileEditor, refFromUrl, refLabel } from "./refs.js";
 
@@ -256,13 +257,15 @@ export function recipesResultText(out, { write = false, instructions } = {}) {
   const refs = out.references ?? [];
   const said = String(out.answer ?? "").trim();
   const note = said && (!results.length || out.status !== "done") ? said : "";
-  const blocks = results.map((r, i) => `${recipeLine(r, i + 1)}\n${JSON.stringify(readable(r.data) ?? null)}`);
+  const around = results.map((r) => r.signals).filter(Boolean);
+  const blocks = results.map((r, i) => `${recipeLine(r, i + 1, around)}\n${JSON.stringify(readable(r.data) ?? null)}`);
   // Skills and guides picked by GENTER_FIND's goal: their own section after the data, never counted among the anchors.
   const skills = out.skills ?? [];
   const skillBlocks = skills.length
     ? [`Skills for the goal (guides on how to do it, not data to answer from):\n\n${skills.map((r, i) => `Skill ${i + 1}: ${recipeLine(r, i + 1).replace(/^Anchor \d+: /, "")}\n${JSON.stringify(readable(r.data) ?? null)}`).join("\n\n")}`]
     : [];
-  const told = [instructions, ...results.map((r) => r.instructions)].map((t) => String(t ?? "").trim()).filter((t, i, all) => t && all.indexOf(t) === i);
+  const sources = sourceCount(results);
+  const told = [instructions, ...results.map((r) => r.instructions), sources >= 2 ? sourcesLine(sources) : ""].map((t) => String(t ?? "").trim()).filter((t, i, all) => t && all.indexOf(t) === i);
   const next = nextOf(out, refs, write);
   const meta = {
     ...(out.run_id && { run_id: out.run_id }),
@@ -283,8 +286,12 @@ export function recipesResultText(out, { write = false, instructions } = {}) {
 }
 
 // Anchor 1: rcp_… · GMAIL_FETCH_EMAILS {"query":"from:anna"} — Emails from Anna (account work)
-const recipeLine = (r, i) =>
-  `Anchor ${i}: ${[r.id, r.tool].filter(Boolean).join(" · ")}${Object.keys(r.args ?? {}).length ? ` ${JSON.stringify(r.args)}` : ""}${r.title ? ` — ${r.title}` : ""}${r.account ? ` (account ${r.account})` : ""}`;
+// Anchor Drift (drift.js): a bracketed fact is added ONLY when the anchor's source deviates (old while others around it are
+// fresh, marked as replaced); otherwise the line is exactly as before. others: the signals of the whole answer.
+export const recipeLine = (r, i, others = []) => {
+  const facts = driftFacts(r.signals, others);
+  return `Anchor ${i}: ${[r.id, r.tool].filter(Boolean).join(" · ")}${Object.keys(r.args ?? {}).length ? ` ${JSON.stringify(r.args)}` : ""}${r.title ? ` — ${r.title}` : ""}${r.account ? ` (account ${r.account})` : ""}${facts.length ? ` [${facts.join("; ")}]` : ""}`;
+};
 
 // A result as the app sent it, except file contents sent as base64 (GitHub's {encoding: "base64", content}, at the top
 // or one level down): decoded, so a model can read them. Contents that are not text stay as they came.
