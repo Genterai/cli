@@ -919,6 +919,7 @@ function keepRaw(run, { id, from, tool, args, out, cited }) {
     created: Boolean(out.created),
     changed: Boolean(out.changed),
     ...(out.instructions && { instructions: out.instructions }),
+    ...(out.signals && { signals: out.signals }),
     data: cited.data ?? null,
     refs: [cited.ref, ...(cited.items ?? [])].filter((n) => n != null),
   };
