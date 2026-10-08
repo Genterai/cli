@@ -10,13 +10,13 @@ jobs:
   spec-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
         with: { node-version: 22 }
       - run: node --test .github/scripts/spec-check.test.mjs
       - name: List changed files
         id: files
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const files = await github.paginate(github.rest.pulls.listFiles, {
