@@ -222,7 +222,8 @@ describe("genter.execute", () => {
     const found = await genter.search({ query: "Код продуктовнер в Evallens?", limit: 4 });
     assert.deepEqual(found.filter((r) => r.id).map((r) => r.id), ["rcp_team", "rcp_news", "rcp_drive"]); // half the places, the closest page first
     assert.ok(found[0].score >= 0.45 && found[1].score >= 0.45);
-    assert.ok(calls.some((u) => u.includes("/tools?") && u.includes("search=")), "tools are still searched");
+    // @composio/core sends the search words as `search=` up to 0.17 and as `query=` from 0.22.
+    assert.ok(calls.some((u) => u.includes("/tools?") && /[?&](search|query)=/.test(u)), "tools are still searched");
   });
 
 });
