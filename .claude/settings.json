@@ -1,6 +1,6 @@
 {
   "permissions": {
-    "deny": ["Edit(**/CLAUDE.md)", "Edit(**/AGENTS.md)"]
+    "deny": ["Edit(**/CLAUDE.md)", "Edit(**/AGENTS.md)", "Edit(**/.claude/**)", "Edit(**/.github/workflows/protect-instructions.yml)"]
   },
   "hooks": {
     "PreToolUse": [
