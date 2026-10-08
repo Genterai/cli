@@ -9,9 +9,9 @@
   "files": ["bin", "src"],
   "scripts": { "test": "node --test test/*.test.js", "lint": "biome lint ." },
   "engines": { "node": ">=20" },
-  "devDependencies": { "@biomejs/biome": "2.5.14" },
+  "devDependencies": { "@biomejs/biome": "2.5.15" },
   "dependencies": {
-    "@composio/core": "^0.17.0",
+    "@composio/core": "^0.22.0",
     "zod": "^4.0.0"
   }
 }
