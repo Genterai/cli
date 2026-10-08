@@ -1,0 +1,18 @@
+# Dependency updates: one grouped pull request a week for minor and patch versions, a separate one per major
+# version, and the same for the GitHub Actions the workflows use. Security updates come as soon as an alert opens
+# (Settings → Code security → Dependabot security updates).
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    groups:
+      actions:
+        patterns: ['*']
