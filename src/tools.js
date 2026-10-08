@@ -299,6 +299,7 @@ export function readable(data) {
   const decoded = (v) => {
     if (!v || typeof v !== "object" || Array.isArray(v) || v.encoding !== "base64" || typeof v.content !== "string") return v;
     const text = Buffer.from(v.content, "base64").toString("utf8");
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: a NUL (or U+FFFD) in the decoded text means binary content, which stays base64
     return /[\u0000\uFFFD]/.test(text) ? v : { ...v, encoding: "utf-8", content: text };
   };
   const top = decoded(data);

@@ -712,7 +712,7 @@ describe("genter.recipes.reconcile: an area kept whole with no model", () => {
   it("R2 at most `budget` calls (new files first); the rest is pending; a read that keeps failing is given up", async () => {
     const { genter, set } = setup(files([["a.md", "1"]]));
     const tree = await genter.execute({ tool: "GITHUB_GET_A_TREE", args: { owner: "o", repo: "r" } });
-    let listing = { recipe_id: tree.id, read_tool: "GITHUB_GET_REPOSITORY_CONTENT", shared_args: { owner: "o", repo: "r" }, item_arg: "path", item_field: "path", account: "", versions: {} };
+    const listing = { recipe_id: tree.id, read_tool: "GITHUB_GET_REPOSITORY_CONTENT", shared_args: { owner: "o", repo: "r" }, item_arg: "path", item_field: "path", account: "", versions: {} };
     set(files([["a.md", "1"], ["broken.md", "1"], ...Array.from({ length: 5 }, (_, i) => [`f${i}.md`, "1"])]));
     let out = await genter.recipes.reconcile({ listing, budget: 3 });
     assert.equal(out.created.length + out.failed, 3);

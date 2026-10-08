@@ -35,8 +35,8 @@ describe("GitHub file: find, see the cited paths, write there", () => {
     assert.match(text, /References:\n\[1\] github file Genterai\/genter-cli\/src\/sync\.js\n/);
     assert.match(text, /where \{"owner":"Genterai","repo":"genter-cli","path":"src\/sync\.js","branch":"main"\}/);
     // A follow-up that reads the place in full, for the client's model (as Search asks when a source is clicked).
-    assert.match(text, /\n    read  GENTER_FIND \{"question":"Read the github file \\"Genterai\/genter-cli\/src\/sync\.js\\" in full/);
-    assert.match(text, /edit  \{edits: \[\{find, replace\}\], message\}: one commit, only those pieces change\n    write GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS\(message, content\)/);
+    assert.match(text, /\n {4}read {2}GENTER_FIND \{"question":"Read the github file \\"Genterai\/genter-cli\/src\/sync\.js\\" in full/);
+    assert.match(text, /edit {2}\{edits: \[\{find, replace\}\], message\}: one commit, only those pieces change\n {4}write GITHUB_CREATE_OR_UPDATE_FILE_CONTENTS\(message, content\)/);
     assert.match(text, /GENTER_WRITE \{run_id, ref: n, change\}/);
     assert.doesNotMatch(agentResultText(out), /write GITHUB_/); // without GENTER_WRITE: references only
   });
@@ -772,7 +772,7 @@ describe("Mode anchors (MCP GENTER_FIND): the run hands over raw results of anch
     assert.equal(r.data.messages[1].snippet, "Please sign by Friday");
     // Each email of the list can be read in full with the call its reference names; the list itself is here already.
     const text = recipesResultText(out);
-    assert.match(text, /\[1\] gmail \S+ Contract draft\n(    where .*\n)?    read  GENTER_FIND \{"question":"Read the gmail \S+ \\"Contract draft\\" in full/);
+    assert.match(text, /\[1\] gmail \S+ Contract draft\n( {4}where .*\n)? {4}read {2}GENTER_FIND \{"question":"Read the gmail \S+ \\"Contract draft\\" in full/);
     assert.match(agentInstructions, /"read" line is the GENTER_FIND call that reads that place in full/);
   });
 

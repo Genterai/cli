@@ -5,7 +5,7 @@ import { addMcpServer, isCustomToolkit, mcpUrl } from "./mcp.js";
 import { areaOf, canonicalArgs, canonicalJson, classifyFailure, contentHash, isPartial, normalizeLegacy, publicRecipe, recipeId, sourceOf } from "./recipe.js";
 import { fill, inferList, pick } from "./shape.js";
 import { itemOf, listedItems, planReconcile } from "./area.js";
-import { addIntent, chunkCall, fileCall, isSkillTool, LIMITS as SKILL_LIMITS, SCRIPT_NOTE, SKILL_TOOLS } from "./skills.js";
+import { addIntent, chunkCall, fileCall, isSkillTool, SCRIPT_NOTE, SKILL_TOOLS } from "./skills.js";
 import { signalsOf, areaStats } from "./drift.js";
 import { crawl, forgetPage, namesSite, readPage, siteUrl, underSite } from "./web.js";
 
@@ -135,6 +135,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
   // Tool search (Composio) works in English, and keyword search in apps matches literal words, so data in English
   // is not found by Russian words and the other way round. Cached, and shared by concurrent callers.
   async function translate(query) {
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: \x00-\x7F is the whole ASCII range on purpose: it matches a letter outside ASCII
     if (!openrouterApiKey || !/(?![\x00-\x7F])\p{L}/u.test(query)) return null;
     if (!translations.has(query)) {
       translations.set(
@@ -772,7 +773,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       const created = !existing;
       // An anchor of the old model (random id) re-keys here: its knowledge is kept when the result is the same.
       const legacy = created && previous?.legacy && previous.tool === tool && canonicalJson(previous.args) === canonicalJson(args) ? previous : null;
-      const kept = legacy && legacy.summaryEmbedding && legacy.digest === createHash("sha256").update(JSON.stringify(result.data)).digest("hex") ? legacy : null;
+      const kept = legacy?.summaryEmbedding && legacy.digest === createHash("sha256").update(JSON.stringify(result.data)).digest("hex") ? legacy : null;
       const base = existing ?? {
         id: rid,
         tool,
@@ -1269,7 +1270,7 @@ export function cipher(secret) {
 }
 
 // APIs like GitHub return file contents as base64; decode them so the summary can read them.
-function decodeBase64(key, value) {
+function decodeBase64(value) {
   if (value?.encoding === "base64" && typeof value.content === "string") {
     return { ...value, content: Buffer.from(value.content, "base64").toString("utf8") };
   }
@@ -1337,7 +1338,7 @@ function forSummary(data) {
   return JSON.stringify(data, (key, value) => {
     if (NOISE.test(key)) return undefined;
     if (list && typeof value === "string" && value.length > 400) return `${value.slice(0, 400)}…`;
-    return decodeBase64(key, value);
+    return decodeBase64(value);
   });
 }
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
-import { areaStats, driftFacts, signalsOf, sourceDates, sourceCount, supersededOf } from "../src/drift.js";
+import { areaStats, driftFacts, sourceDates, sourceCount, supersededOf } from "../src/drift.js";
 import { recipesResultText } from "../src/tools.js";
 import { createGenter } from "../src/genter.js";
 
@@ -118,7 +118,7 @@ describe("Anchor Drift: execute stores the signals", () => {
     restore = () => (globalThis.fetch = original);
   };
   it("saves source_at without changing the digest, and returns signals", async () => {
-    let body = { files: [{ id: "f", name: "Spec", modifiedTime: "2019-03-02T10:00:00Z" }] };
+    const body = { files: [{ id: "f", name: "Spec", modifiedTime: "2019-03-02T10:00:00Z" }] };
     compose(() => body);
     const s = store();
     const genter = createGenter({ composioApiKey: "k", workspaceId: "w", userId: "u", secret: "s", store: s, defer: () => {} });
