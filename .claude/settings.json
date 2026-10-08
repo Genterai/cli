@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "deny": ["Edit(**/CLAUDE.md)", "Edit(**/AGENTS.md)"]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/protect-instructions.mjs" }
+        ]
+      }
+    ]
+  }
+}
