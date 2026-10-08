@@ -51,7 +51,6 @@ export function createAgent({
   if (!openrouterApiKey) throw new Error("The agent needs an OpenRouter key (OPENROUTER_API_KEY)");
   const { seal, open } = cipher(`${secret}:${userId}:runs`);
   let lastNote = null;
-  let currentRun = {};
   const personal = String(instructions ?? "").trim();
   const preamble = [{ role: "system", content: SYSTEM }, ...(personal ? [{ role: "system", content: personalNote(personal) }] : [])];
 
@@ -325,7 +324,6 @@ export function createAgent({
     const usage = { llm_calls: 0, tokens_in: 0, tokens_out: 0, cost_usd: 0, llm_ms: 0 };
     run.timing = { search_ms: run.timing?.search_ms ?? 0, tool_ms: 0 };
     lastNote = null;
-    currentRun = run;
     run.refs ??= [];
     run.recipeArgs ??= {};
     run.nudged = false;
@@ -639,7 +637,7 @@ export function createAgent({
   // A prepare task's fan-out: many independent reads over one area, a few at a time. Every success is an ordinary
   // atomic anchor; the model gets counts and the first failures, never the data.
   async function executeMany(run, input) {
-    const calls = (Array.isArray(input.calls) ? input.calls : []).filter((c) => c && c.tool).slice(0, MAX_MANY);
+    const calls = (Array.isArray(input.calls) ? input.calls : []).filter((c) => c?.tool).slice(0, MAX_MANY);
     if (!calls.length) return { content: JSON.stringify({ error: "Pass calls: [{tool, args, account?}]" }) };
     return fanOut(run, calls, "read_many");
   }
@@ -731,7 +729,7 @@ export function createAgent({
     };
     await Promise.all(Array.from({ length: Math.min(MANY_CONCURRENCY, calls.length) }, worker));
     run.timing.tool_ms += Date.now() - started;
-    run.prepared = ["requested", "ok", "created", "changed", "unchanged", "failed", "skipped"].reduce((t, k) => ({ ...t, [k]: (run.prepared?.[k] ?? 0) + counts[k] }), {});
+    run.prepared = Object.fromEntries(["requested", "ok", "created", "changed", "unchanged", "failed", "skipped"].map((k) => [k, (run.prepared?.[k] ?? 0) + counts[k]]));
     const note = `Prepared ${run.prepared.ok} reads: ${run.prepared.created} new anchors, ${run.prepared.changed} updated, ${run.prepared.unchanged} unchanged, ${run.prepared.failed} failed${run.prepared.skipped ? `, ${run.prepared.skipped} skipped (not reads)` : ""}.`;
     lastNote = note;
     onEvent({ type: "tool", tool: name, ok: counts.ok > 0 || !counts.failed, summary: note });

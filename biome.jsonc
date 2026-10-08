@@ -1,0 +1,20 @@
+// Biome lints the code (the formatter stays off: the code keeps its own layout). `npm run lint` locally, and in CI as a
+// required step: an error fails it, a warning is shown and does not.
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.14/schema.json",
+  "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
+  "files": { "includes": ["**"] },
+  "formatter": { "enabled": false },
+  "assist": { "enabled": false },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      // House style, used on purpose across the code: `while ((m = re.exec(s)))`, `(a(), b)` in arrow bodies,
+      // string concatenation where it reads better.
+      "suspicious": { "noAssignInExpressions": "off" },
+      "complexity": { "noCommaOperator": "off" },
+      "style": { "useTemplate": "off" }
+    }
+  }
+}

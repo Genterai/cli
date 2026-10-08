@@ -32,7 +32,9 @@ export function sourceDates(data, { lastModified, now = Date.now() } = {}) {
   let seen = 0;
   const walk = (v, depth, inPerson) => {
     if (seen++ > 3000 || depth > 5 || !v || typeof v !== "object") return;
-    if (Array.isArray(v)) return v.slice(0, 200).forEach((x) => walk(x, depth + 1, inPerson));
+    if (Array.isArray(v)) return v.slice(0, 200).forEach((x) => {
+      walk(x, depth + 1, inPerson);
+    });
     for (const [k, x] of Object.entries(v)) {
       const key = norm(k);
       if (typeof x === "string") {
@@ -83,7 +85,9 @@ export function supersededOf(data) {
     if (typeof doc[k] !== "string") continue;
     const own = k === "title" || k === "name" || k === "subject" || k === "heading";
     const take = doc[k].slice(0, 1500).split("\n").map((l) => l.trim()).filter(Boolean).slice(0, own ? 1 : HEAD_LINES);
-    take.forEach((l, i) => lines.push([l, doc[k].slice(0, 1500).split("\n").map((x) => x.trim()).filter(Boolean)[i + 1]]));
+    take.forEach((l, i) => {
+      lines.push([l, doc[k].slice(0, 1500).split("\n").map((x) => x.trim()).filter(Boolean)[i + 1]]);
+    });
   }
   for (const [line, next] of lines) {
     if (line.length > HEAD_LINE_MAX) continue;

@@ -52,7 +52,7 @@ function item(obj) {
   // The item's own page, if it has one, becomes the title link.
   const linkKey = LINK.find((k) => typeof obj[k] === "string" && /^https?:\/\//.test(obj[k]));
   const rest = Object.fromEntries(Object.entries(obj).filter(([k]) => k !== titleKey && k !== textKey && k !== linkKey));
-  const name = escape(oneLine(title).replace(/[[\]]/g, "").slice(0, 200));
+  const name = escapeMarkdown(oneLine(title).replace(/[[\]]/g, "").slice(0, 200));
   const parts = [`#### ${linkKey ? `[${name}](${obj[linkKey].replace(/[()\s]/g, encodeURIComponent)})` : name}`];
   const fields = fieldList(rest, 1);
   if (fields) parts.push(fields);
@@ -94,7 +94,7 @@ function scalar(v, max = MAX_TEXT) {
   if (typeof v === "boolean") return v ? "yes" : "no";
   const s = oneLine(String(v));
   if (/^https?:\/\/\S+$/.test(s)) return s;
-  return escape(s.length > max ? `${s.slice(0, max)}…` : s);
+  return escapeMarkdown(s.length > max ? `${s.slice(0, max)}…` : s);
 }
 
 function quote(text) {
@@ -102,7 +102,7 @@ function quote(text) {
   const cut = s.length > MAX_TEXT * 2 ? `${s.slice(0, MAX_TEXT * 2)}…` : s;
   return cut
     .split("\n")
-    .map((line) => `> ${escape(line)}`)
+    .map((line) => `> ${escapeMarkdown(line)}`)
     .join("\n");
 }
 
@@ -120,7 +120,7 @@ function label(key) {
 const oneLine = (s) => String(s).replace(/\s+/g, " ").trim();
 // Keep values literal: no accidental emphasis, code or headings from the data.
 // URLs stay as they are, so they still become links.
-const escape = (s) =>
+const escapeMarkdown = (s) =>
   s
     .split(/(https?:\/\/\S+)/)
     .map((part, i) => (i % 2 ? part : part.replace(/([\\`*_\[\]])/g, "\\$1")))

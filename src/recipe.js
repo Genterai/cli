@@ -43,7 +43,7 @@ export function recipeId({ workspaceId = "", scope = "", tool, args }) {
 // Bookkeeping that changes with every call without the content changing.
 const VOLATILE_KEY = /^(etag|headers|next_?page_?token|next_?page|next_?cursor|cursor|next_?link|request_?id|log_?id|nonce|fetched_?at|x-[\w-]+)$|_url$|Url$/;
 
-function normalize(value, key = "") {
+function normalize(value) {
   if (typeof value === "string") return value.replace(/\r\n?/g, "\n").trim();
   if (Array.isArray(value)) return value.map((v) => normalize(v));
   if (value && typeof value === "object") {
@@ -55,7 +55,7 @@ function normalize(value, key = "") {
     const out = {};
     for (const k of Object.keys(obj).sort()) {
       if (VOLATILE_KEY.test(k)) continue;
-      const v = normalize(obj[k], k);
+      const v = normalize(obj[k]);
       if (v !== undefined) out[k] = v;
     }
     return out;
@@ -73,7 +73,9 @@ export function isPartial(data) {
   let found = false;
   const walk = (v, depth) => {
     if (found || depth > 4 || v == null || typeof v !== "object") return;
-    if (Array.isArray(v)) return v.slice(0, 3).forEach((x) => walk(x, depth + 1));
+    if (Array.isArray(v)) return v.slice(0, 3).forEach((x) => {
+      walk(x, depth + 1);
+    });
     for (const [k, x] of Object.entries(v)) {
       if (/^(next_?page_?token|next_?cursor|next_?page|next_?link|nextPageToken|nextCursor|end_?cursor|continuation_?token|next_?token|offset_?next|nextLink)$/i.test(k) && x != null && x !== "" && x !== false) found = true;
       else if (/^(has_?more|hasNextPage|has_?next_?page|is_?truncated|truncated|incomplete_?results|more_?available)$/i.test(k) && x === true) found = true;
@@ -176,7 +178,9 @@ function resultArea(data) {
   let named = null;
   const walk = (v, depth) => {
     if (parents.length > 200 || depth > 4 || v == null || typeof v !== "object") return;
-    if (Array.isArray(v)) return v.forEach((x) => walk(x, depth + 1));
+    if (Array.isArray(v)) return v.forEach((x) => {
+      walk(x, depth + 1);
+    });
     const p = parentOf(v);
     if (p) {
       parents.push(p);

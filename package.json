@@ -7,8 +7,9 @@
   "bin": { "genter": "bin/genter.js" },
   "exports": { ".": "./src/genter.js", "./tools": "./src/tools.js", "./agent": "./src/agent.js", "./recipe": "./src/recipe.js", "./shape": "./src/shape.js", "./markdown": "./src/markdown.js", "./refs": "./src/refs.js", "./skills": "./src/skills.js", "./mcp": "./src/mcp.js", "./web": "./src/web.js", "./cost": "./src/cost.js", "./loop": "./src/loop.js", "./area": "./src/area.js" },
   "files": ["bin", "src"],
-  "scripts": { "test": "node --test test/*.test.js" },
+  "scripts": { "test": "node --test test/*.test.js", "lint": "biome lint ." },
   "engines": { "node": ">=20" },
+  "devDependencies": { "@biomejs/biome": "2.5.14" },
   "dependencies": {
     "@composio/core": "^0.17.0",
     "zod": "^4.0.0"
