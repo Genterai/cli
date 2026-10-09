@@ -1,10 +1,11 @@
 {
   "name": "genter-cli",
   "version": "0.3.0",
-  "description": "Memory for AI agents that does not go stale: finds where the answer is written and reads it again. No keys, no packages. CLI, MCP server and library.",
+  "description": "Resolver for AI agents: a question resolves to where its answer is written, read again every time. No keys, no packages. CLI, MCP server and library.",
   "keywords": [
     "ai",
     "agents",
+    "resolver",
     "memory",
     "mcp",
     "mcp-server",

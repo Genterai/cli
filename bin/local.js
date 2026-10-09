@@ -9,8 +9,8 @@ import { serveMcp } from "../src/mcp-server.js";
 
 const version = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 
-const HELP = `genter ${version}: memory for AI agents that does not go stale. It finds where the answer is written and
-reads it again, so the answer is what your docs say now.
+const HELP = `genter ${version}: resolver for AI agents. A question resolves to where its answer is written, and Genter
+reads it there again, so the answer is what your docs say now.
 
   genter demo                        see it in a second, on a temp folder
   genter ask <question>              the passages that answer, read now, with path:lines (the current folder at first)
