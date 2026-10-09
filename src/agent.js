@@ -33,7 +33,7 @@ export function createAgent({
   runs, // get(id) -> { blob } | undefined, put({ id, blob })
   model = process.env.AGENT_MODEL || "openai/gpt-oss-120b",
   // A task no saved anchor covers yet, or a run the fast model gets stuck on, goes to a stronger model
-  // (AGENT_STRONG_MODEL; the same one by default: none of the models tried did these tasks better, README → Models).
+  // (AGENT_STRONG_MODEL; the same one by default: none of the models tried did these tasks better, docs/apps.md → Models).
   // What it finds becomes anchors, so the next time the same task runs on the fast one.
   strongModel = process.env.AGENT_STRONG_MODEL || "openai/gpt-oss-120b",
   maxSteps = 12,
@@ -62,7 +62,7 @@ export function createAgent({
       headers: { Authorization: `Bearer ${openrouterApiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         model: useModel,
-        provider: { sort: process.env.OPENROUTER_SORT || "latency" }, // the quickest provider to answer (see README → Models)
+        provider: { sort: process.env.OPENROUTER_SORT || "latency" }, // the quickest provider to answer (see docs/apps.md → Models)
         // The system prompt and tool list never change, so providers can cache this prefix; a person's instructions follow it.
         messages: [...preamble, ...messages.map(({ keep, ...m }) => m)],
         tools,

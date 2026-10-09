@@ -77,7 +77,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
   };
 
   // OpenRouter chat call. The provider that answers first by default (OPENROUTER_SORT=latency|throughput|price): by price,
-  // gpt-oss-120b went to providers that broke its JSON; by throughput, to ones 7x dearer and no quicker (README → Models).
+  // gpt-oss-120b went to providers that broke its JSON; by throughput, to ones 7x dearer and no quicker (docs/apps.md → Models).
   async function chat(body, timeout = 30000, source = "llm") {
     const started = Date.now();
     const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {

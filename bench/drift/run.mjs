@@ -13,7 +13,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { bm25, prepare } from "../../src/lexical.js";
-import { createLocal, fuse, listFolder, openrouterEmbedder } from "../../src/local.js";
+import { createLocal, embedderFor, embeddingProvider, fuse, listFolder } from "../../src/local.js";
+import { chatModel, pool } from "../lib.mjs";
 import { splitMarkdown } from "../../src/skills.js";
 import { applyChanges } from "./check.mjs";
 
@@ -22,9 +23,7 @@ const args = process.argv.slice(2);
 const flag = (name) => args.includes(name);
 const option = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : null);
 const K = 5;
-const key = process.env.OPENROUTER_API_KEY;
 const semantic = flag("--semantic");
-if ((semantic || flag("--answer")) && !key) throw new Error("--semantic and --answer need OPENROUTER_API_KEY");
 
 const questions = JSON.parse(readFileSync(join(here, "questions.json"), "utf8"));
 const changes = JSON.parse(readFileSync(join(here, "changes.json"), "utf8"));
@@ -153,39 +152,20 @@ function score(arm) {
 
 // ---- answers by a model (optional) ----
 
-async function answers(arm) {
+async function answers(arm, m) {
   const out = { t0: [], t1: [] };
   for (const phase of ["t0", "t1"]) {
     out[phase] = await pool(questions.map((q, i) => [q, arm[phase][i] ?? []]), 8, async ([q, passages]) => {
       const context = passages.map((p, i) => `[${i + 1}]${p.replaced ? " (this document marks itself as replaced)" : ""}\n${p.text.slice(0, 1500)}`).join("\n\n");
-      const text = await chat([
-        { role: "system", content: "Answer the question from the passages only, in one short sentence with the exact value. If the passages disagree, prefer the one that replaces the other. If they do not hold the answer, say: not found." },
-        { role: "user", content: `Passages:\n${context || "(none)"}\n\nQuestion: ${q.question}` },
-      ]).catch((e) => `error: ${e.message}`);
+      const text = await m
+        .chat(m.reader, [
+          { role: "system", content: "Answer the question from the passages only, in one short sentence with the exact value. If the passages disagree, prefer the one that replaces the other. If they do not hold the answer, say: not found." },
+          { role: "user", content: `Passages:\n${context || "(none)"}\n\nQuestion: ${q.question}` },
+        ])
+        .catch((e) => `error: ${e.message}`);
       return [{ text, replaced: false }];
     });
   }
-  return out;
-}
-async function chat(messages) {
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: process.env.ANSWER_MODEL || "openai/gpt-oss-120b", reasoning: { effort: "low" }, provider: { sort: "latency" }, messages, max_tokens: 2000 }),
-    signal: AbortSignal.timeout(60000),
-  });
-  if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 200)}`);
-  return (await res.json()).choices[0].message.content ?? "";
-}
-async function pool(items, n, fn) {
-  const out = new Array(items.length);
-  let i = 0;
-  await Promise.all(Array.from({ length: n }, async () => {
-    while (i < items.length) {
-      const k = i++;
-      out[k] = await fn(items[k]);
-    }
-  }));
   return out;
 }
 
@@ -237,10 +217,10 @@ async function main() {
   await run("genter", "nothing", () => genterArm());
   await run("index built once", "nothing", () => indexOnceArm());
   if (semantic) {
-    const a = counted(openrouterEmbedder(key));
+    const a = counted(embedderFor(embeddingProvider()));
     await run("genter --semantic", "OpenRouter key", () => genterArm({ embed: a }));
     rows.at(-1).embedded = a.texts;
-    const b = counted(openrouterEmbedder(key));
+    const b = counted(embedderFor(embeddingProvider()));
     await run("index built once + vectors", "OpenRouter key", () => indexOnceArm({ embed: b }));
     rows.at(-1).embedded = b.texts;
   }
@@ -252,9 +232,10 @@ async function main() {
   const report = [`DriftBench: ${questions.length} questions, ${changes.length} edits, top ${K} passages (${new Date().toISOString().slice(0, 10)})`, "", table(rows), "", kindsTable(rows)];
   if (flag("--answer")) {
     const answered = [];
+    const m = chatModel();
     for (const r of rows) {
-      process.stderr.write(`answers from ${r.name}…\n`);
-      const a = await answers(r.arm);
+      process.stderr.write(`answers from ${r.name} (${m.provider} ${m.reader})…\n`);
+      const a = await answers(r.arm, m);
       answered.push({ name: r.name, needs: r.needs, score: score(a), answers: a });
     }
     report.push("", "Answers by a model from each arm's passages (the same strings judge them):", "", table(answered));
