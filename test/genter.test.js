@@ -813,7 +813,8 @@ describe("genter.recipes.reconcile: the plan's room", () => {
     const chats = [];
     fakeComposio((sent, u) => (u.includes("GITHUB_GET_A_TREE") ? tree : { content: Buffer.from(`# ${sent.arguments.path}`).toString("base64"), encoding: "base64" }), { chat: (p) => (chats.push(p), { summary: "s" }), vector: () => [1, 0] });
     const store = memoryStore();
-    const genter = createGenter({ composioApiKey: "k", openrouterApiKey: "or", userId: "u", secret: "s", store, defer: () => {} });
+    const deferred = [];
+    const genter = createGenter({ composioApiKey: "k", openrouterApiKey: "or", userId: "u", secret: "s", store, defer: (p) => deferred.push(p) });
     const list = await genter.execute({ tool: "GITHUB_GET_A_TREE", args: { owner: "o", repo: "r" } });
     const listing = { recipe_id: list.id, read_tool: "GITHUB_GET_REPOSITORY_CONTENT", shared_args: { owner: "o", repo: "r" }, item_arg: "path", item_field: "path", account: "", versions: {} };
     const out = await genter.recipes.reconcile({ listing, budget: 40, room: 2 });
@@ -821,7 +822,9 @@ describe("genter.recipes.reconcile: the plan's room", () => {
     assert.equal(out.limited, 4);
     assert.equal(out.pending, 0);
     assert.equal(out.listing.listed, 6);
-    assert.ok(!chats.some((p) => p.includes("GITHUB_GET_REPOSITORY_CONTENT"))); // the reads were plain (the tree's own call may be described)
+    assert.ok(!chats.some((p) => p.includes("GITHUB_GET_REPOSITORY_CONTENT"))); // the reads were plain
+    await Promise.all(deferred);
+    assert.equal((await genter.recipes.get(list.id)).described, "text"); // and so is the list call, read again by the reconcile
     const none = await genter.recipes.reconcile({ listing: out.listing, room: 0 });
     assert.equal(none.created.length, 0);
     assert.equal(none.limited, 4);

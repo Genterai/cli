@@ -448,7 +448,8 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       itemEmbeddings = itemEmbeddings?.length ? itemEmbeddings.map((e) => e.slice(0, ITEM_DIMS)) : undefined;
     }
     record = await load(id);
-    if (!record || record.digest !== digest) return record;
+    // Gone, changed meanwhile, or described from its text since (a plain read took it over): this description is stale.
+    if (!record || record.digest !== digest || record.described === "text") return record;
     record = {
       ...record,
       scope: { ...record.scope, toolkit: toolkit ?? record.scope?.toolkit },
@@ -917,7 +918,9 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         if (record.trigger?.spec) return record.trigger.spec;
         if (record.trigger?.recommended) return null;
         const spec = await pickTrigger({ toolkit: record.scope?.toolkit ?? toolkitOf(record.tool), tool: record.tool, args: record.args, title: record.title }).catch(() => null);
-        await save({ ...record, trigger: { active: false, id: null, ...record.trigger, spec: spec ?? null, recommended: true } });
+        // Saved on the record as it is now: it may have been described again while the model picked.
+        const now_ = (await load(id)) ?? record;
+        await save({ ...now_, trigger: { active: false, id: null, ...now_.trigger, spec: spec ?? null, recommended: true } });
         return spec ?? null;
       },
       // Turns "keep this current" on (its own trigger: the Composio trigger of its spec, created or re-enabled) or off.
@@ -1006,9 +1009,10 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         if (!listing?.read_tool || !listing.item_arg || !(listing.recipe_id || listing.tool)) throw new Error("Not an area's listing: pass recipe_id or tool, read_tool and item_arg");
         const account = listing.account || undefined;
         const empty = { created: [], changed: [], gone: [], unchanged: 0, pending: 0, limited: 0, failed: 0, excluded: 0, listed: 0, partial: false };
-        // An area whose list holds each item's text (list_is_read) is kept by its list call alone: a plain read of the list.
+        // The list call is a plain read too, so keeping an area whole calls no model at all; an area whose list holds each
+        // item's text (list_is_read) is kept by that call alone.
         const listed = await api
-          .execute({ ...(listing.recipe_id && { id: listing.recipe_id }), ...(listing.tool && { tool: listing.tool, args: listing.args ?? {} }), account: (listing.list_account ?? listing.account) || undefined, ...(listing.list_is_read && { plain: true }) })
+          .execute({ ...(listing.recipe_id && { id: listing.recipe_id }), ...(listing.tool && { tool: listing.tool, args: listing.args ?? {} }), account: (listing.list_account ?? listing.account) || undefined, plain: true })
           .catch((e) => ({ result: { successful: false, error: e.message } }));
         if (listed.result?.successful === false) return { ...empty, status: "failed", error: String(typeof listed.result.error === "string" ? listed.result.error : JSON.stringify(listed.result.error ?? "the list call failed")).slice(0, 300), listing };
         const items = listedItems(listed.result?.data, listing.item_field ?? listing.item_arg);
