@@ -1,5 +1,5 @@
 import { jsonToMarkdown } from "./markdown.js";
-import { inferList } from "./shape.js";
+import { inferList, pick } from "./shape.js";
 import { splitMarkdown } from "./skills.js";
 
 // A plain read: an item of an area (a file of a repository, a document of a folder, a note, an issue) described from its
@@ -93,20 +93,45 @@ export function plainSections(name, text, { markdown } = {}) {
   return pieces.filter((p) => p.text.trim()).slice(0, PLAIN.sections);
 }
 
+// A list whose items hold their text (a list of notes, of issues with their descriptions): each item is a section of its
+// own, under its title, with all its text fields. null when the result is not a list.
+const ITEM_TITLE = ["title", "name", "subject", "summary", "display_name", "displayName", "key", "id"];
+export function listSections(data) {
+  if (!data || typeof data !== "object") return null;
+  const shape = inferList(data);
+  if (shape.single) return null;
+  const items = pick(data, shape.items);
+  if (!Array.isArray(items)) return null;
+  return items
+    .filter((i) => i && typeof i === "object")
+    .slice(0, PLAIN.sections)
+    .map((item) => {
+      const title = ITEM_TITLE.map((k) => item[k]).find((v) => (typeof v === "string" || typeof v === "number") && String(v).trim());
+      const fields = Object.entries(item)
+        .filter(([k, v]) => typeof v === "string" && v.trim() && !/^(https?:|data:)/.test(v) && String(item[k]) !== String(title))
+        .sort((a, b) => b[1].length - a[1].length)
+        .map(([k, v]) => (v.length > 80 ? v : `${k}: ${v}`));
+      return { headings: title != null ? [flat(title, 120)] : [], text: fields.join("\n").slice(0, PLAIN.embedChars) };
+    })
+    .filter((x) => x.text.trim() || x.headings.length);
+}
+
 // What a plain read is, from its text: the anchor's { title, short, summary, items, keywords, partial: false } and
 // `embed`, the texts to embed for its items (one per section, in the order of items). No model.
 export function plainDescription({ tool, args, data }) {
   const { text, document } = plainText(data);
   const name = plainName(args, data);
   const base = name.split("/").pop() || name;
-  const sections = plainSections(name, text, { markdown: document ? undefined : true });
+  // A list is cut by its items (each one a section), a document by its headings or blocks.
+  const listed = document ? null : listSections(data);
+  const sections = listed?.length ? listed : plainSections(name, text, { markdown: document ? undefined : true });
   const markdown = !document || sections.some((s) => s.headings.length);
   const heading = markdown ? /^ {0,3}#[ \t]+(.+?)[ \t]*#*[ \t]*$/m.exec(text)?.[1]?.replace(/[`*_]/g, "").trim() : null;
   const title = flat(document ? heading || base : base, 100);
   const headings = [...new Set(sections.flatMap((s) => s.headings))].slice(0, 20);
   const body = flat(markdown ? text.replace(/^ {0,3}#{1,6}[ \t].*$/gm, " ") : text, PLAIN.summaryText);
   const app = String(tool ?? "").split("_")[0].toLowerCase();
-  const summary = flat(`${document ? "File" : "Item"} "${name}"${app ? ` (${app})` : ""}.${headings.length ? ` Headings: ${headings.join("; ")}.` : ""} ${body}`, 1200);
+  const summary = flat(`${document ? "File" : listed?.length ? `List of ${listed.length}` : "Item"} "${name}"${app ? ` (${app})` : ""}.${headings.length ? ` Headings: ${headings.join("; ")}.` : ""} ${body}`, 1200);
   const lines = [];
   const embed = [];
   for (const s of sections) {

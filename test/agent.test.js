@@ -703,6 +703,29 @@ describe("Anchors in the agent", () => {
     assert.equal(out.listing.listed, 80);
   });
 
+  it("N5e [spec:areas/list-is-read] a list that holds its items' text is read once, plainly, as the area's one anchor", async () => {
+    const notes = { notes: Array.from({ length: 12 }, (_, i) => ({ id: `n${i}`, title: `Note ${i}`, body: `${"text ".repeat(50)}${i}`, updated: `u${i}` })) };
+    const genter = fakeGenter({ connected: ["keep"], results: { KEEP_LIST_NOTES: notes, KEEP_GET_NOTE: ({ id }) => ({ id }) } });
+    genter.recipes.get = async (id) => ({ id, tool: "KEEP_LIST_NOTES", args: { label: "work" }, scope: { account: "" } });
+    model = fakeModel([
+      call("execute", { tool: "KEEP_LIST_NOTES", args: { label: "work" } }),
+      (body) => call("read_each", { list_id: JSON.parse(lastOf(body, "tool")).id, read_tool: "KEEP_GET_NOTE", item_arg: "id" }),
+      (body) => {
+        const out = JSON.parse(lastOf(body, "tool"));
+        assert.equal(out.list_is_read, true);
+        assert.equal(out.ok, 12);
+        return answer("");
+      },
+    ]);
+    const out = await agentWith(genter).start({ task: "Read every note labelled work", mode: "prepare" });
+    assert.equal(genter.executed.filter((e) => e.tool === "KEEP_GET_NOTE").length, 0); // no read per note
+    const again = genter.executed.at(-1);
+    assert.equal(again.plain, true); // the list call, read plainly
+    assert.equal(out.listing.list_is_read, true);
+    assert.equal(Object.keys(out.listing.versions).length, 12);
+    assert.equal(out.listing.tool, "KEEP_LIST_NOTES");
+  });
+
   it("N5c read_each with no list, args written as JSON text, and an empty execute in a prepare task get the way to do it", async () => {
     const genter = fakeGenter({ connected: ["github"], results: { GITHUB_LIST_FILES: { files: [{ id: "a", name: "A" }, { id: "b", name: "B" }] }, GITHUB_GET_FILE: ({ file_id }) => ({ file_id }) } });
     model = fakeModel([

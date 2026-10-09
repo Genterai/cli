@@ -813,7 +813,8 @@ describe("genter.recipes.reconcile: the plan's room", () => {
     const chats = [];
     fakeComposio((sent, u) => (u.includes("GITHUB_GET_A_TREE") ? tree : { content: Buffer.from(`# ${sent.arguments.path}`).toString("base64"), encoding: "base64" }), { chat: (p) => (chats.push(p), { summary: "s" }), vector: () => [1, 0] });
     const store = memoryStore();
-    const genter = createGenter({ composioApiKey: "k", openrouterApiKey: "or", userId: "u", secret: "s", store, defer: () => {} });
+    const deferred = [];
+    const genter = createGenter({ composioApiKey: "k", openrouterApiKey: "or", userId: "u", secret: "s", store, defer: (p) => deferred.push(p) });
     const list = await genter.execute({ tool: "GITHUB_GET_A_TREE", args: { owner: "o", repo: "r" } });
     const listing = { recipe_id: list.id, read_tool: "GITHUB_GET_REPOSITORY_CONTENT", shared_args: { owner: "o", repo: "r" }, item_arg: "path", item_field: "path", account: "", versions: {} };
     const out = await genter.recipes.reconcile({ listing, budget: 40, room: 2 });
@@ -821,9 +822,38 @@ describe("genter.recipes.reconcile: the plan's room", () => {
     assert.equal(out.limited, 4);
     assert.equal(out.pending, 0);
     assert.equal(out.listing.listed, 6);
-    assert.ok(!chats.some((p) => p.includes("GITHUB_GET_REPOSITORY_CONTENT"))); // the reads were plain (the tree's own call may be described)
+    assert.ok(!chats.some((p) => p.includes("GITHUB_GET_REPOSITORY_CONTENT"))); // the reads were plain
+    await Promise.all(deferred);
+    assert.equal((await genter.recipes.get(list.id)).described, "text"); // and so is the list call, read again by the reconcile
     const none = await genter.recipes.reconcile({ listing: out.listing, room: 0 });
     assert.equal(none.created.length, 0);
     assert.equal(none.limited, 4);
+  });
+});
+
+describe("an area read from its list alone (list_is_read)", () => {
+  it("R5 [spec:areas/list-is-read] a reconcile reads the list plainly, one section per item, and reads no item", async () => {
+    let notes = Array.from({ length: 3 }, (_, i) => ({ id: `n${i}`, title: `Note ${i}`, body: `The pooler listens on ${6430 + i}. ${"more ".repeat(50)}` }));
+    const chats = [];
+    const calls = fakeComposio((sent, u) => (u.includes("KEEP_LIST_NOTES") ? { notes } : { id: sent.arguments.id }), { chat: (p) => (chats.push(p), { summary: "s" }), vector: () => [1, 0] });
+    const store = memoryStore();
+    const deferred = [];
+    const genter = createGenter({ composioApiKey: "k", openrouterApiKey: "or", userId: "u", secret: "s", store, defer: (p) => deferred.push(p) });
+    const listing = { tool: "KEEP_LIST_NOTES", args: { label: "work" }, account: "", read_tool: "KEEP_GET_NOTE", shared_args: {}, item_arg: "id", item_field: "id", versions: {}, list_is_read: true };
+    let out = await genter.recipes.reconcile({ listing });
+    await Promise.all(deferred);
+    assert.equal(out.status, "done");
+    assert.equal(out.created.length, 1);
+    assert.equal(Object.keys(out.listing.versions).length, 3);
+    assert.equal(calls.filter((u) => u.includes("KEEP_GET_NOTE")).length, 0);
+    const list = await genter.recipes.get(out.created[0]);
+    assert.equal(list.described, "text");
+    assert.equal(list.items.length, 3);
+    assert.match(list.items[1], /^Note 1: The pooler listens on 6431/);
+    assert.equal(chats.length, 0);
+    notes = [...notes, { id: "n9", title: "Note 9", body: "x ".repeat(120) }];
+    out = await genter.recipes.reconcile({ listing: out.listing });
+    assert.deepEqual(out.changed, [list.id]);
+    assert.equal(out.listing.listed, 4);
   });
 });
