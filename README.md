@@ -1,13 +1,23 @@
-# Genter
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Genterai/cli/main/docs/banner.png" alt="Genter" width="600">
+</p>
 
-**Memory for AI agents that does not go stale.**
+<h3 align="center">Resolver for AI agents</h3>
 
-[![npm](https://img.shields.io/npm/v/genter-cli)](https://www.npmjs.com/package/genter-cli)
-[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-![dependencies: 0](https://img.shields.io/badge/dependencies-0-brightgreen)
+<p align="center">
+  An agent works something out once. Genter remembers where the answer is written,<br>
+  and next time the agent reads it right there, as it is now.
+</p>
 
-Memory layers keep a copy of what they were told. When your docs change, they go on answering from the copy.
-Genter remembers **where** each answer is written, and reads it again every time you ask.
+<p align="center">
+  <a href="https://www.npmjs.com/package/genter-cli"><img src="https://img.shields.io/npm/v/genter-cli" alt="npm"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License: Apache-2.0"></a>
+  <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="dependencies: 0">
+</p>
+
+On its own, an agent guesses its way to an answer, and a memory layer hands it a copy that goes stale when your docs
+change. Genter resolves a question to the place its answer is written, a file and its lines or a page, and reads it
+again every time you ask.
 
 ## See it in a second
 
@@ -68,7 +78,7 @@ await genter.add("./docs");
 const { results, changes } = await genter.find("how do we deploy?"); // [{ place: "docs/deploy.md:3-5", text, facts }]
 ```
 
-## Why it does not go stale
+## How it resolves, and why it stays current
 
 - Each file or page is an **Anchor**: one read with a fixed argument (`FILE_READ docs/deploy.md`). Genter keeps where
   it is, its headings, its dates and a digest of it, never a copy of its text.
