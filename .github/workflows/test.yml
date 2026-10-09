@@ -31,7 +31,26 @@ jobs:
       - uses: actions/setup-node@v6
         with: { node-version: '${{ matrix.node }}', cache: npm }
       - run: npm ci
-      - run: npm test
+      - name: The test report's own tests
+        run: node --test .github/scripts/test-report.test.mjs
+      - name: Tests
+        # Three reports of one run: the usual log, a page for the job summary (every test, its time and spec
+        # statement), and JUnit XML for tools.
+        run: npm test
+        env:
+          NODE_OPTIONS: >-
+            --test-reporter=spec --test-reporter-destination=stdout
+            --test-reporter=./.github/scripts/test-report.mjs --test-reporter-destination=test-report.md
+            --test-reporter=junit --test-reporter-destination=test-report.xml
+          TEST_REPORT_TITLE: Тесты · Node ${{ matrix.node }}
+      - name: Test report
+        if: ${{ !cancelled() && hashFiles('test-report.md') != '' }}
+        run: cat test-report.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() && hashFiles('test-report.md') != '' }}
+        with:
+          name: test-report-node-${{ matrix.node }}
+          path: test-report.*
       - name: Every export imports
         run: |
           node --input-type=module -e "import p from './package.json' with { type: 'json' }; for (const e of Object.values(p.exports)) await import(e)"
