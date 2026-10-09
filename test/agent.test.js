@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import { createAgent } from "../src/agent.js";
 import { cipher } from "../src/genter.js";
-import { actionInstructions, agentInstructions, agentResultText, agentTools, readable, readQuestion, recipesResultText } from "../src/tools.js";
+import { actionInstructions, agentInstructions, agentResultText, agentTools, connectedInstructions, readable, readQuestion, recipesResultText } from "../src/tools.js";
 import { answer, briefingOf, call, catalogues, fakeGenter, fakeModel, lastOf, memoryRuns } from "./helpers.js";
 
 let model;
@@ -1146,6 +1146,19 @@ describe("Read-only MCP (below Enterprise): Genter finds, the client writes", ()
     assert.match(agentTools().GENTER_FIND.description, /never writes, rewrites, summarizes or translates/);
     assert.match(agentTools({ actions: true }).GENTER_RUN_TASK.description, /passed word for word/);
     assert.match(actionInstructions, /never ask Genter to write or rewrite it/);
+  });
+
+  it("[spec:mcp/same-descriptions] the tools are the same for everyone on a plan: nothing of the person's goes in them", () => {
+    const text = (t) => JSON.stringify(Object.entries(t).map(([name, { description, annotations }]) => [name, description, annotations]));
+    assert.equal(text(agentTools({ connected: [{ toolkit: "gmail" }] })), text(agentTools()));
+    assert.equal(text(agentTools({ actions: true, connected: [{ toolkit: "gmail" }] })), text(agentTools({ actions: true })));
+    assert.doesNotMatch(text(agentTools({ actions: true })), /Connected for this user/);
+  });
+
+  it("[spec:mcp/connected-in-instructions] the connected apps are a line for the server's instructions, once each", () => {
+    assert.equal(connectedInstructions([{ toolkit: "gmail" }, { toolkit: "gmail", alias: "work" }, { toolkit: "github" }]), "Connected for this user: gmail, github. Prefer these when the request does not name an app.");
+    assert.equal(connectedInstructions([]), "");
+    assert.equal(connectedInstructions(), "");
   });
 
   it("R2 a task asked of a read-only agent runs as a find: a tool that sends does not run", async () => {

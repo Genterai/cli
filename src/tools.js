@@ -106,11 +106,16 @@ export const actionInstructions = `Actions (this workspace may change things in 
   A file: pass edits ([{find, replace}], exact pieces of its current text and the new text you wrote) and message: one commit, only those pieces change.
 Write every text yourself first (from what GENTER_FIND returned), then hand it over; never ask Genter to write or rewrite it.`;
 
-// connected: [{ toolkit, alias? }] — listed in descriptions so clients prefer apps the user already has.
-// actions: also GENTER_RUN_TASK and GENTER_WRITE, the tools that change something (MCP: Enterprise only; everyone else reads).
-export function agentTools({ connected = [], actions = false } = {}) {
+// The apps connected for the person, for the server's instructions (never the tool descriptions, which stay the same for
+// everyone on a plan so a client or a catalog that keeps them once stays right). connected: [{ toolkit, alias? }].
+export function connectedInstructions(connected = []) {
   const apps = [...new Set(connected.map((c) => c.toolkit))];
-  const have = apps.length ? `\nConnected for this user: ${apps.join(", ")}. Prefer these when the request does not name an app.` : "";
+  return apps.length ? `Connected for this user: ${apps.join(", ")}. Prefer these when the request does not name an app.` : "";
+}
+
+// actions: also GENTER_RUN_TASK and GENTER_WRITE, the tools that change something (MCP: Enterprise only; everyone else reads).
+// The same for every workspace and person: nothing of theirs goes in a name, a description or an input.
+export function agentTools({ actions = false } = {}) {
   const account = z.string().optional().describe("Which connection to use when an app is connected several times, e.g. work or personal");
   return {
     GENTER_FIND: {
@@ -131,8 +136,7 @@ export function agentTools({ connected = [], actions = false } = {}) {
         "\"writing the quickstart page of the Evallens docs\", \"the landing page of the docs\", \"the changelog entry for v2\", not \"documentation\" or \"writing docs\". " +
         "A goal is matched by meaning to sections of skills: a vague one finds none, or only a skill's introduction. On the next step (another page, another part), pass its goal. " +
         "Pass the same `conversation_id` (an id you make up once per chat, new in a new chat) in every call of a chat so a section is not repeated. " +
-        "Example: {question: \"Evallens features\", goal: \"writing the quickstart page of the Evallens docs\", conversation_id: \"k3x9a2fq\"}. Both are optional." +
-        have,
+        "Example: {question: \"Evallens features\", goal: \"writing the quickstart page of the Evallens docs\", conversation_id: \"k3x9a2fq\"}. Both are optional.",
       input: z.object({
         question: z.string().describe("What to find, in plain words, with any known names, dates or apps. Only what to find, never what to do with it"),
         goal: z.string().optional().describe("Optional. The exact step the data is for, not the area: \"writing the quickstart page of the Evallens docs\", not \"documentation\". Brings the section of the user's skills and guides about that step in a separate section; leave it out when you only look something up"),
@@ -166,8 +170,7 @@ export function agentTools({ connected = [], actions = false } = {}) {
           "Not for finding things (use GENTER_FIND), and never for writing, rewriting, summarizing or translating a text.\n" +
           "Pass the whole action with every detail (who, where, when, which account, the exact text) in one call, e.g. " +
           "\"reply to Anna's last email with exactly: Thursday 3pm works for me.\" A fast agent picks the tools, fills the args and runs them. " +
-          "If the result has status needs_connection, show the connect link to the user, then call GENTER_CONTINUE_TASK with run_id." +
-          have,
+          "If the result has status needs_connection, show the connect link to the user, then call GENTER_CONTINUE_TASK with run_id.",
         input: z.object({
           task: z.string().describe("The action with every known detail and the exact final text to put there, e.g. \"reply to Anna's last email with exactly: Thursday 3pm works for me.\""),
           account,
