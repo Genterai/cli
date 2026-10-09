@@ -81,7 +81,7 @@ if (!tools[name] && !agentCommands[name]) {
   for (const [tool, { description }] of Object.entries(tools)) console.log(`  ${tool.padEnd(14)} ${description}`);
   console.log(`\nAliases: ${Object.entries(aliases).map(([alias, command]) => `${alias} = ${command}`).join(", ")}`);
   console.log(`\nKeys: genter login '{"composio_api_key":"...","openrouter_api_key":"...","user_id":"me"}'`);
-  console.log("or env COMPOSIO_API_KEY, OPENROUTER_API_KEY, GENTER_USER_ID");
+  console.log("or env COMPOSIO_API_KEY, OPENROUTER_API_KEY (or AI_GATEWAY_TOKEN), GENTER_USER_ID");
   process.exit(name ? 1 : 0);
 }
 
@@ -98,6 +98,7 @@ try {
   const genter = createGenter({
     composioApiKey: process.env.COMPOSIO_API_KEY || config.composio_api_key,
     openrouterApiKey: process.env.OPENROUTER_API_KEY || config.openrouter_api_key,
+    aiGatewayToken: process.env.AI_GATEWAY_TOKEN || process.env.AI_GATEWAY_API_KEY,
     userId: process.env.GENTER_USER_ID || config.user_id || "default",
     secret: config.secret,
     store,
@@ -114,6 +115,8 @@ try {
     const agent = createAgent({
       genter,
       openrouterApiKey: process.env.OPENROUTER_API_KEY || config.openrouter_api_key,
+      aiGatewayToken: process.env.AI_GATEWAY_TOKEN || process.env.AI_GATEWAY_API_KEY,
+    aiGatewayToken: process.env.AI_GATEWAY_TOKEN || process.env.AI_GATEWAY_API_KEY,
       secret: config.secret,
       userId: process.env.GENTER_USER_ID || config.user_id || "default",
       runs,

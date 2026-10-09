@@ -53,9 +53,10 @@ npm i -g genter-cli @composio/core zod
 genter login '{"composio_api_key":"...","openrouter_api_key":"...","user_id":"me"}'
 ```
 
-Keys can also come from env: `COMPOSIO_API_KEY`, `OPENROUTER_API_KEY`, `GENTER_USER_ID`.
-The OpenRouter key is used for embeddings (`EMBEDDING_MODEL`, default `openai/text-embedding-3-small`).
-Without it, `search` uses Composio only.
+Keys can also come from env: `COMPOSIO_API_KEY`, `OPENROUTER_API_KEY`, `GENTER_USER_ID`. With `AI_GATEWAY_TOKEN` (or
+`AI_GATEWAY_API_KEY`) set, every model call goes to Vercel AI Gateway instead of OpenRouter: same request, same model
+names. The model key is used for embeddings (`EMBEDDING_MODEL`, default `openai/text-embedding-3-small`).
+Without one, `search` uses Composio only.
 
 ## Tools
 
@@ -135,8 +136,8 @@ It shapes the work; it never changes which tools may run (`canExecute`, the conn
 
 ## Models
 
-Every model call (the agent, result summaries, query translation) uses `openai/gpt-oss-120b` on OpenRouter, the
-provider that answers first (`OPENROUTER_SORT=latency`). Set `AGENT_MODEL`, `AGENT_STRONG_MODEL`, `SUMMARY_MODEL`,
+Every model call (the agent, result summaries, query translation) uses `openai/gpt-oss-120b` on OpenRouter (or Vercel AI
+Gateway with `AI_GATEWAY_TOKEN`), the provider that answers first (`OPENROUTER_SORT=latency`). Set `AGENT_MODEL`, `AGENT_STRONG_MODEL`, `SUMMARY_MODEL`,
 `QUERY_MODEL` to change one. Chosen on Genter's own tasks (October 2026), 7 checks per run:
 
 - translate "когда мне убираться" to `{en, terms}` within 6 s;

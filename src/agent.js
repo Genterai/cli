@@ -5,6 +5,7 @@ import { cipher, namedApps } from "./genter.js";
 import { appOf, applyEdits, citedRefs, fileEditor, needsCatalogue, refFromUrl, refLabel, refsOfResult, shapeRef, writeHints } from "./refs.js";
 import { inferList, locatorArgs, pick } from "./shape.js";
 import { logCost, usageFields } from "./cost.js";
+import { modelApi } from "./models.js";
 import { UNLOOP, cutLoop, loopIn, loopNote } from "./loop.js";
 
 // The task agent: an LLM loop over genter (search -> execute -> save), tuned for speed.
@@ -29,6 +30,7 @@ import { UNLOOP, cutLoop, loopIn, loopNote } from "./loop.js";
 export function createAgent({
   genter,
   openrouterApiKey,
+  aiGatewayToken,
   secret,
   userId,
   runs, // get(id) -> { blob } | undefined, put({ id, blob })
@@ -52,7 +54,8 @@ export function createAgent({
   // keeps it even when the run is cut off before it ends.
   onListing = null,
 }) {
-  if (!openrouterApiKey) throw new Error("The agent needs an OpenRouter key (OPENROUTER_API_KEY)");
+  const models = modelApi({ aiGatewayToken, openrouterApiKey });
+  if (!models) throw new Error("The agent needs a model key (AI_GATEWAY_TOKEN or OPENROUTER_API_KEY)");
   const { seal, open } = cipher(`${secret}:${userId}:runs`);
   let lastNote = null;
   const personal = String(instructions ?? "").trim();
@@ -61,9 +64,9 @@ export function createAgent({
   // sampling: other settings for this call (UNLOOP, when the last answer looped).
   async function llm(messages, usage, tools = TOOLS, toolChoice, useModel = model, sampling) {
     const started = Date.now();
-    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    const res = await fetch(`${models.url}/chat/completions`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${openrouterApiKey}`, "Content-Type": "application/json" },
+      headers: { Authorization: `Bearer ${models.key}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         model: useModel,
         provider: { sort: process.env.OPENROUTER_SORT || "latency" }, // the quickest provider to answer (see docs/apps.md → Models)

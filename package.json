@@ -36,6 +36,7 @@
     ".": "./src/genter.js",
     "./tools": "./src/tools.js",
     "./agent": "./src/agent.js",
+    "./models": "./src/models.js",
     "./recipe": "./src/recipe.js",
     "./shape": "./src/shape.js",
     "./markdown": "./src/markdown.js",

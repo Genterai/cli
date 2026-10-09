@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { Composio } from "@composio/core";
 import { logCost, roughTokens, usageFields, withCost } from "./cost.js";
+import { modelApi } from "./models.js";
 import { addMcpServer, isCustomToolkit, mcpUrl } from "./mcp.js";
 import { areaOf, canonicalArgs, canonicalJson, classifyFailure, contentHash, isPartial, normalizeLegacy, publicRecipe, recipeId, sourceOf } from "./recipe.js";
 import { fill, inferList, pick } from "./shape.js";
@@ -31,10 +32,11 @@ export { cipher };
 // [{ id, path, title, headings, refs, see, embedding }], files: [{ path, kind, mime, size }] }], get(id), text(id, path),
 // file(id, path): { text } | { url } }. It lets search offer the pieces of skills and lets two local tools read them:
 // SKILL_READ_CHUNK and SKILL_GET_FILE. A skill is never one Anchor; each read is one call, saved like any other.
-export function createGenter({ composioApiKey, openrouterApiKey, userId, workspaceId, secret, store, scopes: scopeStore, skills, triggers = false, defer, allow, minScore = 0.25, strongScore = 0.45 }) {
+export function createGenter({ composioApiKey, openrouterApiKey, aiGatewayToken, userId, workspaceId, secret, store, scopes: scopeStore, skills, triggers = false, defer, allow, minScore = 0.25, strongScore = 0.45 }) {
   if (!secret) throw new Error("secret is required to encrypt stored calls");
   workspaceId ??= userId;
   const composio = new Composio({ apiKey: composioApiKey });
+  const models = modelApi({ aiGatewayToken, openrouterApiKey });
   const { seal, open: decrypt } = cipher(`${secret}:${userId}`);
   // Decrypted records are cached by their blob (a new seal has a new random iv), so search does not
   // decrypt and parse every anchor on every call.
@@ -78,19 +80,19 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     p.finally(() => pending.delete(p));
   };
 
-  // OpenRouter chat call. The provider that answers first by default (OPENROUTER_SORT=latency|throughput|price): by price,
+  // Chat call (models.js: AI Gateway or OpenRouter). The provider that answers first by default (OPENROUTER_SORT=latency|throughput|price): by price,
   // gpt-oss-120b went to providers that broke its JSON; by throughput, to ones 7x dearer and no quicker (docs/apps.md → Models).
   async function chat(body, timeout = 30000, source = "llm") {
     const started = Date.now();
-    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    const res = await fetch(`${models.url}/chat/completions`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${openrouterApiKey}`, "Content-Type": "application/json" },
+      headers: { Authorization: `Bearer ${models.key}`, "Content-Type": "application/json" },
       body: JSON.stringify({ provider: { sort: process.env.OPENROUTER_SORT || "latency" }, ...body }),
       signal: AbortSignal.timeout(timeout),
     });
     if (!res.ok) {
       logCost({ type: "llm", model: body.model, source, ok: false, ms: Date.now() - started });
-      throw new Error(`OpenRouter ${res.status} ${await res.text()}`);
+      throw new Error(`${models.name} ${res.status} ${await res.text()}`);
     }
     const data = await res.json();
     logCost({ type: "llm", model: body.model, source, ms: Date.now() - started, ...usageFields(data) });
@@ -141,7 +143,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
   // is not found by Russian words and the other way round. Cached, and shared by concurrent callers.
   async function translate(query) {
     // biome-ignore lint/suspicious/noControlCharactersInRegex: \x00-\x7F is the whole ASCII range on purpose: it matches a letter outside ASCII
-    if (!openrouterApiKey || !/(?![\x00-\x7F])\p{L}/u.test(query)) return null;
+    if (!models || !/(?![\x00-\x7F])\p{L}/u.test(query)) return null;
     if (!translations.has(query)) {
       translations.set(
         query,
@@ -178,13 +180,13 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     return translations.get(query);
   }
 
-  // Embeddings via OpenRouter (OpenAI-compatible). Without a key, memory search is skipped.
+  // Embeddings via AI Gateway or OpenRouter (OpenAI-compatible). Without a key, memory search is skipped.
   async function embed(text, source = "embed") {
-    if (!openrouterApiKey) return null;
+    if (!models) return null;
     const started = Date.now();
-    const res = await fetch("https://openrouter.ai/api/v1/embeddings", {
+    const res = await fetch(`${models.url}/embeddings`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${openrouterApiKey}`, "Content-Type": "application/json" },
+      headers: { Authorization: `Bearer ${models.key}`, "Content-Type": "application/json" },
       body: JSON.stringify({ model: process.env.EMBEDDING_MODEL || "openai/text-embedding-3-small", input: text }),
     });
     const model = process.env.EMBEDDING_MODEL || "openai/text-embedding-3-small";
@@ -277,16 +279,16 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
   // One event per embeddings request: how many texts and tokens (the provider's count, else about 4 characters a token).
   function logEmbedding(data, model, source, texts, started) {
     const reported = data?.usage?.prompt_tokens;
-    logCost({ type: "embedding", model, source, texts: texts.length, tokens_in: reported ?? roughTokens(texts), ...(reported == null && { tokens_estimated: true }), provider_cost_usd: data?.usage?.cost, ms: Date.now() - started });
+    logCost({ type: "embedding", model, source, texts: texts.length, tokens_in: reported ?? roughTokens(texts), ...(reported == null && { tokens_estimated: true }), provider_cost_usd: usageFields(data).provider_cost_usd, ms: Date.now() - started });
   }
 
   // Several texts at once.
   async function embedMany(input, source = "embed") {
-    if (!openrouterApiKey) throw new Error("Anchors need an OpenRouter key for embeddings (OPENROUTER_API_KEY)");
+    if (!models) throw new Error("Anchors need a model key for embeddings (AI_GATEWAY_TOKEN or OPENROUTER_API_KEY)");
     const started = Date.now();
-    const res = await fetch("https://openrouter.ai/api/v1/embeddings", {
+    const res = await fetch(`${models.url}/embeddings`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${openrouterApiKey}`, "Content-Type": "application/json" },
+      headers: { Authorization: `Bearer ${models.key}`, "Content-Type": "application/json" },
       body: JSON.stringify({ model: process.env.EMBEDDING_MODEL || "openai/text-embedding-3-small", input }),
       signal: AbortSignal.timeout(60000),
     });
@@ -306,7 +308,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
   // search with that the result's own text rarely has (the kind of thing, synonyms, the app, both languages), embedded
   // with the summary: "почта" finds an inbox described as "Unread emails from today".
   async function describe(tool, args, data, { partial = false } = {}) {
-    if (!openrouterApiKey) return null;
+    if (!models) return null;
     const text = await chat({
       model: process.env.SUMMARY_MODEL || "openai/gpt-oss-120b",
       reasoning: { effort: "low" },
@@ -394,7 +396,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
   // first of [{ slug, config, label }], or null.
   async function pickTrigger({ toolkit, tool, args, title }) {
     const types = await triggersOf(toolkit);
-    if (!types.length || !openrouterApiKey) return null;
+    if (!types.length || !models) return null;
     const options = types.map((t) => ({
       slug: t.slug,
       description: String(t.description ?? "").split("\n")[0].slice(0, 140),
@@ -480,7 +482,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     if (!record || record.digest !== digest) return record;
     const { embed: sections, ...named } = plainDescription({ tool: record.tool, args: record.args, data });
     const texts = [summaryText(named), ...sections];
-    const vectors = openrouterApiKey ? await embedMany(texts, "recipe_embed").catch(() => embedMany(texts, "recipe_embed").catch(() => [])) : [];
+    const vectors = models ? await embedMany(texts, "recipe_embed").catch(() => embedMany(texts, "recipe_embed").catch(() => [])) : [];
     record = await load(id);
     if (!record || record.digest !== digest) return record;
     const [summaryEmbedding, ...items] = vectors;
@@ -502,7 +504,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     let record = await load(id);
     if (!record || record.digest !== digest) return record;
     const named = skillDescription(data);
-    const vectors = openrouterApiKey ? await embedMany([summaryText(named)], "recipe_embed").catch(() => []) : [];
+    const vectors = models ? await embedMany([summaryText(named)], "recipe_embed").catch(() => []) : [];
     record = await load(id);
     if (!record || record.digest !== digest) return record;
     record = { ...record, scope: { ...record.scope, toolkit: "skill" }, ...named, ...(vectors[0] && { summaryEmbedding: vectors[0] }) };
@@ -794,7 +796,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         updated_at: r.updated_at,
         source: [r.scope?.toolkit, r.scope?.account, r.scope?.area?.id].map((x) => x ?? "").join("/"),
       });
-      if (existing && existing.digest === digest && (existing.summary || !openrouterApiKey)) {
+      if (existing && existing.digest === digest && (existing.summary || !models)) {
         // Same result: nothing is described or embedded again.
         const next = { ...withDrift(existing), scope: withArea(existing.scope, area), status: "fresh", checked_at: at };
         if (asked) next.queryEmbeddings = addQuery(existing.queryEmbeddings, asked, at);
@@ -802,7 +804,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         if (asked || (isSkillTool(tool) && task) || existing.status !== "fresh" || existing.checked_at !== at || canonicalJson(driftOf(existing)) !== canonicalJson(drift)) await save(next);
         // A plain read whose vectors could not be made (the embeddings failed) gets them now: without them it is never found.
         // So does a plain read of an anchor a model described (a list call that turns out to hold its items' text).
-        const unfound = (existing.described === "text" && !existing.summaryEmbedding && openrouterApiKey) || (plain && existing.described !== "text" && !isSkillTool(tool));
+        const unfound = (existing.described === "text" && !existing.summaryEmbedding && models) || (plain && existing.described !== "text" && !isSkillTool(tool));
         const pendingNext = unfound ? rememberPlain(rid, digest, result.data).then(publicRecipe) : Promise.resolve(publicRecipe(next));
         if (unfound) later(pendingNext);
         return { id: rid, result, created: false, changed: false, unchanged: true, signals: shownSignals(next), pending: pendingNext.catch(() => null), recipe_status: "fresh" };
