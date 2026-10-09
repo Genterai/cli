@@ -65,7 +65,9 @@ def main():
     t0, t1, questions_file, changes_file, out_dir = sys.argv[1:6]
     workers = int(os.environ.get("MEM0_WORKERS", "6"))
     key = os.environ["OPENROUTER_API_KEY"]
-    store = tempfile.mkdtemp(prefix="mem0-bench-")
+    # MEM0_STORE: a store an earlier run filled, to ask again without adding the docs (and paying for it) twice.
+    resume = os.environ.get("MEM0_STORE")
+    store = resume or tempfile.mkdtemp(prefix="mem0-bench-")
     config = {
         "llm": {"provider": "openai", "config": {"model": os.environ.get("MEM0_LLM", "openai/gpt-5-mini")}},
         "embedder": {"provider": "openai", "config": {"model": "openai/text-embedding-3-small", "api_key": key, "openai_base_url": "https://openrouter.ai/api/v1"}},
@@ -116,13 +118,20 @@ def main():
             out.append([{"text": r["memory"], "place": (r.get("metadata") or {}).get("source"), "replaced": False} for r in found.get("results", [])])
         return out, ms
 
-    started = time.time()
+    os.makedirs(out_dir, exist_ok=True)
     items = [s for rel in files(t0) for s in sections(t0, rel)]
-    errors = add_all(items)
-    ingest_ms = round((time.time() - started) * 1000)
-    ingest_calls = dict(calls)
+    if resume:
+        ingest = json.load(open(os.path.join(out_dir, "ingest.json")))
+        ingest_ms, ingest_calls, errors = ingest["ms"], ingest["calls"], ingest["errors"]
+    else:
+        started = time.time()
+        errors = add_all(items)
+        ingest_ms = round((time.time() - started) * 1000)
+        ingest_calls = dict(calls)
+        # Kept before any search: the docs went in once, at a price, whatever happens next.
+        json.dump({"store": store, "ms": ingest_ms, "calls": ingest_calls, "errors": errors, "sections": len(items)}, open(os.path.join(out_dir, "ingest.json"), "w"), indent=1)
     stored = len(m.get_all(filters={"user_id": USER}, top_k=100000).get("results", []))
-    print(f"mem0: {len(items)} sections in, {stored} memories, {ingest_calls} model calls, {ingest_ms} ms, {len(errors)} errors", file=sys.stderr)
+    print(f"mem0: {len(items)} sections in, {stored} memories, {ingest_calls} model calls, {ingest_ms} ms, {len(errors)} errors (store {store})", file=sys.stderr)
 
     at_t0, ms0 = ask()
     at_t1, ms1 = ask()
@@ -143,7 +152,6 @@ def main():
     at_t1_oracle, ms2 = ask()
 
     info = {"sections": len(items), "memories": stored, "errors": errors + errors2, "llm": config["llm"]["config"]["model"], "embed_calls_ingest": ingest_calls["embed"], "reingest": {"files": len(touched), "llm_calls": reingest_calls["llm"], "ms": reingest_ms}}
-    os.makedirs(out_dir, exist_ok=True)
     base = {"needs": "OpenAI-compatible key + 35 packages", "t0": at_t0, "ingest_ms": ingest_ms, "model_calls_ingest": ingest_calls["llm"], "info": info}
     json.dump({**base, "name": "mem0", "t1": at_t1, "ask_ms": ms0 + ms1}, open(os.path.join(out_dir, "mem0.json"), "w"), indent=1)
     json.dump({**base, "name": "mem0 + oracle re-add", "t1": at_t1_oracle, "ask_ms": ms0 + ms2, "model_calls_ingest": ingest_calls["llm"] + reingest_calls["llm"]}, open(os.path.join(out_dir, "mem0-oracle.json"), "w"), indent=1)

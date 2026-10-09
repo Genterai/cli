@@ -56,6 +56,19 @@ Taking a folder in calls no model (204 files of a backend repository: 0.2 s); ev
 them, and the same questions asked before and after.
 
 <!-- driftbench:start -->
+| | needs | before the edits | after the edits: current answer | after the edits: stale answer |
+| -- | -- | -- | -- | -- |
+| **genter** | nothing | 80% | **77%** (89% of the changed facts) | **0%** |
+| an index built once, same ranking | nothing | 80% | 34% (11%) | 42% |
+| **genter --semantic** | OpenRouter key | 92% | **88%** (92%) | **0%** |
+| an index built once + vectors | OpenRouter key | 92% | 42% (8%) | 43% |
+| mem0 2.2.1, docs not added again | OpenAI-compatible key, 35 packages, 277 LLM calls to take the docs in | at most 73%¹ | at most 3 of 32 changed facts¹ | 18 of 28 old values kept¹ |
+
+65 questions, 61 edits, top 5 passages, 2026-10-09 ([results](bench/drift/results/2026-10-09.md)). The index arms rank
+exactly as Genter does: before the edits they score the same, after them only freshness differs. A question in Russian
+about English docs: 1 of 6 by words, 5 of 6 with `--semantic`.
+¹ What mem0's memory holds at all, an upper bound for any search over it; its searches did not run (the key ran out of
+credits).
 <!-- driftbench:end -->
 
 ## Commands
