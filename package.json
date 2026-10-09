@@ -1,17 +1,15 @@
 {
   "name": "genter-cli",
   "version": "0.2.0",
-  "description": "Composio tools with saved call anchors and a fast agent that works from them.",
+  "description": "Finds where the answer is written, and reads it again: folders, files, websites and notes with no keys and no packages; your apps through Composio.",
   "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "bin": { "genter": "bin/genter.js" },
-  "exports": { ".": "./src/genter.js", "./tools": "./src/tools.js", "./agent": "./src/agent.js", "./recipe": "./src/recipe.js", "./shape": "./src/shape.js", "./markdown": "./src/markdown.js", "./refs": "./src/refs.js", "./skills": "./src/skills.js", "./mcp": "./src/mcp.js", "./web": "./src/web.js", "./cost": "./src/cost.js", "./loop": "./src/loop.js", "./area": "./src/area.js" },
+  "exports": { ".": "./src/genter.js", "./tools": "./src/tools.js", "./agent": "./src/agent.js", "./recipe": "./src/recipe.js", "./shape": "./src/shape.js", "./markdown": "./src/markdown.js", "./refs": "./src/refs.js", "./skills": "./src/skills.js", "./mcp": "./src/mcp.js", "./web": "./src/web.js", "./cost": "./src/cost.js", "./loop": "./src/loop.js", "./area": "./src/area.js", "./local": "./src/local.js", "./mcp-server": "./src/mcp-server.js", "./lexical": "./src/lexical.js" },
   "files": ["bin", "src"],
-  "scripts": { "test": "node --test test/*.test.js", "lint": "biome lint ." },
+  "scripts": { "test": "node --test test/*.test.js", "lint": "biome lint .", "bench": "node bench/drift/run.mjs" },
   "engines": { "node": ">=20" },
-  "devDependencies": { "@biomejs/biome": "2.5.15" },
-  "dependencies": {
-    "@composio/core": "^0.22.0",
-    "zod": "^4.0.0"
-  }
+  "devDependencies": { "@biomejs/biome": "2.5.15", "@composio/core": "^0.22.0", "zod": "^4.0.0" },
+  "peerDependencies": { "@composio/core": "^0.22.0", "zod": "^4.0.0" },
+  "peerDependenciesMeta": { "@composio/core": { "optional": true }, "zod": { "optional": true } }
 }

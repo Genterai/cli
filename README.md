@@ -1,5 +1,107 @@
 # genter
 
+**Memory for AI agents that does not go stale.** Genter remembers *where* an answer is written, not a copy of it, and
+reads that place again every time you ask. Edit a doc, delete a page, mark a file deprecated: the next answer already
+knows, and says what changed since the last look.
+
+No keys, no account, no packages beyond Node 20:
+
+```bash
+npx -y github:Genterai/genter-cli ask "how do we deploy to staging?"     # searches the current folder
+```
+
+```
+(searching ~/acme, added as a source: genter forget ~/acme to stop)
+[1] docs/deploy.md:3-5 · Deploy › Staging
+## Staging
+
+We deploy staging every Tuesday. The pooler listens on port 6432.
+```
+
+Someone edits `docs/deploy.md`; the same question a minute later:
+
+```
+Since the last look: docs/deploy.md changed.
+
+[1] docs/deploy.md:3-5 · Deploy › Staging
+    changed since the last look
+## Staging
+
+We deploy staging every Wednesday. The pooler listens on port 5433.
+```
+
+The same for your coding agent, in one line (Claude Code; Cursor, Codex and any MCP client take the same command):
+
+```bash
+claude mcp add genter -- npx -y github:Genterai/genter-cli mcp
+```
+
+It gets `genter_find` (read-only: passages with `path:lines`), `genter_remember` (a note in `~/.genter/notes.md`),
+`genter_add` (a folder, a file or a website) and `genter_sources`.
+
+## Why it does not go stale
+
+A memory layer (mem0, Zep, a vector index) keeps what it was told: facts extracted from your docs, or chunks of them.
+When the docs change and nobody re-adds them, it answers from the old copy. Genter keeps no copy: each file or page is
+an **Anchor**, one read call with a fixed argument (`FILE_READ {path}`, `WEBSITE_READ_PAGE {url}`). A question lists
+the sources again and reads them, so the answer is what they say now:
+
+- a changed file is answered from its new text, marked *changed since the last look*;
+- a deleted file or a page that answers 404 is *gone*: it is no answer any more, and the answer says so;
+- a file that says it is replaced (`> **Deprecated:** replaced by [Deploy v2](deploy-v2.md)`) brings what replaces it right after it;
+- a note you edited in `~/.genter/notes.md` is found as you left it.
+
+Taking a folder in calls no model (204 files of a backend repository: 0.2 s); every passage says where it is.
+**DriftBench** (`bench/drift`) measures exactly this: the docs of a 40-person company, the edits two months make to
+them, and the same questions asked before and after.
+
+<!-- driftbench:start -->
+<!-- driftbench:end -->
+
+## Commands
+
+```bash
+genter add ./docs https://docs.example.com   # search them from now on (each file or page is read now)
+genter ask how do we rotate the API keys     # passages that answer, read now; --json, --limit N
+genter remember "Releases are frozen until Nov 1"
+genter sources                               # what ask searches
+genter forget ./docs
+genter mcp ./docs                            # all of it as an MCP server over stdio
+```
+
+A folder's text and code files are read; hidden files, its `.gitignore`, lockfiles, built folders, keys and files
+holding a private key are not. The store (`~/.genter/local.json`, or `GENTER_HOME`) is sealed with a secret made on
+the first run and holds which places there are, their digests, headings and dates, never their text.
+
+Words rank the passages with no model (BM25, headings counting more). `--semantic` (or `GENTER_SEMANTIC=1`) also ranks
+them by meaning with embeddings through OpenRouter (`OPENROUTER_API_KEY`), so a question in other words or another
+language finds them; the passages are then sent to OpenRouter.
+
+In code:
+
+```js
+import { createLocal, findText } from "genter-cli/local";
+
+const genter = createLocal();                 // ~/.genter; createLocal({ home, openrouterApiKey }) to change
+await genter.add("./docs");
+console.log(findText(await genter.find("how do we deploy?")));
+```
+
+## Genter Cloud
+
+The command keeps one person's folders, sites and notes current. [Genter](https://genter.ai) does the same for a team,
+across their apps:
+
+| | `genter` (this package) | Genter Cloud |
+| -- | -- | -- |
+| Sources | folders, files, public websites, notes | + 500 apps: Gmail, GitHub, Slack, Notion, Linear, Drive, Calendar… |
+| Ranking | words; meaning with your OpenRouter key | meaning, model-written summaries and keywords, questions in any language |
+| Freshness | read again on every question | + triggers: an event in an app rechecks the Anchors it touches |
+| People | one | workspaces, roles, an MCP address with sign-in per agent, a call log |
+| Answers | passages | + Genter's agent, which finds across apps and cites every source |
+
+## Your apps through Composio
+
 Composio tools with saved call anchors. An AI agent finds a tool and runs it; every successful call is remembered as an **Anchor**.
 
 > An anchor is one successful tool call with fixed, concrete arguments, plus what it actually returned.
@@ -45,7 +147,7 @@ trigger:{active, spec, id}}`. Records of the older model (`memory`, `alias`, `ki
 ## Install
 
 ```bash
-npm i -g github:Genterai/genter-cli
+npm i -g github:Genterai/genter-cli @composio/core zod
 genter login '{"composio_api_key":"...","openrouter_api_key":"...","user_id":"me"}'
 ```
 

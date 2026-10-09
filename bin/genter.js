@@ -1,16 +1,39 @@
 #!/usr/bin/env node
-// Usage: genter <tool> '<json args>'     e.g. genter search '{"query":"latest emails"}'
+// No keys, no packages:  genter add ./docs   ·   genter ask "how do we deploy?"   ·   genter mcp
+// Your apps (Composio):  genter <command> '<json args>'     e.g. genter search '{"query":"latest emails"}'
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { createAgent } from "../src/agent.js";
-import { createGenter } from "../src/genter.js";
-import { agentResultText, agentTools, tools } from "../src/tools.js";
+
+const LOCAL = new Set(["add", "ask", "remember", "forget", "sources", "mcp", "help", "--help", "-h", "--version", "-v"]);
+const APPS = new Set(["run", "find", "continue", "write", "register_tool", "login", "search", "execute", "recipes", "anchors", "recheck_recipe", "recheck_anchor", "remove_recipe", "remove_anchor"]);
+const first = process.argv[2];
+if (!first || LOCAL.has(first) || !APPS.has(first)) {
+  const { local } = await import("./local.js");
+  await local(process.argv.slice(2));
+  process.exit(process.exitCode ?? 0);
+}
+
+// The app commands need @composio/core and zod (optional peers: npm i -g @composio/core zod).
+let createAgent;
+let createGenter;
+let agentResultText;
+let agentTools;
+let tools;
+try {
+  ({ createAgent } = await import("../src/agent.js"));
+  ({ createGenter } = await import("../src/genter.js"));
+  ({ agentResultText, agentTools, tools } = await import("../src/tools.js"));
+} catch (e) {
+  if (e.code !== "ERR_MODULE_NOT_FOUND") throw e;
+  console.error(`genter ${first} works in your apps through Composio and needs two packages: npm i -g @composio/core zod\n(${e.message.split("\n")[0]})\n\nWith no keys and no packages: genter add <folder|file|url>, genter ask <question>, genter mcp. See genter help.`);
+  process.exit(1);
+}
 
 process.env.GENTER_COST_LOG ??= "0"; // cost events are for servers (stdout -> log drain); a terminal stays quiet unless asked
 
-const dir = join(homedir(), ".genter");
+const dir = process.env.GENTER_HOME || join(homedir(), ".genter");
 const read = (file) => (existsSync(join(dir, file)) ? JSON.parse(readFileSync(join(dir, file), "utf8")) : {});
 const write = (file, data) => {
   mkdirSync(dir, { recursive: true });
@@ -46,7 +69,7 @@ const aliases = { anchors: "recipes", recheck_anchor: "recheck_recipe", remove_a
 const [given, json = "{}"] = process.argv.slice(2);
 const name = aliases[given] ?? given;
 if (!tools[name] && !agentCommands[name]) {
-  console.log("genter <command> '<json args>'\n");
+  console.log("genter <command> '<json args>': your apps through Composio (genter help: the commands with no keys)\n");
   console.log(`  ${"run".padEnd(14)} {task, account?}: an agent does the task in your apps, anchors first`);
   console.log(`  ${"find".padEnd(14)} {question, account?}: read-only agent, answers from past results and live data`);
   console.log(`  ${"continue".padEnd(14)} {run_id, message}: answer a run's question or give a follow-up`);
