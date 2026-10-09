@@ -145,6 +145,7 @@ describe("embedding providers", () => {
     assert.deepEqual(embeddingProvider({ env: { GENTER_EMBED_URL: "http://lm:1234/v1/", GENTER_EMBED_MODEL: "bge" } }), { name: "custom", url: "http://lm:1234/v1", key: undefined, model: "bge" });
     assert.equal(embeddingProvider({ env: { OPENROUTER_API_KEY: "r", OPENAI_API_KEY: "o" } }).name, "openai");
     assert.deepEqual(embeddingProvider({ env: { AI_GATEWAY_API_KEY: "v" } }), { name: "vercel", url: "https://ai-gateway.vercel.sh/v1", key: "v", model: "openai/text-embedding-3-small" });
+    assert.equal(embeddingProvider({ env: { AI_GATEWAY_TOKEN: "t" } }).key, "t");
     assert.equal(embeddingProvider({ env: { OPENAI_API_KEY: "o" }, name: "ollama" }).url, "http://localhost:11434/v1");
     assert.equal(embeddingProvider({ env: {}, config: { openrouter_api_key: "r" } }).name, "openrouter");
     assert.equal(embeddingProvider({ env: {} }).name, "ollama");

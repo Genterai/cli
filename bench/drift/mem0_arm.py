@@ -64,14 +64,20 @@ def files(root):
 def main():
     t0, t1, questions_file, changes_file, out_dir = sys.argv[1:6]
     workers = int(os.environ.get("MEM0_WORKERS", "6"))
-    key = os.environ["OPENROUTER_API_KEY"]
+    # Any OpenAI-compatible gateway: MEM0_BASE_URL + MEM0_API_KEY (e.g. Vercel AI Gateway), else OpenRouter.
+    base_url = os.environ.get("MEM0_BASE_URL", "https://openrouter.ai/api/v1")
+    key = os.environ.get("MEM0_API_KEY") or os.environ["OPENROUTER_API_KEY"]
+    if "MEM0_BASE_URL" in os.environ:
+        os.environ.pop("OPENROUTER_API_KEY", None)  # mem0 sends every LLM call to OpenRouter when this is set
+    embed_model = os.environ.get("MEM0_EMBED_MODEL", "openai/text-embedding-3-small")
+    dims = int(os.environ.get("MEM0_EMBED_DIMS", "1536"))
     # MEM0_STORE: a store an earlier run filled, to ask again without adding the docs (and paying for it) twice.
     resume = os.environ.get("MEM0_STORE")
     store = resume or tempfile.mkdtemp(prefix="mem0-bench-")
     config = {
-        "llm": {"provider": "openai", "config": {"model": os.environ.get("MEM0_LLM", "openai/gpt-5-mini")}},
-        "embedder": {"provider": "openai", "config": {"model": "openai/text-embedding-3-small", "api_key": key, "openai_base_url": "https://openrouter.ai/api/v1"}},
-        "vector_store": {"provider": "qdrant", "config": {"path": os.path.join(store, "qdrant"), "collection_name": "bench", "embedding_model_dims": 1536, "on_disk": True}},
+        "llm": {"provider": "openai", "config": {"model": os.environ.get("MEM0_LLM", "openai/gpt-5-mini"), "api_key": key, "openai_base_url": base_url}},
+        "embedder": {"provider": "openai", "config": {"model": embed_model, "api_key": key, "openai_base_url": base_url, "embedding_dims": dims}},
+        "vector_store": {"provider": "qdrant", "config": {"path": os.path.join(store, "qdrant"), "collection_name": "bench", "embedding_model_dims": dims, "on_disk": True}},
         "history_db_path": os.path.join(store, "history.db"),
     }
     m = Memory.from_config(config)

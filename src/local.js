@@ -446,7 +446,7 @@ export function createLocal({ home = genterHome(), secret, userId = "default", o
           scores = fuse(lexical, cos);
           semantic = true;
         } catch (e) {
-          semantic = `off: ${e.message.slice(0, 120)}`;
+          semantic = `off: ${e.message.slice(0, 300)}`;
         }
       }
       const order = sections.map((x, i) => [x, scores[i]]).filter(([, sc]) => sc > 0).sort((a, b) => b[1] - a[1]);
@@ -742,7 +742,7 @@ function passageOf(x, qTerms) {
 export const PROVIDERS = {
   openai: { url: "https://api.openai.com/v1", env: "OPENAI_API_KEY", model: "text-embedding-3-small" },
   openrouter: { url: "https://openrouter.ai/api/v1", env: "OPENROUTER_API_KEY", model: "openai/text-embedding-3-small" },
-  vercel: { url: "https://ai-gateway.vercel.sh/v1", env: "AI_GATEWAY_API_KEY", model: "openai/text-embedding-3-small" },
+  vercel: { url: "https://ai-gateway.vercel.sh/v1", env: "AI_GATEWAY_API_KEY", also: ["AI_GATEWAY_TOKEN"], model: "openai/text-embedding-3-small", free: "google/gemini-embedding-001" },
   ollama: { url: "http://localhost:11434/v1", env: null, model: "nomic-embed-text" },
 };
 
@@ -754,7 +754,7 @@ export function embeddingProvider({ env = process.env, config = {}, name } = {})
   if (env.GENTER_EMBED_URL) return { name: "custom", url: env.GENTER_EMBED_URL.replace(/\/+$/, ""), key: env.GENTER_EMBED_KEY || undefined, model: model ?? "text-embedding-3-small" };
   const of = (n) => {
     const p = PROVIDERS[n];
-    const key = p.env ? env[p.env] || (n === "openrouter" ? config.openrouter_api_key : undefined) : undefined;
+    const key = p.env ? [p.env, ...(p.also ?? [])].map((k) => env[k]).find(Boolean) || (n === "openrouter" ? config.openrouter_api_key : undefined) : undefined;
     return { name: n, url: p.url, ...(key && { key }), model: model ?? p.model };
   };
   const named = name || env.GENTER_PROVIDER;
@@ -785,7 +785,12 @@ export function embedderFor({ name = "custom", url, key, model }) {
         if (name === "ollama") throw new Error(`No embeddings: set OPENAI_API_KEY, OPENROUTER_API_KEY or AI_GATEWAY_API_KEY, or run Ollama (ollama pull ${model}), or GENTER_EMBED_URL (${e.cause?.code ?? e.message})`);
         throw e;
       }
-      if (!res.ok) throw new Error(`Embeddings (${name}) failed: ${res.status} ${(await res.text()).slice(0, 200)}`);
+      if (!res.ok) {
+        const text = (await res.text()).slice(0, 200);
+        // Vercel AI Gateway's free tier has no OpenAI embedding models; Google's work there.
+        const hint = res.status === 403 && /free tier/i.test(text) && PROVIDERS[name]?.free ? `: on the free tier, set GENTER_EMBED_MODEL=${PROVIDERS[name].free}, or add credits` : "";
+        throw new Error(`Embeddings (${name} ${model}) failed: ${res.status}${hint || ` ${text}`}`);
+      }
       const data = await res.json();
       return data.data.sort((a, b) => a.index - b.index).map((d) => d.embedding);
     });
@@ -798,9 +803,11 @@ export function embedderFor({ name = "custom", url, key, model }) {
 export const openrouterEmbedder = (apiKey, model = process.env.EMBEDDING_MODEL || PROVIDERS.openrouter.model) => embedderFor({ name: "openrouter", url: PROVIDERS.openrouter.url, key: apiKey, model });
 
 const embedText = (x) => `${x.headings.join(" › ")}\n${x.text.slice(0, 2000)}`;
-// text-embedding-3 vectors keep their first 256 numbers (they are trained to be cut); other models keep all of theirs.
+// Vectors of models trained to be cut keep their first numbers: text-embedding-3 256, gemini-embedding 768; other
+// models keep all of theirs.
 function shrink(v, model = "") {
-  const s = /text-embedding-3/.test(model) ? Array.from(v).slice(0, LIMITS.dims) : Array.from(v);
+  const keep = /text-embedding-3/.test(model) ? LIMITS.dims : /gemini-embedding/.test(model) ? 768 : Infinity;
+  const s = Array.from(v).slice(0, keep);
   const n = Math.hypot(...s) || 1;
   return Float32Array.from(s, (x) => x / n);
 }

@@ -167,7 +167,7 @@ Just return the label CORRECT or WRONG in a json format with the key as "label".
 `;
 
 async function answer(bench, rows, m) {
-  return pool(rows, 8, async (r) => {
+  return pool(rows, Number(process.env.BENCH_CONCURRENCY) || 8, async (r) => {
     const context = r.passages.map((p, i) => `[${i + 1}] (${p.file})\n${p.text.slice(0, 2500)}`).join("\n\n");
     const prompt =
       bench === "locomo"
@@ -218,8 +218,10 @@ async function main() {
       process.stderr.write(`${bench}: answering with ${m.provider} ${m.reader}, judged by ${m.judge}…\n`);
       const answered = await answer(bench, rows, m);
       const acc = accuracy(answered);
-      report.benches[bench].answers = { provider: m.provider, reader: m.reader, judge: m.judge, ...acc };
-      lines.push(`Answers from the 10 passages (${m.reader}, judged by ${m.judge} with the benchmark's prompt): ${pct(acc.correct)} of ${acc.n}`, "");
+      report.benches[bench].answers = { provider: m.provider, reader: m.reader, judge: m.judge, usage: m.usage, errors: answered.filter((r) => r.response.startsWith("error:")).length, ...acc };
+      const errors = report.benches[bench].answers.errors;
+      lines.push(`Answers from the 10 passages (${m.reader}, judged by ${m.judge} with the benchmark's prompt): ${pct(acc.correct)} of ${acc.n}${errors ? ` (${errors} reader errors count as wrong)` : ""}`, "");
+      lines.push(`Model calls: ${Object.entries(m.usage).map(([model, u]) => `${model} ${u.calls} calls, ${u.prompt_tokens} + ${u.completion_tokens} tokens`).join("; ")}`, "");
       lines.push("| type | correct |", "| -- | -- |", ...Object.entries(acc.types).map(([t, v]) => `| ${t} (${v.n}) | ${pct(v.correct)} |`), "");
       report.benches[bench].rows = answered.map(({ passages, ...r }) => r);
     }
