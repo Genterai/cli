@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -166,6 +166,17 @@ describe("local search", () => {
       const anchor = Object.values(cipher("s:me:local").open(JSON.parse(raw).blob).anchors)[0];
       assert.equal(anchor.id, recipeId({ workspaceId: "me", tool: FILE_READ, args: { path } }));
       assert.deepEqual(anchor.items, ["Deploy › Staging", "Deploy › Production"]);
+    } finally {
+      box.done();
+    }
+  });
+
+  it("[spec:cli/config-private] keeps its config and its store readable by their owner only", async () => {
+    const box = sandbox({ "docs/deploy.md": DEPLOY });
+    try {
+      const g = createLocal({ home: box.home, cwd: box.dir });
+      await g.add("docs");
+      for (const file of ["config.json", "local.json"]) assert.equal(statSync(join(box.home, file)).mode & 0o777, 0o600, file);
     } finally {
       box.done();
     }
