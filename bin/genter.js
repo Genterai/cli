@@ -2,7 +2,7 @@
 // No keys, no packages:  genter add ./docs   ·   genter ask "how do we deploy?"   ·   genter mcp
 // Your apps (Composio):  genter <command> '<json args>'     e.g. genter search '{"query":"latest emails"}'
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -37,9 +37,11 @@ process.env.GENTER_COST_LOG ??= "0"; // cost events are for servers (stdout -> l
 
 const dir = process.env.GENTER_HOME || join(homedir(), ".genter");
 const read = (file) => (existsSync(join(dir, file)) ? JSON.parse(readFileSync(join(dir, file), "utf8")) : {});
+// The config (keys, the secret) and the sealed stores are readable by their owner only.
 const write = (file, data) => {
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, file), JSON.stringify(data, null, 2));
+  writeFileSync(join(dir, file), JSON.stringify(data, null, 2), { mode: 0o600 });
+  chmodSync(join(dir, file), 0o600);
 };
 
 // Local store: encrypted anchors in ~/.genter/calls.json, agent runs in ~/.genter/runs.json.

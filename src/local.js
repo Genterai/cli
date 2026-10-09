@@ -41,10 +41,11 @@ function readJson(file, fallback) {
     return fallback;
   }
 }
+// Genter's own files (the config with its secret and keys, the sealed store) are readable by their owner only.
 function writeJson(file, data, pretty = false) {
   mkdirSync(dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(data, null, pretty ? 2 : 0));
+  writeFileSync(tmp, JSON.stringify(data, null, pretty ? 2 : 0), { mode: 0o600 });
   renameSync(tmp, file);
 }
 
