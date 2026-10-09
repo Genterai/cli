@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import { Composio } from "@composio/core";
 import { logCost, roughTokens, usageFields, withCost } from "./cost.js";
 import { addMcpServer, isCustomToolkit, mcpUrl } from "./mcp.js";
@@ -8,6 +8,9 @@ import { itemOf, listedItems, planReconcile } from "./area.js";
 import { addIntent, chunkCall, fileCall, isSkillTool, SCRIPT_NOTE, SKILL_TOOLS } from "./skills.js";
 import { signalsOf, areaStats } from "./drift.js";
 import { crawl, forgetPage, namesSite, readPage, siteUrl, underSite } from "./web.js";
+import { cipher } from "./seal.js";
+
+export { cipher };
 
 // Genter = Composio + anchors of past calls.
 // An anchor is ONE successful tool call with fixed args plus knowledge about its actual result (see recipe.js and
@@ -74,7 +77,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
   };
 
   // OpenRouter chat call. The provider that answers first by default (OPENROUTER_SORT=latency|throughput|price): by price,
-  // gpt-oss-120b went to providers that broke its JSON; by throughput, to ones 7x dearer and no quicker (README → Models).
+  // gpt-oss-120b went to providers that broke its JSON; by throughput, to ones 7x dearer and no quicker (docs/apps.md → Models).
   async function chat(body, timeout = 30000, source = "llm") {
     const started = Date.now();
     const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -1248,25 +1251,6 @@ function readsOnly(slug, tags = []) {
 // A tool whose slug says it changes something (sends, creates, deletes, updates ...).
 export function changesData(slug) {
   return /_(SEND|CREATE|DELETE|REMOVE|UPDATE|PATCH|POST|REPLY|FORWARD|MOVE|ARCHIVE|TRASH|ADD|INSERT|UPLOAD|SET|INVITE|MERGE|CLOSE|PUBLISH|SHARE|EXECUTE|RUN|START|STOP|CANCEL|WATCH|PIN|UNPIN|FOLLOW|UNFOLLOW|MODIFY|CLEAR|BATCH_UPDATE|IMPORT|COPY)(_|$)/.test(String(slug ?? "").toUpperCase());
-}
-
-// AES-256-GCM. Blob = iv (12 bytes) + auth tag (16 bytes) + ciphertext, base64.
-export function cipher(secret) {
-  const key = createHash("sha256").update(secret).digest();
-  return {
-    seal(value) {
-      const iv = randomBytes(12);
-      const c = createCipheriv("aes-256-gcm", key, iv);
-      const data = Buffer.concat([c.update(JSON.stringify(value)), c.final()]);
-      return Buffer.concat([iv, c.getAuthTag(), data]).toString("base64");
-    },
-    open(blob) {
-      const b = Buffer.from(blob, "base64");
-      const d = createDecipheriv("aes-256-gcm", key, b.subarray(0, 12));
-      d.setAuthTag(b.subarray(12, 28));
-      return JSON.parse(Buffer.concat([d.update(b.subarray(28)), d.final()]));
-    },
-  };
 }
 
 // APIs like GitHub return file contents as base64; decode them so the summary can read them.

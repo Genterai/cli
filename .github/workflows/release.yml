@@ -1,0 +1,62 @@
+# A merge to main releases the version in package.json when it is new: npm publish (with provenance) and a GitHub
+# release with notes, after lint, the tests and a clean install that answers with no key. A merge that keeps the
+# version releases nothing. To release: raise "version" in package.json in the pull request.
+# npm needs an NPM_TOKEN secret, or npm trusted publishing set up for this repository and this workflow.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write # the tag and the release
+  id-token: write # npm provenance and trusted publishing
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v6
+        with: { node-version: 22, registry-url: "https://registry.npmjs.org", cache: npm }
+      - name: Is this version out yet?
+        id: version
+        run: |
+          v="$(node -p 'require("./package.json").version')"
+          name="$(node -p 'require("./package.json").name')"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if npm view "$name@$v" version >/dev/null 2>&1; then echo "npm=false" >> "$GITHUB_OUTPUT"; else echo "npm=true" >> "$GITHUB_OUTPUT"; fi
+          if git rev-parse -q --verify "refs/tags/v$v" >/dev/null; then echo "tag=false" >> "$GITHUB_OUTPUT"; else echo "tag=true" >> "$GITHUB_OUTPUT"; fi
+      - name: Nothing to release
+        if: steps.version.outputs.npm == 'false' && steps.version.outputs.tag == 'false'
+        run: echo "v${{ steps.version.outputs.version }} is on npm and tagged already; raise the version in package.json to release."
+      - if: steps.version.outputs.npm == 'true' || steps.version.outputs.tag == 'true'
+        run: npm ci
+      - if: steps.version.outputs.npm == 'true' || steps.version.outputs.tag == 'true'
+        run: npm run lint
+      - if: steps.version.outputs.npm == 'true' || steps.version.outputs.tag == 'true'
+        run: npm test
+      - name: Installs with nothing else and answers with no key
+        if: steps.version.outputs.npm == 'true'
+        run: |
+          npm pack
+          mkdir -p /tmp/try && cd /tmp/try && npm init -y >/dev/null && npm i "$GITHUB_WORKSPACE"/*.tgz
+          test "$(ls node_modules | wc -l)" = 1
+          mkdir docs && printf '# Deploy\n\nWe deploy on Thursday.\n' > docs/deploy.md
+          GENTER_HOME=/tmp/try/.genter npx genter ask "when do we deploy" | grep -q Thursday
+      - name: Publish to npm
+        if: steps.version.outputs.npm == 'true'
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Tag and GitHub release
+        if: steps.version.outputs.tag == 'true'
+        run: gh release create "v${{ steps.version.outputs.version }}" --target "$GITHUB_SHA" --title "v${{ steps.version.outputs.version }}" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

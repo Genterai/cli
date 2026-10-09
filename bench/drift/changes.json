@@ -1,0 +1,343 @@
+[
+  {
+    "op": "edit",
+    "file": "ops/database.md",
+    "find": "**PostgreSQL 15.6**",
+    "replace": "**PostgreSQL 16.4**"
+  },
+  {
+    "op": "edit",
+    "file": "ops/database.md",
+    "find": "The staging pooler listens on port 6432 on `pgbouncer.db.svc.cluster.local` in `nw-staging-euc1`.",
+    "replace": "The staging pooler listens on port 5433 on `pgbouncer.db.svc.cluster.local` in `nw-staging-euc1`. It was moved\n  when staging got its own PgBouncer pods during the Postgres upgrade."
+  },
+  {
+    "op": "edit",
+    "file": "engineering/local-dev.md",
+    "find": "| Go | Go 1.22.5 |",
+    "replace": "| Go | Go 1.23.2 |"
+  },
+  {
+    "op": "edit",
+    "file": "ops/backups.md",
+    "find": "Base backups and WAL archiving are handled by **pgBackRest**, which runs on every Patroni node and pushes to the",
+    "replace": "Base backups and WAL archiving are handled by **WAL-G**, which runs on every Patroni node and pushes to the"
+  },
+  {
+    "op": "edit",
+    "file": "ops/deploy-staging.md",
+    "find": "Pins expire after 48 hours so nobody forgets one.",
+    "replace": "Pins expire after 24 hours so nobody forgets one."
+  },
+  {
+    "op": "edit",
+    "file": "ops/oncall-eu.md",
+    "find": "Shifts change on **Mondays at 10:00 CET**",
+    "replace": "Shifts change on **Tuesdays at 10:00 CET**"
+  },
+  {
+    "op": "edit",
+    "file": "ops/oncall-us.md",
+    "find": "read the EU handover thread from the same\nmorning; the EU primary writes their summary there.",
+    "replace": "read the most recent EU handover thread (the\nEU rotation hands over on Tuesdays); the EU primary writes their summary there."
+  },
+  {
+    "op": "edit",
+    "file": "ops/oncall-us.md",
+    "find": "US on-call pays **$450** per week",
+    "replace": "US on-call pays **$525** per week"
+  },
+  {
+    "op": "edit",
+    "file": "handbook/welcome.md",
+    "find": "We keep a small office in Rotterdam for people who prefer a desk away from home and for\nteam days; see [Rotterdam office](office-rotterdam.md). Nobody is expected to come in.",
+    "replace": "We closed our Rotterdam office in August 2026. For team days we rent a meeting space in\nthe city, and if you prefer a desk away from home, ask your manager about a coworking membership."
+  },
+  {
+    "op": "delete",
+    "file": "handbook/office-rotterdam.md"
+  },
+  {
+    "op": "edit",
+    "file": "README.md",
+    "find": "Company basics: time off, expenses, travel, onboarding, the office",
+    "replace": "Company basics: time off, expenses, travel, onboarding, equipment"
+  },
+  {
+    "op": "edit",
+    "file": "engineering/architecture.md",
+    "find": "| Redis | Rate limiting, alert de-duplication, short-lived locks | Sentinel setup, nothing durable |",
+    "replace": "| Redis | Rate limiting, alert de-duplication, short-lived locks | ElastiCache since August 2026, nothing durable |"
+  },
+  {
+    "op": "delete",
+    "file": "ops/runbooks/redis-sentinel.md"
+  },
+  {
+    "op": "add",
+    "file": "engineering/ci-pipeline.md",
+    "text": "# CI pipeline\n\nCI for `beacon` and `beacon-web` runs on **GitHub Actions** since August 2026. Workflows are defined next to the code, in\n`.github/workflows/`, and run on our own runners. This page covers what runs, where it runs, and what to do when it fails.\n\n## Workflows\n\n| Workflow | Trigger | What it does | Required |\n| --- | --- | --- | --- |\n| `checks.yml` | Every pull request | Lint, unit tests with coverage, OpenAPI check | Yes |\n| `integration.yml` | Every pull request | Integration tests against containers | Yes |\n| `build.yml` | Pull requests and `main` | Builds every service image and pushes it to ECR | Yes |\n| `e2e-smoke.yml` | Pull requests labelled `e2e` | Short Playwright run against a preview environment | No |\n| `nightly.yml` | 02:00 UTC | Full end-to-end suite and dependency scans | No |\n\nBranch protection requires the jobs marked as required. [Testing](testing.md) explains the coverage gate and the flaky\ntest process.\n\n## Runners\n\nJobs run on self-hosted runners managed by Actions Runner Controller in a dedicated EKS cluster, `nw-ci-euc1`. Runner\npods are ephemeral: one job, then the pod is gone.\n\n- Labels: `nw-small` (2 vCPU) for lint and unit tests, `nw-large` (8 vCPU) for integration tests and builds.\n- Go and pnpm caches use the Actions cache backed by S3.\n- Docker builds use BuildKit with registry caching in ECR.\n\n## When CI fails\n\n1. Open the failing job and read the first error.\n2. Check #eng-ci in case it is a known problem.\n3. Re-run failed jobs once from the pull request. A pass on retry means a flaky test; follow the flaky test process.\n4. Runner problems (jobs queued for more than ten minutes) go to the Platform team in #beacon-platform.\n\n## Secrets\n\nWorkflows get AWS access through OIDC federation with short-lived roles per repository; there are no stored AWS keys.\nOther secrets come from AWS Secrets Manager at runtime. Workflows triggered from forks run without secrets and without\nour runners.\n\n## Changing workflows\n\nChanges to `.github/workflows/` need a review from the Platform team (enforced by CODEOWNERS). Reusable steps live in\nthe `northwind/actions` repository and are pinned by commit SHA, never by tag.\n"
+  },
+  {
+    "op": "prepend",
+    "file": "engineering/ci.md",
+    "text": "> **Deprecated:** replaced by [CI pipeline](ci-pipeline.md)\n\n"
+  },
+  {
+    "op": "edit",
+    "file": "engineering/release-process.md",
+    "find": "every week on **Wednesdays at 11:00 CET** by the release bot",
+    "replace": "every week on **Tuesdays at 14:30 CET** by the release bot"
+  },
+  {
+    "op": "edit",
+    "file": "engineering/testing.md",
+    "find": "must reach at least **68%** before",
+    "replace": "must reach at least **74%** before"
+  },
+  {
+    "op": "edit",
+    "file": "engineering/code-review.md",
+    "find": "- Pick up review requests within one working day. If you cannot, say so and suggest someone else.",
+    "replace": "- Pick up review requests within one working day, and within two hours for hotfixes. If you cannot, say so\n  and suggest someone else."
+  },
+  {
+    "op": "edit",
+    "file": "engineering/code-review.md",
+    "find": "`@northwind/billing-core`",
+    "replace": "`@northwind/revenue-eng`"
+  },
+  {
+    "op": "edit",
+    "file": "product/pricing.md",
+    "find": "| 20 monitors |",
+    "replace": "| 25 monitors |"
+  },
+  {
+    "op": "edit",
+    "file": "product/pricing.md",
+    "find": "**Extra status pages**: $9/month each.",
+    "replace": "**Extra status pages**: $12/month each."
+  },
+  {
+    "op": "edit",
+    "file": "engineering/api-guidelines.md",
+    "find": "up to **600 requests per minute**",
+    "replace": "up to **1,000 requests per minute**"
+  },
+  {
+    "op": "delete",
+    "file": "sales/q3-promo.md"
+  },
+  {
+    "op": "edit",
+    "file": "ops/monitoring.md",
+    "find": "and 1-hour downsamples for **13 months**",
+    "replace": "and 1-hour downsamples for **18 months**"
+  },
+  {
+    "op": "edit",
+    "file": "ops/monitoring.md",
+    "find": "## Alert routing\n\n| Severity | Goes to | When |\n| --- | --- | --- |\n| `page` | PagerDuty: the rotation that is on shift | Any time |\n| `warn` | Slack `#beacon-alerts-low` | Working hours; nobody is woken up |\n| `info` | Nowhere; visible in Grafana and Alertmanager only | |\n\nAlertmanager groups alerts by service and region, and waits 30 seconds before sending the first notification of a group\nso that one problem produces one page.\n\n",
+    "replace": "## Alert routing\n\nSeverities, routing, grouping and ownership of alerts are described in [Alerting](alerting.md).\n\n"
+  },
+  {
+    "op": "edit",
+    "file": "ops/monitoring.md",
+    "find": "## Silences\n\nSilence an alert only with an end time and a comment that says why and who. Silences longer than 24 hours need a Linear\nissue linked in the comment. The weekly on-call handover reviews all active silences.\n\n",
+    "replace": ""
+  },
+  {
+    "op": "add",
+    "file": "ops/alerting.md",
+    "text": "# Alerting\n\nHow alerts about our own systems are classified, where they go, and how we keep them useful. Metrics, logs and\ndashboards are described in [Monitoring](monitoring.md); this page starts where a rule fires.\n\n## Severities\n\nEvery alert rule carries exactly one `severity` label. Pick the lowest one that is still honest.\n\n| Severity | Meaning | Example |\n| --- | --- | --- |\n| `page` | Customers are hurt now, or will be within the hour | `ChecksLate`, `ResultsBacklogHigh`, `NotifierDeliveryFailing` |\n| `warn` | Something needs a human today, but not at night | `PostgresReplicaLagging`, `CertificateExpiresSoon` |\n| `info` | Useful context for dashboards and investigations | `DeployStarted`, `AutoscalerAtMax` |\n\n## Routing\n\n| Severity | Goes to | When |\n| --- | --- | --- |\n| `page` | PagerDuty, to whichever rotation is on shift | Any time |\n| `warn` | Slack `#beacon-alerts-low`, plus a daily digest at 09:00 CET | Working hours; nobody is woken up |\n| `info` | Nowhere; visible in Grafana and Alertmanager only | |\n\nAlerts from staging never reach PagerDuty; they go to `#staging-alerts` whatever their severity.\n\n## Grouping and inhibition\n\n- Alertmanager groups alerts by `service` and `region`, and waits 30 seconds before the first notification of a group so\n  that one problem produces one page.\n- Repeat notifications for an unresolved `page` alert go out every two hours.\n- When a whole region is unreachable (`RegionDown`), every other alert for that region is inhibited.\n- When a probe location is drained, alerts about that location are inhibited until it is undrained.\n\n## Ownership\n\nEach rule has an `owner` label with a team name. The weekly alert report lists, per team, which rules fired, how often,\nand how many pages were acknowledged but needed no action. A rule that pages more than three times in a week without\nanyone having to act is either fixed or downgraded to `warn` by its owner team.\n\n## Writing a new alert\n\n1. Start from a symptom a customer would notice, not from a cause.\n2. Add the rule in `deploy/alerts/<service>.yaml` with `severity`, `owner`, `summary` and `runbook_url`.\n3. Write or update the runbook before the rule is merged.\n4. For `page` rules, test the rule on staging with `amtool` and include a screenshot of the notification in the pull\n   request.\n\n## Silences\n\nSilence an alert only with an end time and a comment that says why and who. Silences longer than 24 hours need a Linear\nissue in the comment. Active silences are reviewed in every on-call handover.\n"
+  },
+  {
+    "op": "move",
+    "from": "handbook/travel.md",
+    "to": "handbook/policies/travel.md"
+  },
+  {
+    "op": "edit",
+    "file": "handbook/policies/travel.md",
+    "find": "Premium economy is allowed for flights **longer than 6 hours**",
+    "replace": "Premium economy is allowed for flights **longer than 8 hours**"
+  },
+  {
+    "op": "edit",
+    "file": "handbook/policies/travel.md",
+    "find": "[Expenses](expenses.md)",
+    "replace": "[Expenses](../expenses.md)"
+  },
+  {
+    "op": "edit",
+    "file": "handbook/expenses.md",
+    "find": "Booking trips is covered in [Travel](travel.md).",
+    "replace": "Booking trips is covered in [Travel](policies/travel.md)."
+  },
+  {
+    "op": "edit",
+    "file": "handbook/expenses.md",
+    "find": "(see [Travel](travel.md))",
+    "replace": "(see [Travel](policies/travel.md))"
+  },
+  {
+    "op": "edit",
+    "file": "handbook/expenses.md",
+    "find": "gets a virtual card in **Pleo**.",
+    "replace": "gets a virtual card in **Payhawk**."
+  },
+  {
+    "op": "edit",
+    "file": "handbook/expenses.md",
+    "find": "in the Pleo app right after paying",
+    "replace": "in the Payhawk app right after paying"
+  },
+  {
+    "op": "edit",
+    "file": "handbook/onboarding.md",
+    "find": "## Your laptop\n\nEngineers get a **MacBook Pro 14-inch with the M3 Pro chip**, 36 GB of memory and 1 TB of storage. Everyone else gets a\nMacBook Air 13-inch with 16 GB. Laptops are enrolled in our device management before they ship, so you sign in with your\nGoogle account on first boot and the security settings are applied automatically.\n\n- You can ask for an external keyboard, mouse and one monitor through #it-help; bigger setups come out of your home\n  office budget (see [Expenses](expenses.md)).\n- Laptops are replaced every three years, or sooner if they break.\n- If you leave, the laptop goes back to IT. We send you a prepaid box.\n\n",
+    "replace": "## Your laptop\n\nIT ships your laptop so that it arrives before your first day. What you get, and how to order a monitor\nor other equipment, is described in [Equipment](equipment.md).\n\n"
+  },
+  {
+    "op": "add",
+    "file": "handbook/equipment.md",
+    "text": "# Equipment\n\nWhat hardware you get from Northwind, how to ask for more, and what happens when it breaks or when you leave. IT owns\nthis page; questions go to #it-help.\n\n## Laptops\n\n| Role | Model | Memory | Storage |\n| --- | --- | --- | --- |\n| Engineering, data, Solutions Engineers | MacBook Pro 14-inch, M4 Pro | 48 GB | 1 TB |\n| Everyone else | MacBook Air 15-inch, M4 | 24 GB | 512 GB |\n\nLaptops are enrolled in device management before they ship. On first boot you sign in with your Google account and the\nsecurity settings are applied automatically. IT ships the laptop so that it arrives at least two working days before\nyour start date.\n\n- Laptops are replaced every three years, or earlier when they are broken beyond a cheap repair.\n- If yours is slow for your work (big builds, data work), ask in #it-help; we would rather buy memory than waste your time.\n- Personal use is fine within reason. Do not install software that device management flags.\n\n## Peripherals\n\nThrough #it-help you can order, without further approval:\n\n- one external monitor (27-inch, USB-C),\n- a keyboard and a mouse or trackpad,\n- a headset with a microphone that does not make you sound like you are in a tunnel,\n- a laptop stand.\n\nAnything beyond that comes out of your home office budget (see [Expenses](expenses.md)).\n\n## Phones\n\nWe do not hand out phones. If you are on call, we pay part of your phone plan (see [Expenses](expenses.md)) and you\ninstall PagerDuty on your own phone. Work apps on personal phones are limited to Slack, Google apps, PagerDuty and the\n1Password app.\n\n## Repairs and loss\n\n- Broken laptop: tell #it-help. IT sends a loaner within two working days and handles the repair with Apple.\n- Lost or stolen laptop: tell #it-help and Security immediately, also outside working hours. IT wipes it remotely.\n- Accidental damage is covered once; after that, we talk.\n\n## Leaving Northwind\n\nLaptops and monitors go back to IT; we send a prepaid box. Keyboards, mice and headsets are yours to keep. You can buy\nyour laptop at its book value if it is older than two years; ask IT before your last week.\n"
+  },
+  {
+    "op": "add",
+    "file": "handbook/parental-leave.md",
+    "text": "# Parental leave\n\nNorthwind's company-wide parental leave policy, effective from September 1, 2026. It applies to every employee\nregardless of gender, how the child joins the family (birth, adoption, foster care or surrogacy) and how long they have\nworked here. Where local law gives you more, local law applies.\n\n## How much\n\n- **Birthing parent**: up to 16 weeks of fully paid leave, to be taken from up to four weeks before the due date.\n- **Non-birthing parent, adoptive or foster parent**: the same 16 weeks of fully paid leave, to be taken within the first\n  year after the child joins the family.\n- On top of that, you can take up to eight weeks of unpaid leave, in one block or split up.\n\n\"Fully paid\" means your normal salary, topped up by Northwind where a government or insurance benefit pays part of it.\nPeople Ops handles the paperwork with the benefit agency.\n\n## Taking it\n\n1. Tell your manager and People Ops when you are ready, ideally three months before you want to start. You do not need to\n   explain anything you would rather not share.\n2. Agree on start date, end date and how you want to split the leave. The paid weeks can be taken in up to three blocks.\n3. Request the leave in Personio once the dates are agreed.\n\n## While you are away\n\n- You are not expected to read Slack or email. Set an out-of-office message and hand over your work before you go.\n- Your manager plans cover for your work and your on-call shifts; you are taken out of every rotation automatically.\n- Your vacation days keep building up during parental leave.\n\n## Coming back\n\n- You can return part-time for up to four weeks at full pay, to ease back in.\n- Your role, level and salary review cycle stay the same as before your leave.\n- Your buddy from onboarding days or your manager will help you catch up on what changed.\n\n## Pregnancy and early days\n\n- Medical appointments during pregnancy are paid time and do not need to be taken as leave.\n- If something goes wrong during a pregnancy, you are entitled to paid leave as well; talk to People Ops in confidence.\n\n## Questions\n\nAsk People Ops in a direct message or at people@northwindlabs.io. Conversations about parental leave are confidential\nuntil you decide to share the news.\n"
+  },
+  {
+    "op": "edit",
+    "file": "handbook/time-off.md",
+    "find": "| Parental leave | statutory | A company-wide policy is being drafted by People Ops |",
+    "replace": "| Parental leave | see policy | Described in [Parental leave](parental-leave.md) |"
+  },
+  {
+    "op": "add",
+    "file": "ops/incident-management.md",
+    "text": "# Incident management\n\nAn incident is anything that hurts customers now or will soon: checks not running, alerts not sent, the dashboard down,\ndata in the wrong place. When in doubt, declare one. This page replaces the old incident response page and reflects the\nprocess we agreed on after the reliability review in September 2026.\n\n## Severity levels\n\n| Level | Meaning | Examples |\n| --- | --- | --- |\n| SEV1 | Beacon's core promise is broken for many customers | Checks not running in a region; alerts not delivered |\n| SEV2 | A major feature is broken or badly degraded | Status pages down; results delayed by more than 10 minutes |\n| SEV3 | A minor feature is broken, or a risk with no customer impact yet | One probe location down; a backup failing |\n| SEV4 | Internal only | CI down; staging broken for a whole day |\n\n## Declaring\n\n1. Run `/incident declare` in Slack and pick a severity. The bot creates `#inc-<date>-<short-name>` and posts in\n   #incidents.\n2. Whoever declares is the incident commander (IC) until they hand over explicitly.\n3. For SEV1 and SEV2, the IC pages the secondary on call and the owning team.\n\n## Roles\n\n- **Incident commander**: runs the incident, decides and delegates. The IC does not debug.\n- **Communications lead**: status page updates, Support, and for SEV1 a short note to the leadership channel.\n- **Scribe**: keeps the timeline in the incident channel.\n- **Responders**: everyone fixing things.\n\nFor SEV1 the three roles are always held by different people.\n\n## The bridge\n\nSEV1 and SEV2 responders join the standing Google Meet bridge **meet.google.com/nwl-sev1-bridge**, which the incident bot\nalso links in the incident channel. We moved off Zoom so that the bridge works with the same Google sign-in as\neverything else. Keep the bridge for coordination; detailed debugging moves to breakout calls.\n\n## Customer communication\n\n- The status page is updated within 15 minutes of declaring a SEV1 or SEV2, and then at least every 30 minutes.\n- Write what customers see and what they should do, not what is broken inside.\n- Support gets the same wording; the communications lead posts it in #support-escalations.\n\n## Closing\n\nThe IC closes the incident when customer impact has ended and the risk of it returning is low. Follow-ups go to Linear\nwith the label `incident-followup` and an owner.\n\n## Post-incident review\n\nEvery SEV1 and SEV2 gets a blameless post-incident review (PIR).\n\n- The IC owns the PIR and picks a writer within a day of closing.\n- The PIR is published within **3 business days** of the incident closing. We shortened the deadline because reviews\n  written a week later had lost most of the detail.\n- It has a timeline, the impact in numbers, what helped, what hurt, and follow-ups with owners and dates.\n- PIRs are discussed in the monthly reliability review.\n\nSEV3 and SEV4 incidents get a short summary in the incident channel.\n\n## Practice\n\nPlatform runs a game day every quarter on staging, including the status page (on a test page) and a PIR.\n"
+  },
+  {
+    "op": "prepend",
+    "file": "ops/incident-response.md",
+    "text": "> **Deprecated:** replaced by [Incident management](incident-management.md)\n\n"
+  },
+  {
+    "op": "edit",
+    "file": "README.md",
+    "find": "[Incident response](ops/incident-response.md)",
+    "replace": "[Incident management](ops/incident-management.md)"
+  },
+  {
+    "op": "edit",
+    "file": "ops/oncall-eu.md",
+    "find": "the [Incident response](incident-response.md) page",
+    "replace": "the [Incident management](incident-management.md) page"
+  },
+  {
+    "op": "add",
+    "file": "engineering/feature-flags-openfeature.md",
+    "text": "# Feature flags with OpenFeature\n\nSince September 2026 our services evaluate feature flags through the OpenFeature SDKs against our own flag service,\n**flagd**, which runs in every cluster. Flag definitions live in Git and are reviewed like code. This replaces the hosted\nflag vendor we used before; the old page is kept only for history.\n\n## How it works\n\n- Flag definitions are JSON files in `flags/<environment>/` in the `beacon-deploy` repository.\n- Argo CD syncs them to a ConfigMap in each cluster; flagd watches the ConfigMap and reloads within seconds.\n- Go services use the OpenFeature Go SDK with the flagd provider, wrapped by `internal/flags` as before.\n- The dashboard evaluates flags through the API's `/internal/flags` endpoint, never directly.\n\nBecause flags now go through pull requests, every change has an author, a reviewer and a commit message.\n\n## Kinds and naming\n\nNothing changed here: prefixes `release_`, `exp_`, `ops_` and `plan_`, in `snake_case`, describing the behaviour. Every\nflag definition has `description` and `owner` fields; CI rejects definitions without them.\n\n```json\n{\n  \"release_multistep_checks\": {\n    \"state\": \"ENABLED\",\n    \"variants\": { \"on\": true, \"off\": false },\n    \"defaultVariant\": \"off\",\n    \"targeting\": { \"if\": [{ \"in\": [{ \"var\": \"workspace_id\" }, [\"ws_northwind\", \"ws_4kq1\"]] }, \"on\", \"off\"] },\n    \"metadata\": { \"owner\": \"probes\", \"description\": \"Multi-step API checks\" }\n  }\n}\n```\n\n## Rolling out\n\n1. Merge the code with the flag off everywhere.\n2. Open a pull request in `beacon-deploy` that turns it on in staging and for the internal workspace.\n3. Add friendly customers to the targeting rule, then switch to a percentage rollout (`fractional`).\n4. After a week at 100% without trouble, remove the flag from the code and from the definitions.\n\n## Emergencies\n\nDuring an incident the on-call engineer may change an `ops_` flag directly in the production ConfigMap with\n`nwctl flags set`. The change is reverted by the next Argo CD sync unless the same change is merged in Git, so follow up\nwith a pull request within the day.\n\n## Testing\n\n`flags.ForTest(t, ...)` still works and does not need flagd. Integration tests start flagd as a container with the\ndefinitions from `flags/test/`.\n\n## Stale flags\n\nRelease flags at 100% for 30 days show up in the weekly stale-flag report in #eng-flags. CI warns on pull requests that\ntouch a file using a stale flag.\n"
+  },
+  {
+    "op": "prepend",
+    "file": "engineering/feature-flags.md",
+    "text": "> **Deprecated:** replaced by [Feature flags with OpenFeature](feature-flags-openfeature.md)\n\n"
+  },
+  {
+    "op": "edit",
+    "file": "engineering/release-process.md",
+    "find": "enabled separately from the release (see [Feature flags](feature-flags.md)).",
+    "replace": "enabled separately from the release\n(see [Feature flags](feature-flags-openfeature.md))."
+  },
+  {
+    "op": "edit",
+    "file": "ops/deploy-production.md",
+    "find": "The weekend cutoff is **16:00 CET** on Fridays",
+    "replace": "The weekend cutoff is **14:00 CET** on Fridays"
+  },
+  {
+    "op": "edit",
+    "file": "ops/deploy-staging.md",
+    "find": "served from `staging.beacon-nwl.dev`, behind Google sign-in",
+    "replace": "served from `stg.beacon-nwl.dev`, behind Google sign-in"
+  },
+  {
+    "op": "edit",
+    "file": "ops/runbooks/probe-fleet.md",
+    "find": "--namespace=beacon-probes",
+    "replace": "--namespace=probes-prod"
+  },
+  {
+    "op": "move",
+    "from": "ops/runbooks/queue-backlog.md",
+    "to": "engineering/runbooks/results-pipeline.md"
+  },
+  {
+    "op": "edit",
+    "file": "engineering/runbooks/results-pipeline.md",
+    "find": "# Runbook: results backlog\n",
+    "replace": "# Runbook: results pipeline backlog\n\nOwned by the Probes team since October 2026.\n"
+  },
+  {
+    "op": "add",
+    "file": "ops/runbooks/clickhouse-disk.md",
+    "text": "# Runbook: ClickHouse disk space\n\nUse this runbook when the `ClickHouseDiskFilling` alert fires. ClickHouse stops merging parts when a disk is nearly full,\ninserts slow down, and the results pipeline backs up soon after, so act before the disk is actually full.\n\n## The alert\n\n`ClickHouseDiskFilling` fires when a data volume on any ClickHouse node passes **82%** used for ten minutes. It is a\n`page` alert during EU hours and a `warn` at night, because disk usage grows slowly and the night rotation has enough on\nits plate.\n\n## First checks\n\n```sql\nSELECT name, path, formatReadableSize(free_space) AS free, formatReadableSize(total_space) AS total\nFROM system.disks;\n\nSELECT database, table, formatReadableSize(sum(bytes_on_disk)) AS size\nFROM system.parts WHERE active\nGROUP BY database, table ORDER BY sum(bytes_on_disk) DESC LIMIT 10;\n```\n\nUsually one of three things is going on:\n\n| Cause | How it looks | What to do |\n| --- | --- | --- |\n| Normal growth | All nodes fill evenly, slowly | Add disk (below) and tell Platform to plan capacity |\n| A stuck merge | One table with thousands of active parts | Check `system.merges`; restart the merge or the node |\n| Detached parts | Large `detached/` folders after a failed insert or restore | Inspect, then drop them |\n\n## Getting space quickly\n\n1. Drop detached parts you have checked:\n\n   ```sql\n   ALTER TABLE results.raw_checks DROP DETACHED PART '<part_name>' SETTINGS allow_drop_detached = 1;\n   ```\n\n2. Move the oldest monthly partitions to the cold volume (S3-backed, slower to query):\n\n   ```sql\n   ALTER TABLE results.raw_checks MOVE PARTITION '202508' TO VOLUME 'cold';\n   ```\n\n3. Grow the EBS volume. Volumes can grow online; ClickHouse sees the new size after a filesystem resize:\n\n   ```bash\n   nwctl clickhouse grow-disk --node ch-euc1-2 --size 4000\n   ```\n\nNever delete partitions that are still inside the retention period to free space. Retention is a promise to customers.\n\n## After the incident\n\n- Write down which table grew and why in the incident channel.\n- If growth was not expected, open a Linear issue for the Probes team; most surprises are new check types writing more\n  data per result than planned.\n"
+  },
+  {
+    "op": "add",
+    "file": "security/ai-assistants.md",
+    "text": "# AI assistants\n\nRules for using AI assistants (chat tools, coding assistants, meeting note-takers) at Northwind. The goal is to let\neveryone use tools that make them faster without sending customer data or secrets to places we have not vetted.\n\n## Approved tools\n\n| Tool | For | Notes |\n| --- | --- | --- |\n| GitHub Copilot Business | Code completion and chat in your editor | Organization license; prompts are not used for training |\n| Google Gemini in Workspace | Docs, Sheets, Gmail | Covered by our Google Workspace agreement |\n| Otter-style note-takers | Not approved | Do not invite bots to customer calls |\n\nCopilot Business is the only coding assistant approved for use on our repositories. Request a seat in #it-help; you\nwill be added to the `copilot-users` GitHub team. Personal subscriptions to other assistants must not be used on company\ncode, even for \"just a quick question\".\n\n## Data you may share\n\n| Data class | Examples | With approved tools | With anything else |\n| --- | --- | --- | --- |\n| Public | Help center articles, the public API docs | Yes | Yes |\n| Internal | This docs repository, Linear issues, source code | Yes | No |\n| Confidential | Customer names, contract terms, incident details | Yes, sparingly | No |\n| Restricted | Customer data from production, secrets, credentials | No | No |\n\nRestricted data never goes into a prompt. That includes \"anonymized\" production rows, tokens, private keys and logs that\ncontain customer response bodies.\n\n## Code from assistants\n\n- You are the author of whatever you commit. Review generated code as carefully as code from a stranger.\n- Generated tests must assert something meaningful; reviewers reject tests that only execute code.\n- Do not paste generated code that you do not understand into security-sensitive paths (`services/auth/`,\n  `services/billing/`).\n\n## Meetings\n\nDo not record or transcribe meetings with AI tools unless everyone in the meeting agreed at the start. Never use them on\ncalls with customers or candidates.\n\n## New tools\n\nWant a tool that is not on the list? Open a request in #security with what it does, what data it would see, and the\nvendor's data processing terms. Security answers within two weeks.\n"
+  },
+  {
+    "op": "edit",
+    "file": "security/vulnerability-management.md",
+    "find": "## Bug bounty\n\nWe run a private bug bounty program on **Intigriti**. Researchers are invited in batches; the scope is the production\ndashboard, the public API and status pages. Probe infrastructure, staging and third-party services are out of scope.\n\n| Severity | Reward |\n| --- | --- |\n| Critical | up to €3,000 |\n| High | up to €1,200 |\n| Medium | up to €400 |\n| Low | Swag and a thank-you |\n\nSecurity triages new reports within two working days and pays rewards after the fix is deployed.\n\n",
+    "replace": "## Bug bounty\n\nThe bug bounty program, its scope and its rewards are described in [Bug bounty](bug-bounty.md).\n\n"
+  },
+  {
+    "op": "edit",
+    "file": "security/vulnerability-management.md",
+    "find": "through the bug bounty program (below)",
+    "replace": "through the [bug bounty program](bug-bounty.md)"
+  },
+  {
+    "op": "add",
+    "file": "security/bug-bounty.md",
+    "text": "# Bug bounty\n\nOutside researchers find problems our scanners and our own reviews miss. Our bug bounty program gives them a clear way\nto report what they find and pays them for it. This page is for Northwind staff; the public program description lives on\nthe platform.\n\n## Program\n\nWe run a private bug bounty program on **Intigriti**. Researchers are invited in batches of about twenty, chosen by the\nplatform from people with a good track record on similar targets. We add a new batch every quarter.\n\n## Scope\n\n| In scope | Out of scope |\n| --- | --- |\n| The production dashboard | Staging and preview environments |\n| The public API (`api.getbeacon.io`) | Probe infrastructure and probe locations |\n| Public status pages, including custom domains | Third-party services (Stripe, Twilio, Postmark) |\n| The private probe agent (latest release) | Denial of service and volume testing |\n\nSocial engineering of employees and physical attacks are always out of scope.\n\n## Rewards\n\n| Severity | Reward |\n| --- | --- |\n| Critical | up to €4,000 |\n| High | up to €1,500 |\n| Medium | up to €500 |\n| Low | Swag and a thank-you |\n\nRewards are paid through the platform after the fix is deployed. Duplicates are rewarded only for the first report.\n\n## Triage\n\n1. The platform's triage team checks that a report is reproducible and in scope.\n2. Security confirms it within two working days and opens a Linear issue for the owning team.\n3. The fix follows the remediation timelines in [Vulnerability management](vulnerability-management.md).\n4. Security sets the reward and closes the report when the fix is live.\n\n## Safe harbor\n\nResearchers who follow the program rules will not face legal action from Northwind. If a researcher accidentally\naccesses customer data, they must stop, report it, and delete what they have; we treat that as a possible data incident\non our side.\n\n## Who to ask\n\nQuestions about the program go to #security. Never discuss individual reports in public channels before the fix is out.\n"
+  },
+  {
+    "op": "edit",
+    "file": "sales/playbook.md",
+    "find": "## Renewals\n\nThe account owner starts the renewal conversation **90 days before** the contract ends. Review usage first: customers\nwho use less than half of what they pay for are a churn risk, and a smaller plan they keep is better than a big plan\nthey cancel.\n\n- Send the renewal quote at least 45 days before the end date.\n- Price increases at renewal need the notice described in [Pricing](../product/pricing.md).\n- Auto-renewing contracts still get a check-in call.\n\n",
+    "replace": "## Renewals\n\nRenewals have their own page: [Renewals](renewals.md).\n\n"
+  },
+  {
+    "op": "add",
+    "file": "sales/renewals.md",
+    "text": "# Renewals\n\nMost of our revenue comes from customers renewing, not from new logos. This page describes how account owners handle a\nrenewal from the first conversation to the signed order form. New business is in the [Sales playbook](playbook.md).\n\n## Timeline\n\n| When | What |\n| --- | --- |\n| 120 days before the end date | The account owner opens the renewal conversation |\n| 90 days | Usage review with the customer; agree on plan and size |\n| 60 days | Renewal quote sent |\n| 30 days | Escalate to the Head of Sales if there is no signed order |\n| End date | Auto-renewing contracts renew; others drop to the Free plan |\n\nThe account owner starts the renewal conversation **120 days before** the contract ends. Enterprise procurement cycles\nregularly take three months, and starting later means the old contract ends before the new one is signed.\n\n## Usage review\n\nBefore the first call, look at the workspace:\n\n- How many monitors are in use compared with the plan limit?\n- Are SMS credits used up every month, or never touched?\n- How many team members signed in during the last 30 days?\n- Did the customer have incidents with us, and how were they handled?\n\nCustomers who use less than half of what they pay for are a churn risk. Offer the smaller plan before they ask for it; a\nsmaller plan they keep is better than a big plan they cancel.\n\n## Price increases\n\nPrice increases at renewal need the notice described in [Pricing](../product/pricing.md). Mention them in the first call,\nnot in the quote. Nobody likes discovering a price increase in a PDF.\n\n## Multi-year renewals\n\nOffer a two- or three-year renewal to every customer above $20,000 per year. The discount rules for multi-year deals in\nthe playbook apply. Payment upfront for the whole term is preferred, yearly in advance is fine.\n\n## Churn\n\nIf a customer decides not to renew, record the reason in the deal and offer an exit call with the Head of Product. We\nlearn more from those calls than from any survey. Make the exit easy: export instructions, the data deletion timeline,\nand no surprises on the last invoice.\n\n## Auto-renewals\n\nContracts with automatic renewal still get a check-in call 60 days before the end date, so that a renewal never comes as\na surprise to the customer's finance team.\n"
+  },
+  {
+    "op": "add",
+    "file": "product/roadmap-2027.md",
+    "text": "# Product roadmap 2027\n\nWhat we plan to build from now until the end of 2027. Dates are targets, not promises; customers can be told the\nquarter, never the day. This roadmap was agreed in the October 2026 planning week and is reviewed monthly in the product\nsync.\n\n## What changed since the last roadmap\n\n- Private probe locations slipped: the beta showed that customers need agent auto-updates and per-location data\n  residency before they can roll it out widely.\n- Custom domains for status pages shipped and are generally available on Team plans and above.\n- Multi-step API checks are in public beta.\n\n## Themes\n\n1. **Enterprise readiness**: private probe locations, SCIM provisioning, audit log export.\n2. **Fewer false alarms**: multi-step checks, smarter confirmation for heartbeat monitors.\n3. **Status pages**: subscriber digests and a component-level uptime history.\n\n## Planned work\n\n| Item | Theme | Target | Status |\n| --- | --- | --- | --- |\n| Private probe locations (customer-hosted probes) | Enterprise readiness | GA in Q2 2027 | Beta, agent auto-update in progress |\n| SCIM user provisioning | Enterprise readiness | Q1 2027 | Design |\n| Audit log export to S3 and Datadog | Enterprise readiness | January 2027 | In progress |\n| Multi-step API checks, GA | Fewer false alarms | March 2027 | Public beta |\n| Heartbeat grace-period suggestions | Fewer false alarms | H2 2027 | Not started |\n| Status page subscriber digests | Status pages | February 2027 | In progress |\n| Component uptime history on status pages | Status pages | Q3 2027 | Not started |\n\n## Private probe locations\n\nThe agent is getting automatic, signed updates with a customer-controlled update window, and results from private\nlocations will be stored only in the customer's data region. Pricing is decided: per location per month, with the first\ntwo locations included in Enterprise contracts.\n\n## Not on the roadmap\n\n- A mobile app.\n- Real-user monitoring.\n- Log monitoring.\n\n## How to propose something\n\nWrite a one-page problem statement in Linear under the \"Product ideas\" project: who has the problem, how often, and what\nthey do today. The Head of Product reviews new ideas every two weeks.\n"
+  },
+  {
+    "op": "prepend",
+    "file": "product/roadmap-2026.md",
+    "text": "> **Deprecated:** replaced by [Roadmap 2027](roadmap-2027.md)\n\n"
+  },
+  {
+    "op": "add",
+    "file": "product/status-pages.md",
+    "text": "# Status pages\n\nStatus pages are public pages where our customers tell their own users whether their services work. They are Beacon's\nmost visible feature and our best acquisition channel, so they get their own page here. This page covers what they do,\ncustom domains, and the limits per plan.\n\n## What a status page shows\n\n- Components (for example \"API\", \"Dashboard\", \"Payments\"), each linked to one or more monitors.\n- The current state of every component, computed from its monitors, with an optional manual override.\n- Uptime bars for the last 90 days.\n- Incidents and scheduled maintenance, written by the customer.\n- A subscribe button for email updates.\n\n## Custom domains\n\nSince October 2026 customers on Team and above can serve a status page from their own domain, such as\n`status.example.com`.\n\n1. In the dashboard, open the status page settings and enter the domain.\n2. Create a CNAME record for that domain pointing to **status-pages.beacon-cdn.net**.\n3. Beacon checks the record every minute and, once it resolves, requests a TLS certificate automatically.\n\nCertificates are renewed automatically. If the CNAME is removed or changed, the page keeps working for 14 days on the\nold certificate and the account owner gets an email.\n\nApex domains (`example.com` without a subdomain) are not supported, because they cannot have a CNAME. Customers who\ninsist can use their DNS provider's ALIAS or flattening feature.\n\n## Branding\n\n- Logo, favicon and accent color on every plan.\n- Custom CSS on Business and Enterprise.\n- Removing the \"Powered by Beacon\" footer on Business and Enterprise.\n\n## Privacy\n\nStatus pages are public by default. Business and Enterprise customers can restrict a page to visitors who sign in with\nan email domain they choose, or to an IP allowlist.\n\n## Support notes\n\n- \"My page shows Down but my site is up\": check which monitors are linked to the component, and their check history.\n- \"The certificate is not issued\": the CNAME usually does not resolve yet, or a CAA record blocks our certificate\n  authority.\n"
+  },
+  {
+    "op": "add",
+    "file": "ops/eu-data-residency.md",
+    "text": "# EU residency cluster\n\nSome customers, mostly in the public sector and healthcare, require that their data is stored and processed only by\ninfrastructure in the EU that is separate from the systems other customers use. For them we run a dedicated data plane:\nthe EU residency cluster. This page is for the Platform team and on-call engineers.\n\n## Where it runs\n\nThe residency cluster runs in AWS **eu-north-1** (Stockholm) in its own AWS account, `nwl-residency-prod`. It has its own\nEKS cluster (`nw-res-eun1`), its own Postgres and ClickHouse, and its own results stream. Nothing is shared with the\nFrankfurt data plane except the container images and the control plane for billing usage, which receives only monthly\ntotals.\n\n| Component | Residency cluster | Main EU data plane |\n| --- | --- | --- |\n| Kubernetes | `nw-res-eun1` | `nw-prod-euc1` |\n| Postgres | `pg-res-eun1`, 1 primary, 1 replica | `pg-main-euc1` |\n| ClickHouse | 2 nodes | 6 nodes |\n| Probe locations | Stockholm, Frankfurt, Amsterdam (EU only) | All public locations |\n| Support access | Named engineers only, logged | Platform and on-call |\n\n## Who is on it\n\nCustomers are placed on the residency cluster by Sales and Platform together; it is not self-serve. A workspace cannot\nmove between data planes without a migration project, so get the choice right at contract time.\n\n## Operating it\n\n- Deploys follow the normal production process; the residency cluster is the last step of every rollout, after Ohio.\n- On-call covers it like any other region, but only engineers on the residency access list may open a shell or a\n  database session. If the on-call primary is not on the list, they page the Platform lead.\n- Backups stay in the same region and use their own KMS key.\n\n## Monitoring\n\nThe residency cluster has its own Prometheus and Alertmanager. Its metrics are not shipped to the shared Thanos bucket;\ndashboards for it read from the regional Prometheus directly.\n\n## Costs\n\nThe cluster is much smaller than the main data plane but has a fixed cost of about €6,000 a month before the first\ncustomer. Contracts on the residency cluster carry a surcharge that covers it; Sales has the numbers.\n"
+  }
+]
