@@ -98,9 +98,14 @@ export function logCost(fields) {
   } catch {} // never let logging break a paid call
 }
 
-// OpenRouter's reply -> the fields for logCost (chat: usage.prompt_tokens/completion_tokens/cost; embeddings: prompt_tokens/cost).
+// A model reply -> the fields for logCost (chat: usage.prompt_tokens/completion_tokens/cost; embeddings: prompt_tokens and
+// usage.cost on OpenRouter, providerMetadata.gateway.cost on AI Gateway).
 export const usageFields = (data) => ({
   tokens_in: data?.usage?.prompt_tokens,
   tokens_out: data?.usage?.completion_tokens,
-  provider_cost_usd: data?.usage?.cost,
+  provider_cost_usd: data?.usage?.cost ?? gatewayCost(data),
 });
+const gatewayCost = (data) => {
+  const cost = data?.providerMetadata?.gateway?.cost;
+  return cost == null ? undefined : Number(cost);
+};
