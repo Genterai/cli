@@ -160,6 +160,8 @@ genter ask "what did Anna say about the contract?"   # your folders first, then 
 
 - [Your apps on your own Composio keys](docs/apps.md): the agent (`run`, `find`, `write`), the library, the models.
 - [The specs](https://github.com/Genterai/specs) Genter is built from.
+- Releases: raise `version` in `package.json` in a pull request; merging it into `main` publishes it to npm and makes
+  the GitHub release.
 
 ## License
 
