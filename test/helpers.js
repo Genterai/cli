@@ -51,8 +51,8 @@ export function fakeGenter({ connected = [], recipes = [], results = {}, catalog
     search: async () => recipes,
     schema: async (tool) => ({ tool, args: {} }),
     catalog: async ({ toolkit }) => catalogs[toolkit] ?? [],
-    async execute({ id, tool, args = {}, account, remember }) {
-      executed.push({ id, tool, args, account, ...(remember === false && { remember }) });
+    async execute({ id, tool, args = {}, account, remember, plain }) {
+      executed.push({ id, tool, args, account, ...(remember === false && { remember }), ...(plain && { plain }) });
       const out = results[tool];
       if (out === undefined) return { result: { successful: false, error: `no fake result for ${tool}` } };
       const data = typeof out === "function" ? out(args) : out;

@@ -8,6 +8,7 @@ import { itemOf, listedItems, planReconcile } from "./area.js";
 import { addIntent, chunkCall, fileCall, isSkillTool, SCRIPT_NOTE, SKILL_TOOLS } from "./skills.js";
 import { signalsOf, areaStats } from "./drift.js";
 import { crawl, forgetPage, namesSite, readPage, siteUrl, underSite } from "./web.js";
+import { plainDescription } from "./plain.js";
 import { cipher } from "./seal.js";
 
 export { cipher };
@@ -468,6 +469,30 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     return load(id);
   }
 
+  // A plain read (an item of an area: plain.js) is described from its own text with no model, and its sections are embedded
+  // as its items. Merged into what is stored now, like remember. No trigger is proposed here: one is asked for only when
+  // someone keeps this anchor in sync on its own (recommendTrigger), an area's listing keeps its items current.
+  const rememberPlain = (id, digest, data) => withCost({ entity_type: "recipe", entity_id: id }, () => rememberPlainInner(id, digest, data));
+  async function rememberPlainInner(id, digest, data) {
+    let record = await load(id);
+    if (!record || record.digest !== digest) return record;
+    const { embed: sections, ...named } = plainDescription({ tool: record.tool, args: record.args, data });
+    const texts = [summaryText(named), ...sections];
+    const vectors = openrouterApiKey ? await embedMany(texts, "recipe_embed").catch(() => embedMany(texts, "recipe_embed").catch(() => [])) : [];
+    record = await load(id);
+    if (!record || record.digest !== digest) return record;
+    const [summaryEmbedding, ...items] = vectors;
+    record = {
+      ...record,
+      ...named,
+      described: "text",
+      source: sourceOf({ tool: record.tool, args: record.args, toolkit: record.scope?.toolkit, data }),
+      ...(summaryEmbedding && { summaryEmbedding, itemEmbeddings: items.length ? items.map((e) => e.slice(0, ITEM_DIMS)) : undefined }),
+    };
+    await save(record);
+    return load(id);
+  }
+
   // The description of a skill's piece or file is made from the text itself, with no model (skillDescription, already in the
   // record from its first save); here only its vector is added. A skill anchor is never about the whole skill.
   const rememberSkill = (id, digest, data) => withCost({ entity_type: "recipe", entity_id: id }, () => rememberSkillInner(id, digest, data));
@@ -703,7 +728,9 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
     //   unchanged: same result, only checked_at moved. pending resolves to the anchor once its description is saved.
     // A failed call returns { result } (and recipe_status gone / denied, with the id, when it was a known anchor that
     // the error says is gone or forbidden). remember: false runs it without saving (an inner step).
-    async execute({ id, tool, args = {}, account, task, remember: keep = true }) {
+    // plain: an item of an area (read_each, read_many, a reconcile): described from its own text with no model (plain.js);
+    // an anchor once described so stays so whenever it runs again.
+    async execute({ id, tool, args = {}, account, task, remember: keep = true, plain = false }) {
       const previous = id ? await load(id) : null;
       if (id && !previous && !tool) throw new Error(`Unknown anchor: ${id}`);
       if (previous) {
@@ -771,9 +798,14 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         if (asked) next.queryEmbeddings = addQuery(existing.queryEmbeddings, asked, at);
         if (isSkillTool(tool) && task) next.intents = intents(existing);
         if (asked || (isSkillTool(tool) && task) || existing.status !== "fresh" || existing.checked_at !== at || canonicalJson(driftOf(existing)) !== canonicalJson(drift)) await save(next);
-        return { id: rid, result, created: false, changed: false, unchanged: true, signals: shownSignals(next), pending: Promise.resolve(publicRecipe(next)), recipe_status: "fresh" };
+        // A plain read whose vectors could not be made (the embeddings failed) gets them now: without them it is never found.
+        const unfound = existing.described === "text" && !existing.summaryEmbedding && openrouterApiKey;
+        const pendingNext = unfound ? rememberPlain(rid, digest, result.data).then(publicRecipe) : Promise.resolve(publicRecipe(next));
+        if (unfound) later(pendingNext);
+        return { id: rid, result, created: false, changed: false, unchanged: true, signals: shownSignals(next), pending: pendingNext.catch(() => null), recipe_status: "fresh" };
       }
       const created = !existing;
+      const asText = !isSkillTool(tool) && (plain || existing?.described === "text");
       // An anchor of the old model (random id) re-keys here: its knowledge is kept when the result is the same.
       const legacy = created && previous?.legacy && previous.tool === tool && canonicalJson(previous.args) === canonicalJson(args) ? previous : null;
       const kept = legacy?.summaryEmbedding && legacy.digest === createHash("sha256").update(JSON.stringify(result.data)).digest("hex") ? legacy : null;
@@ -793,6 +825,11 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       // A skill's piece says what it is with no model: its title, place and text are there from the first save, so a list
       // never shows it untitled while its vector is made.
       if (isSkillTool(tool)) Object.assign(record, skillDescription(result.data), { scope: { ...record.scope, toolkit: "skill" } });
+      // So does a plain read: its title and text are there at once, its vectors follow.
+      if (asText) {
+        const { embed: _sections, ...named } = plainDescription({ tool, args, data: result.data });
+        Object.assign(record, named, { described: "text" });
+      }
       if (asked) record.queryEmbeddings = addQuery(base.queryEmbeddings, asked, at);
       if (isSkillTool(tool) && task) record.intents = intents(base);
       // The call as it ran: args kept as written (placeholders included), in canonical form so equal calls look equal.
@@ -800,7 +837,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       if (legacy && legacy.id !== rid) await drop(legacy.id).catch(() => {});
       const described = kept
         ? Promise.resolve(publicRecipe(record))
-        : (isSkillTool(tool) ? rememberSkill(rid, digest, result.data) : remember(rid, digest, result.data, { created })).then(publicRecipe);
+        : (isSkillTool(tool) ? rememberSkill(rid, digest, result.data) : asText ? rememberPlain(rid, digest, result.data) : remember(rid, digest, result.data, { created })).then(publicRecipe);
       later(described);
       return { id: rid, result, created, changed: !created, unchanged: false, signals: shownSignals(record), pending: described.catch(() => null), recipe_status: "fresh" };
     },
@@ -962,10 +999,11 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
       // person deleted is left out. At most `budget` calls (new items first); the rest is `pending`, for the next time.
       // Answers { status: done | failed, error?, listing (to keep: versions and failures updated), created, changed, gone,
       // unchanged, pending, failed, excluded, listed, partial }; created / changed / gone are anchor ids.
-      async reconcile({ listing, budget = 40 }) {
+      // room: how many new items the plan has room for; the other new items are `limited` (not read, not pending).
+      async reconcile({ listing, budget = 40, room = Infinity }) {
         if (!listing?.read_tool || !listing.item_arg || !(listing.recipe_id || listing.tool)) throw new Error("Not an area's listing: pass recipe_id or tool, read_tool and item_arg");
         const account = listing.account || undefined;
-        const empty = { created: [], changed: [], gone: [], unchanged: 0, pending: 0, failed: 0, excluded: 0, listed: 0, partial: false };
+        const empty = { created: [], changed: [], gone: [], unchanged: 0, pending: 0, limited: 0, failed: 0, excluded: 0, listed: 0, partial: false };
         const listed = await api
           .execute({ ...(listing.recipe_id && { id: listing.recipe_id }), ...(listing.tool && { tool: listing.tool, args: listing.args ?? {} }), account: (listing.list_account ?? listing.account) || undefined })
           .catch((e) => ({ result: { successful: false, error: e.message } }));
@@ -979,13 +1017,13 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
           if (key != null) existing.set(key, { id: r.id, status: r.status });
         }
         const partial = isPartial(listed.result.data);
-        const plan = planReconcile({ listing, listed: items, existing, partial, budget });
+        const plan = planReconcile({ listing, listed: items, existing, partial, budget, room });
         const versions = plan.versions;
         const failures = { ...listing.failed };
-        const out = { ...empty, listed: items.size, partial, excluded: plan.excluded, pending: plan.pending };
+        const out = { ...empty, listed: items.size, partial, excluded: plan.excluded, pending: plan.pending, limited: plan.limited };
         await pool(plan.read, 4, async (value) => {
           const key = String(value);
-          const read = await api.execute({ tool: listing.read_tool, args: { ...listing.shared_args, [listing.item_arg]: value }, account }).catch((e) => ({ result: { successful: false, error: e.message } }));
+          const read = await api.execute({ tool: listing.read_tool, args: { ...listing.shared_args, [listing.item_arg]: value }, account, plain: true }).catch((e) => ({ result: { successful: false, error: e.message } }));
           if (read.result?.successful === false || !read.id) {
             failures[key] = (failures[key] ?? 0) + 1;
             out.failed++;
@@ -1017,7 +1055,7 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         const failed = Object.fromEntries(Object.entries(failures).filter(([key]) => items.has(key)));
         // Anchor Drift: how lively the area is, from the versions this listing already gave (no new pass, no model).
         const stats = areaStats([...items.values()].map((i) => i.version));
-        return { status: "done", ...out, listing: { ...listing, versions, failed, at: now(), ...(stats ? { stats } : { stats: undefined }) } };
+        return { status: "done", ...out, listing: { ...listing, versions, failed, listed: items.size, at: now(), ...(stats ? { stats } : { stats: undefined }) } };
       },
       // Which of these anchors are reads of an area kept whole (its listing): their ids.
       async inArea({ listing, ids }) {

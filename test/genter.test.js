@@ -744,3 +744,86 @@ describe("genter.recipes.reconcile: an area kept whole with no model", () => {
     assert.deepEqual(out.gone, []);
   });
 });
+
+describe("plain reads of an area's items: no model per item", () => {
+  const b64 = (text) => Buffer.from(text).toString("base64");
+  const model = (chats) => ({ chat: (prompt) => (chats.push(prompt), { title: "t", short: "s", summary: "described by a model", items: [], keywords: [] }), vector: (t) => Array.from({ length: 8 }, (_, i) => (t.length % (i + 2)) + 1) });
+
+  it("A1 [spec:areas/read-no-model] [spec:areas/no-trigger-asked] a plain read is described from its text: no chat call, only embeddings, its sections as items", async () => {
+    const chats = [];
+    const calls = fakeComposio({ path: "docs/deploy.md", content: b64("# Deploy\n\nThe pooler listens on 6432.\n\n## Rollback\n\nmake rollback\n"), encoding: "base64" }, model(chats));
+    const store = memoryStore();
+    const deferred = [];
+    const genter = createGenter({ composioApiKey: "k", openrouterApiKey: "or", userId: "u", secret: "s", store, defer: (p) => deferred.push(p) });
+    const out = await genter.execute({ tool: "GITHUB_GET_REPOSITORY_CONTENT", args: { owner: "o", repo: "r", path: "docs/deploy.md" }, plain: true });
+    assert.equal((await genter.recipes.get(out.id)).title, "Deploy"); // there at once, before its vectors
+    await Promise.all(deferred);
+    const r = await genter.recipes.get(out.id);
+    assert.equal(r.described, "text");
+    assert.deepEqual(r.items, ["Deploy: The pooler listens on 6432.", "Deploy › Rollback: make rollback"]);
+    assert.equal(chats.length, 0); // no description, no trigger pick
+    assert.equal(calls.filter((u) => u.includes("/embeddings")).length, 1);
+    assert.equal(r.trigger?.recommended, undefined);
+    const found = await genter.search({ query: "rollback", limit: 3 });
+    assert.equal(found.find((c) => c.id)?.id, out.id);
+  });
+
+  it("A2 [spec:areas/no-model-stays] an anchor described from its text stays so when it runs again changed", async () => {
+    const chats = [];
+    let text = "# A\n\none";
+    fakeComposio(() => ({ content: b64(text), encoding: "base64" }), model(chats));
+    const store = memoryStore();
+    const deferred = [];
+    const genter = createGenter({ composioApiKey: "k", openrouterApiKey: "or", userId: "u", secret: "s", store, defer: (p) => deferred.push(p) });
+    const first = await genter.execute({ tool: "GITHUB_GET_REPOSITORY_CONTENT", args: { owner: "o", repo: "r", path: "a.md" }, plain: true });
+    await Promise.all(deferred);
+    text = "# A\n\ntwo";
+    const again = await genter.execute({ id: first.id });
+    await Promise.all(deferred);
+    assert.equal(again.changed, true);
+    assert.equal(chats.length, 0);
+    assert.match((await genter.recipes.get(first.id)).summary, /two/);
+  });
+
+  it("A3 a plain read whose embeddings failed gets its vectors on its next run", async () => {
+    let failing = true;
+    const original = globalThis.fetch;
+    fakeComposio({ content: b64("# A\n\nx"), encoding: "base64" }, { chat: () => ({}), vector: () => [1, 0, 0] });
+    const inner = globalThis.fetch;
+    globalThis.fetch = async (url, init) => (failing && String(url).includes("/embeddings") ? new Response("down", { status: 503 }) : inner(url, init));
+    const store = memoryStore();
+    const deferred = [];
+    const genter = createGenter({ composioApiKey: "k", openrouterApiKey: "or", userId: "u", secret: "s", store, defer: (p) => deferred.push(p) });
+    const out = await genter.execute({ tool: "GITHUB_GET_REPOSITORY_CONTENT", args: { owner: "o", repo: "r", path: "a.md" }, plain: true });
+    await Promise.all(deferred);
+    const loaded = async () => [...store.rows.values()].length;
+    assert.equal(await loaded(), 1);
+    failing = false;
+    const again = await genter.execute({ id: out.id });
+    assert.equal(again.unchanged, true);
+    await Promise.all(deferred);
+    assert.equal((await genter.search({ query: "a", limit: 3 })).find((c) => c.id)?.id, out.id);
+    globalThis.fetch = original;
+  });
+});
+
+describe("genter.recipes.reconcile: the plan's room", () => {
+  it("R4 [spec:area-listing/reconcile-room] new items beyond `room` are limited, not pending; reads are plain", async () => {
+    const tree = { sha: "t", truncated: false, tree: Array.from({ length: 6 }, (_, i) => ({ path: `f${i}.md`, type: "blob", sha: "1" })) };
+    const chats = [];
+    fakeComposio((sent, u) => (u.includes("GITHUB_GET_A_TREE") ? tree : { content: Buffer.from(`# ${sent.arguments.path}`).toString("base64"), encoding: "base64" }), { chat: (p) => (chats.push(p), { summary: "s" }), vector: () => [1, 0] });
+    const store = memoryStore();
+    const genter = createGenter({ composioApiKey: "k", openrouterApiKey: "or", userId: "u", secret: "s", store, defer: () => {} });
+    const list = await genter.execute({ tool: "GITHUB_GET_A_TREE", args: { owner: "o", repo: "r" } });
+    const listing = { recipe_id: list.id, read_tool: "GITHUB_GET_REPOSITORY_CONTENT", shared_args: { owner: "o", repo: "r" }, item_arg: "path", item_field: "path", account: "", versions: {} };
+    const out = await genter.recipes.reconcile({ listing, budget: 40, room: 2 });
+    assert.equal(out.created.length, 2);
+    assert.equal(out.limited, 4);
+    assert.equal(out.pending, 0);
+    assert.equal(out.listing.listed, 6);
+    assert.ok(!chats.some((p) => p.includes("GITHUB_GET_REPOSITORY_CONTENT"))); // the reads were plain (the tree's own call may be described)
+    const none = await genter.recipes.reconcile({ listing: out.listing, room: 0 });
+    assert.equal(none.created.length, 0);
+    assert.equal(none.limited, 4);
+  });
+});

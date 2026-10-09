@@ -674,6 +674,35 @@ describe("Anchors in the agent", () => {
     assert.equal(out.listing.versions["src/f7.js"], "s7"); // the sha the tree gave the file
   });
 
+  it("N5d [spec:area-listing/run-reads] [spec:area-listing/listing-handed-early] [spec:area-listing/plain-reads] a run reads no more than `reads`, plainly, and hands its listing over as it goes", async () => {
+    const tree = { sha: "t", truncated: false, tree: Array.from({ length: 80 }, (_, i) => ({ path: `f${i}.md`, type: "blob", sha: `s${i}` })) };
+    const genter = fakeGenter({ connected: ["github"], results: { GITHUB_GET_A_TREE: tree, GITHUB_GET_REPOSITORY_CONTENT: ({ path }) => ({ path, content: "x" }) } });
+    const handed = [];
+    model = fakeModel([
+      call("execute", { tool: "GITHUB_GET_A_TREE", args: { owner: "o", repo: "r", recursive: true } }),
+      (body) => call("read_each", { list_id: JSON.parse(lastOf(body, "tool")).id, read_tool: "GITHUB_GET_REPOSITORY_CONTENT", shared_args: { owner: "o", repo: "r" }, item_arg: "path" }),
+      (body) => {
+        const counts = JSON.parse(lastOf(body, "tool"));
+        assert.equal(counts.requested, 60);
+        assert.equal(counts.not_read, 20);
+        assert.match(counts.note, /room for items kept whole is used up/);
+        return call("read_many", { calls: [{ tool: "GITHUB_GET_REPOSITORY_CONTENT", args: { owner: "o", repo: "r", path: "x.md" } }] });
+      },
+      (body) => {
+        assert.match(JSON.parse(lastOf(body, "tool")).error, /room for items kept whole is used up/);
+        return answer("");
+      },
+    ]);
+    const out = await agentWith(genter, { onListing: (l) => handed.push(Object.keys(l.versions).length) }).start({ task: "Read the whole github repository o/r", mode: "prepare", reads: 60 });
+    const reads = genter.executed.filter((e) => e.tool === "GITHUB_GET_REPOSITORY_CONTENT");
+    assert.equal(reads.length, 60);
+    assert.ok(reads.every((r) => r.plain === true));
+    assert.ok(!genter.executed.find((e) => e.tool === "GITHUB_GET_A_TREE").plain); // the list call is an ordinary one
+    assert.ok(handed.length >= 3 && handed[0] >= 25 && handed[0] < 60); // while reading (other reads go on meanwhile)
+    assert.equal(handed.at(-1), 60); // and at the end
+    assert.equal(out.listing.listed, 80);
+  });
+
   it("N5c read_each with no list, args written as JSON text, and an empty execute in a prepare task get the way to do it", async () => {
     const genter = fakeGenter({ connected: ["github"], results: { GITHUB_LIST_FILES: { files: [{ id: "a", name: "A" }, { id: "b", name: "B" }] }, GITHUB_GET_FILE: ({ file_id }) => ({ file_id }) } });
     model = fakeModel([
