@@ -1,8 +1,6 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Genterai/genter/main/docs/banner.png" alt="Genter" width="600">
+  <img src="https://raw.githubusercontent.com/Genterai/genter/main/docs/banner.png" alt="Genter: resolver for AI agents">
 </p>
-
-<h3 align="center">Resolver for AI agents</h3>
 
 <p align="center">
   An agent works something out once. Genter remembers where the answer is written,<br>
