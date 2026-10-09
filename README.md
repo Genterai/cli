@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Genterai/cli/main/docs/banner.png" alt="Genter" width="600">
+  <img src="https://raw.githubusercontent.com/Genterai/genter/main/docs/banner.png" alt="Genter" width="600">
 </p>
 
 <h3 align="center">Resolver for AI agents</h3>
