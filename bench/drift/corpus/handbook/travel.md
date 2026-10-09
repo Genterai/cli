@@ -56,4 +56,4 @@ support line can rebook flights around the clock.
 
 ## After the trip
 
-Submit any receipts that are not in Pleo within 30 days, and claim the daily allowance for your travel days.
+Submit any receipts you have not uploaded yet within 30 days, and claim the daily allowance for your travel days.

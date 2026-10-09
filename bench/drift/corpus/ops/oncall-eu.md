@@ -6,7 +6,7 @@ seven days a week. The rest of the day belongs to the [US rotation](oncall-us.md
 ## Who is on it
 
 Six engineers from Platform, Probes and Core API. Each shift is one week, with a primary and a secondary. You are
-primary roughly once every six weeks and secondary once in between. New engineers join after three months and two
+primary roughly one week in six and secondary once in between. New engineers join after three months and two
 shadow shifts (see [Onboarding](../handbook/onboarding.md)).
 
 The schedule is in PagerDuty as **Beacon EU Primary** and **Beacon EU Secondary**.

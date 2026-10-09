@@ -196,12 +196,12 @@ const median = (xs) => (xs.length ? [...xs].sort((a, b) => a - b)[Math.floor(xs.
 
 function table(rows) {
   const lines = [
-    "| arm | needs | before the edits | after: current answer | after: stale answer | after, changed facts | after, unchanged facts | model calls to take the docs in | median search |",
-    "| -- | -- | -- | -- | -- | -- | -- | -- | -- |",
+    "| arm | needs | before the edits | after: current answer | after: stale answer | after, changed facts | after, unchanged facts | LLM calls to take the docs in | texts embedded | median search |",
+    "| -- | -- | -- | -- | -- | -- | -- | -- | -- | -- |",
   ];
   for (const r of rows) {
     const s = r.score;
-    lines.push(`| ${r.name} | ${r.needs} | ${pct(s.t0.fresh, s.t0.n)} | ${pct(s.t1.fresh, s.t1.n)} | ${pct(s.t1.stale, s.t1.n)} | ${pct(s.t1_changed.fresh, s.t1_changed.n)} | ${pct(s.t1_unchanged.fresh, s.t1_unchanged.n)} | ${r.model_calls_ingest ?? 0} | ${r.ask_ms ? `${median(r.ask_ms)} ms` : "–"} |`);
+    lines.push(`| ${r.name} | ${r.needs} | ${pct(s.t0.fresh, s.t0.n)} | ${pct(s.t1.fresh, s.t1.n)} | ${pct(s.t1.stale, s.t1.n)} | ${pct(s.t1_changed.fresh, s.t1_changed.n)} | ${pct(s.t1_unchanged.fresh, s.t1_unchanged.n)} | ${r.model_calls_ingest ?? 0} | ${r.embedded ?? 0} | ${r.ask_ms ? `${median(r.ask_ms)} ms` : "–"} |`);
   }
   return lines.join("\n");
 }
@@ -219,7 +219,15 @@ async function main() {
     console.log(JSON.stringify({ t0, t1, questions: join(here, "questions.json") }));
     return;
   }
-  const embed = semantic ? openrouterEmbedder(key) : undefined;
+  // Embedding requests are counted: they are model calls too (an LLM writes nothing in these arms).
+  const counted = (fn) => {
+    const wrapped = async (texts) => {
+      wrapped.texts += texts.length;
+      return fn(texts);
+    };
+    wrapped.texts = 0;
+    return wrapped;
+  };
   const rows = [];
   const run = async (name, needs, fn) => {
     process.stderr.write(`${name}…\n`);
@@ -229,13 +237,17 @@ async function main() {
   await run("genter", "nothing", () => genterArm());
   await run("index built once", "nothing", () => indexOnceArm());
   if (semantic) {
-    await run("genter --semantic", "OpenRouter key", () => genterArm({ embed }));
-    await run("index built once + vectors", "OpenRouter key", () => indexOnceArm({ embed }));
+    const a = counted(openrouterEmbedder(key));
+    await run("genter --semantic", "OpenRouter key", () => genterArm({ embed: a }));
+    rows.at(-1).embedded = a.texts;
+    const b = counted(openrouterEmbedder(key));
+    await run("index built once + vectors", "OpenRouter key", () => indexOnceArm({ embed: b }));
+    rows.at(-1).embedded = b.texts;
   }
   const mem0 = option("--mem0");
   for (const file of mem0 ? mem0.split(",") : []) {
     const m = JSON.parse(readFileSync(file, "utf8"));
-    rows.push({ name: m.name, needs: m.needs, t0: m.t0, t1: m.t1, ingest_ms: m.ingest_ms, ask_ms: m.ask_ms, model_calls_ingest: m.model_calls_ingest, score: score(m), arm: m, info: m.info });
+    rows.push({ name: m.name, needs: m.needs, t0: m.t0, t1: m.t1, ingest_ms: m.ingest_ms, ask_ms: m.ask_ms, model_calls_ingest: m.model_calls_ingest, embedded: m.embedded, score: score(m), arm: m, info: m.info });
   }
   const report = [`DriftBench: ${questions.length} questions, ${changes.length} edits, top ${K} passages (${new Date().toISOString().slice(0, 10)})`, "", table(rows), "", kindsTable(rows)];
   if (flag("--answer")) {

@@ -15,8 +15,8 @@ manager, usually between €300 and €1,000.
 
 ## Reimbursements
 
-If you paid with your own money, submit the receipt in Pleo as an out-of-pocket expense within 30 days. Reimbursements
-are paid with the next salary run.
+If you paid with your own money, submit the receipt in the expenses app as an out-of-pocket expense within 30 days.
+Reimbursements are paid with the next salary run.
 
 ## Needs approval first
 
@@ -43,7 +43,7 @@ carry over.
 
 For every day you travel for work you get a flat daily allowance of **€48** for food and small costs, no receipts needed.
 On days where the company already pays for lunch and dinner (the offsite, a conference with catering), the allowance is
-halved. Claim it in Pleo with the trip dates.
+halved. Claim it in the expenses app with the trip dates.
 
 ### Phone
 
