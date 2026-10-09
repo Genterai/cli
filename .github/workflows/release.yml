@@ -1,7 +1,8 @@
 # A merge to main releases the version in package.json when it is new: npm publish (with provenance) and a GitHub
 # release with notes, after lint, the tests and a clean install that answers with no key. A merge that keeps the
 # version releases nothing. To release: raise "version" in package.json in the pull request.
-# npm needs an NPM_TOKEN secret, or npm trusted publishing set up for this repository and this workflow.
+# npm publishes through trusted publishing (OIDC): genter-cli on npmjs.com trusts this repository and release.yml, with
+# "Allow npm publish" on. No npm token is kept anywhere; each run gets a short one, and provenance comes with it.
 name: Release
 
 on:
@@ -25,6 +26,8 @@ jobs:
         with: { fetch-depth: 0 }
       - uses: actions/setup-node@v6
         with: { node-version: 22, registry-url: "https://registry.npmjs.org", cache: npm }
+      - name: npm 11.5.1 or later (trusted publishing)
+        run: npm install -g npm@^11.5.1 && npm --version
       - name: Is this version out yet?
         id: version
         run: |
@@ -53,8 +56,6 @@ jobs:
       - name: Publish to npm
         if: steps.version.outputs.npm == 'true'
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Tag and GitHub release
         if: steps.version.outputs.tag == 'true'
         run: gh release create "v${{ steps.version.outputs.version }}" --target "$GITHUB_SHA" --title "v${{ steps.version.outputs.version }}" --generate-notes
