@@ -1,4 +1,5 @@
 import { createInterface } from "node:readline";
+import { cloudFind, cloudText } from "./cloud.js";
 import { findText } from "./local.js";
 
 // The local engine as an MCP server over stdio (JSON-RPC, one message per line), with no package: `genter mcp`.
@@ -37,11 +38,16 @@ export const mcpTools = [
   },
 ];
 
-// Runs one tool: { text, isError? }.
-export async function callTool(local, name, args = {}) {
+// Runs one tool: { text, isError? }. cloud (signed in with genter login): genter_find also finds in the workspace's apps.
+export async function callTool(local, name, args = {}, { cloud } = {}) {
   switch (name) {
-    case "genter_find":
-      return { text: findText(await local.find(args.question, { limit: args.limit })) };
+    case "genter_find": {
+      const [out, remote] = await Promise.all([
+        local.find(args.question, { limit: args.limit }),
+        cloud ? cloudFind(cloud, String(args.question ?? "")).then((f) => cloudText(f, cloud), (e) => e.message) : null,
+      ]);
+      return { text: [findText(out), remote].filter(Boolean).join("\n\n") };
+    }
     case "genter_remember": {
       const out = local.remember(args.text);
       return { text: `Kept in ${out.path} (${out.at}).` };
@@ -60,7 +66,7 @@ export async function callTool(local, name, args = {}) {
 }
 
 // Answers one JSON-RPC message; null for a notification.
-export async function handle(local, msg, { version = "0.0.0" } = {}) {
+export async function handle(local, msg, { version = "0.0.0", cloud } = {}) {
   const reply = (result) => ({ jsonrpc: "2.0", id: msg.id, result });
   const fail = (code, message) => ({ jsonrpc: "2.0", id: msg.id ?? null, error: { code, message } });
   if (msg?.jsonrpc !== "2.0" || typeof msg.method !== "string") return fail(-32600, "Invalid request");
@@ -74,11 +80,11 @@ export async function handle(local, msg, { version = "0.0.0" } = {}) {
       case "ping":
         return notification ? null : reply({});
       case "tools/list":
-        return reply({ tools: mcpTools });
+        return reply({ tools: cloud ? mcpTools.map((t) => (t.name === "genter_find" ? { ...t, description: `${t.description} Also finds in the apps of the person's Genter Cloud workspace (mail, calendar, GitHub, Slack, Notion…).` } : t)) : mcpTools });
       case "tools/call": {
         const { name, arguments: args } = msg.params ?? {};
         try {
-          const { text } = await callTool(local, name, args ?? {});
+          const { text } = await callTool(local, name, args ?? {}, { cloud });
           return reply({ content: [{ type: "text", text }] });
         } catch (e) {
           if (e.code === -32602) return fail(-32602, e.message);
@@ -95,7 +101,7 @@ export async function handle(local, msg, { version = "0.0.0" } = {}) {
 }
 
 // Serves until stdin ends. Logs go to stderr: stdout carries only the protocol.
-export function serveMcp(local, { input = process.stdin, output = process.stdout, version } = {}) {
+export function serveMcp(local, { input = process.stdin, output = process.stdout, version, cloud } = {}) {
   const lines = createInterface({ input, crlfDelay: Number.POSITIVE_INFINITY });
   const write = (m) => m && output.write(`${JSON.stringify(m)}\n`);
   let queue = Promise.resolve();
@@ -108,7 +114,7 @@ export function serveMcp(local, { input = process.stdin, output = process.stdout
       msg = null;
     }
     // One at a time, answers in the order of the questions: the store is one file.
-    queue = queue.then(() => (msg ? handle(local, msg, { version }) : { jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } })).then(write);
+    queue = queue.then(() => (msg ? handle(local, msg, { version, cloud }) : { jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } })).then(write);
   });
   return new Promise((done) => lines.on("close", () => queue.then(done)));
 }

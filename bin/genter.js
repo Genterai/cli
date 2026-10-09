@@ -6,10 +6,12 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const LOCAL = new Set(["add", "ask", "remember", "forget", "sources", "mcp", "help", "--help", "-h", "--version", "-v"]);
+const LOCAL = new Set(["add", "ask", "remember", "forget", "sources", "mcp", "demo", "logout", "help", "--help", "-h", "--version", "-v"]);
 const APPS = new Set(["run", "find", "continue", "write", "register_tool", "login", "search", "execute", "recipes", "anchors", "recheck_recipe", "recheck_anchor", "remove_recipe", "remove_anchor"]);
 const first = process.argv[2];
-if (!first || LOCAL.has(first) || !APPS.has(first)) {
+// `genter login <token>` (or alone) signs in to Genter Cloud; `genter login '{...}'` keeps the app commands' keys.
+const cloudLogin = first === "login" && !String(process.argv[3] ?? "").trim().startsWith("{");
+if (!first || LOCAL.has(first) || cloudLogin || !APPS.has(first)) {
   const { local } = await import("./local.js");
   await local(process.argv.slice(2));
   process.exit(process.exitCode ?? 0);

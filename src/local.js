@@ -299,14 +299,15 @@ export function createLocal({ home = genterHome(), secret, userId = "default", o
   async function vectorsOf(sections, question) {
     const s = state;
     s.vectors ??= {};
-    const keyOf = (x) => sha(`${x.headings.join(" › ")}\n${x.text}`).slice(0, 24);
+    const model = embed.model ?? "";
+    const keyOf = (x) => sha(`${model}\n${x.headings.join(" › ")}\n${x.text}`).slice(0, 24);
     const keys = sections.map(keyOf);
     const missing = [...new Set(keys.filter((k) => !s.vectors[k]))];
     const byKey = new Map(sections.map((x, i) => [keys[i], x]));
     const inputs = missing.map((k) => embedText(byKey.get(k)));
     const [q, ...fresh] = await embed([question, ...inputs]);
     missing.forEach((k, i) => {
-      s.vectors[k] = toB64(shrink(fresh[i]));
+      s.vectors[k] = toB64(shrink(fresh[i], model));
     });
     if (missing.length) dirty = true;
     const used = new Set(keys);
@@ -315,7 +316,7 @@ export function createLocal({ home = genterHome(), secret, userId = "default", o
       for (const k of all) if (!used.has(k)) delete s.vectors[k];
       dirty = true;
     }
-    return { query: shrink(q), sections: keys.map((k) => fromB64(s.vectors[k])) };
+    return { query: shrink(q, model), sections: keys.map((k) => fromB64(s.vectors[k])) };
   }
 
   // ---- the API ----
@@ -469,14 +470,22 @@ export function createLocal({ home = genterHome(), secret, userId = "default", o
       const changedNow = new Map(changes.map((c) => [c.place, c.event]));
       const qTerms = new Set(terms(q));
       const scoreOf = new Map(sections.map((x, i) => [x, scores[i]]));
-      for (const [x, score] of picked) {
+      // Each picked section in order; one whose place marks itself as replaced is followed by the place that replaces
+      // it: its section among the picked ones (moved up), else its best section of all.
+      const queue = [...picked];
+      const placeOf = (x) => x.record.args.path ?? x.record.args.url;
+      while (queue.length) {
+        const [x, score] = queue.shift();
         results.push(result(x, score, results.length + 1, qTerms, changedNow));
         const by = x.record.superseded?.by;
-        const next = by && byPath.get(by);
-        if (next && !picked.some(([y]) => (y.record.args.path ?? y.record.args.url) === by) && !results.some((r) => (r.path ?? r.url) === by)) {
-          const best = [...next].sort((a, b) => (scoreOf.get(b) ?? 0) - (scoreOf.get(a) ?? 0))[0];
-          results.push({ ...result(best, scoreOf.get(best) ?? 0, results.length + 1, qTerms, changedNow), replaces: results.at(-1).ref });
+        if (!by || placeOf(x) === by || results.some((r) => (r.path ?? r.url) === by && r.ref !== results.at(-1).ref)) continue;
+        const at = queue.findIndex(([y]) => placeOf(y) === by);
+        let next = at >= 0 ? queue.splice(at, 1)[0] : null;
+        if (!next && byPath.get(by)) {
+          const best = [...byPath.get(by)].sort((a, b) => (scoreOf.get(b) ?? 0) - (scoreOf.get(a) ?? 0))[0];
+          next = [best, scoreOf.get(best) ?? 0];
         }
+        if (next) results.push({ ...result(next[0], next[1], results.length + 1, qTerms, changedNow), replaces: results.at(-1).ref });
       }
       for (const r of results) r.facts = [...r.facts, ...driftFacts(r.signals, results.map((o) => o.signals)).map((f) => f.replace(/marked as replaced: (\S+)/, (_, p) => `marked as replaced: ${shown(p, cwd)}`))];
       for (const r of results) delete r.signals;
@@ -728,28 +737,70 @@ function passageOf(x, qTerms) {
 
 // ---- vectors ----
 
-// Embeddings through OpenRouter (the model the hosted engine ranks with), in batches; no package.
-export function openrouterEmbedder(apiKey, model = process.env.EMBEDDING_MODEL || "openai/text-embedding-3-small") {
-  return async (texts) => {
+// Where embeddings come from: any OpenAI-compatible /embeddings endpoint. The first three need their key in the
+// environment; Ollama runs on this computer, so nothing leaves it.
+export const PROVIDERS = {
+  openai: { url: "https://api.openai.com/v1", env: "OPENAI_API_KEY", model: "text-embedding-3-small" },
+  openrouter: { url: "https://openrouter.ai/api/v1", env: "OPENROUTER_API_KEY", model: "openai/text-embedding-3-small" },
+  vercel: { url: "https://ai-gateway.vercel.sh/v1", env: "AI_GATEWAY_API_KEY", model: "openai/text-embedding-3-small" },
+  ollama: { url: "http://localhost:11434/v1", env: null, model: "nomic-embed-text" },
+};
+
+// The provider to embed with: GENTER_EMBED_URL (any endpoint, GENTER_EMBED_KEY, GENTER_EMBED_MODEL), else the one named
+// (`name` or GENTER_PROVIDER), else the first whose key is set (OpenAI, OpenRouter, Vercel AI Gateway), else Ollama.
+// { name, url, key?, model }.
+export function embeddingProvider({ env = process.env, config = {}, name } = {}) {
+  const model = env.GENTER_EMBED_MODEL || undefined;
+  if (env.GENTER_EMBED_URL) return { name: "custom", url: env.GENTER_EMBED_URL.replace(/\/+$/, ""), key: env.GENTER_EMBED_KEY || undefined, model: model ?? "text-embedding-3-small" };
+  const of = (n) => {
+    const p = PROVIDERS[n];
+    const key = p.env ? env[p.env] || (n === "openrouter" ? config.openrouter_api_key : undefined) : undefined;
+    return { name: n, url: p.url, ...(key && { key }), model: model ?? p.model };
+  };
+  const named = name || env.GENTER_PROVIDER;
+  if (named) {
+    if (!PROVIDERS[named]) throw new Error(`Unknown provider "${named}": ${Object.keys(PROVIDERS).join(", ")}, or GENTER_EMBED_URL for any other`);
+    const p = of(named);
+    if (PROVIDERS[named].env && !p.key) throw new Error(`${named} needs ${PROVIDERS[named].env}`);
+    return p;
+  }
+  return ["openai", "openrouter", "vercel"].map(of).find((p) => p.key) ?? of("ollama");
+}
+
+// Embeds texts in batches with a provider; no package. The function carries its model (vectors of two models never mix).
+export function embedderFor({ name = "custom", url, key, model }) {
+  const embed = async (texts) => {
     const batches = [];
     for (let i = 0; i < texts.length; i += 128) batches.push(texts.slice(i, i + 128));
     const out = await pool(batches, 4, async (input) => {
-      const res = await fetch("https://openrouter.ai/api/v1/embeddings", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model, input }),
-        signal: AbortSignal.timeout(60000),
-      });
-      if (!res.ok) throw new Error(`Embeddings failed: ${res.status} ${(await res.text()).slice(0, 200)}`);
+      let res;
+      try {
+        res = await fetch(`${url}/embeddings`, {
+          method: "POST",
+          headers: { ...(key && { Authorization: `Bearer ${key}` }), "Content-Type": "application/json" },
+          body: JSON.stringify({ model, input }),
+          signal: AbortSignal.timeout(60000),
+        });
+      } catch (e) {
+        if (name === "ollama") throw new Error(`No embeddings: set OPENAI_API_KEY, OPENROUTER_API_KEY or AI_GATEWAY_API_KEY, or run Ollama (ollama pull ${model}), or GENTER_EMBED_URL (${e.cause?.code ?? e.message})`);
+        throw e;
+      }
+      if (!res.ok) throw new Error(`Embeddings (${name}) failed: ${res.status} ${(await res.text()).slice(0, 200)}`);
       const data = await res.json();
       return data.data.sort((a, b) => a.index - b.index).map((d) => d.embedding);
     });
     return out.flat();
   };
+  return Object.assign(embed, { provider: name, model });
 }
+
+// OpenRouter's, the model the hosted engine ranks with.
+export const openrouterEmbedder = (apiKey, model = process.env.EMBEDDING_MODEL || PROVIDERS.openrouter.model) => embedderFor({ name: "openrouter", url: PROVIDERS.openrouter.url, key: apiKey, model });
+
 const embedText = (x) => `${x.headings.join(" › ")}\n${x.text.slice(0, 2000)}`;
-function shrink(v) {
-  const s = Array.from(v).slice(0, LIMITS.dims);
+// text-embedding-3 vectors keep their first 256 numbers (they are trained to be cut); other models keep all of theirs.
+function shrink(v, model = "") {
+  const s = /text-embedding-3/.test(model) ? Array.from(v).slice(0, LIMITS.dims) : Array.from(v);
   const n = Math.hypot(...s) || 1;
   return Float32Array.from(s, (x) => x / n);
 }
