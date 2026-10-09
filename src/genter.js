@@ -5,6 +5,7 @@ import { addMcpServer, isCustomToolkit, mcpUrl } from "./mcp.js";
 import { areaOf, canonicalArgs, canonicalJson, classifyFailure, contentHash, isPartial, normalizeLegacy, publicRecipe, recipeId, sourceOf } from "./recipe.js";
 import { fill, inferList, pick } from "./shape.js";
 import { itemOf, listedItems, planReconcile } from "./area.js";
+import { LIST_READ_MAX } from "./area-recipe.js";
 import { addIntent, chunkCall, fileCall, isSkillTool, SCRIPT_NOTE, SKILL_TOOLS } from "./skills.js";
 import { signalsOf, areaStats } from "./drift.js";
 import { crawl, forgetPage, namesSite, readPage, siteUrl, underSite } from "./web.js";
@@ -799,7 +800,8 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         if (isSkillTool(tool) && task) next.intents = intents(existing);
         if (asked || (isSkillTool(tool) && task) || existing.status !== "fresh" || existing.checked_at !== at || canonicalJson(driftOf(existing)) !== canonicalJson(drift)) await save(next);
         // A plain read whose vectors could not be made (the embeddings failed) gets them now: without them it is never found.
-        const unfound = existing.described === "text" && !existing.summaryEmbedding && openrouterApiKey;
+        // So does a plain read of an anchor a model described (a list call that turns out to hold its items' text).
+        const unfound = (existing.described === "text" && !existing.summaryEmbedding && openrouterApiKey) || (plain && existing.described !== "text" && !isSkillTool(tool));
         const pendingNext = unfound ? rememberPlain(rid, digest, result.data).then(publicRecipe) : Promise.resolve(publicRecipe(next));
         if (unfound) later(pendingNext);
         return { id: rid, result, created: false, changed: false, unchanged: true, signals: shownSignals(next), pending: pendingNext.catch(() => null), recipe_status: "fresh" };
@@ -1004,13 +1006,20 @@ export function createGenter({ composioApiKey, openrouterApiKey, userId, workspa
         if (!listing?.read_tool || !listing.item_arg || !(listing.recipe_id || listing.tool)) throw new Error("Not an area's listing: pass recipe_id or tool, read_tool and item_arg");
         const account = listing.account || undefined;
         const empty = { created: [], changed: [], gone: [], unchanged: 0, pending: 0, limited: 0, failed: 0, excluded: 0, listed: 0, partial: false };
+        // An area whose list holds each item's text (list_is_read) is kept by its list call alone: a plain read of the list.
         const listed = await api
-          .execute({ ...(listing.recipe_id && { id: listing.recipe_id }), ...(listing.tool && { tool: listing.tool, args: listing.args ?? {} }), account: (listing.list_account ?? listing.account) || undefined })
+          .execute({ ...(listing.recipe_id && { id: listing.recipe_id }), ...(listing.tool && { tool: listing.tool, args: listing.args ?? {} }), account: (listing.list_account ?? listing.account) || undefined, ...(listing.list_is_read && { plain: true }) })
           .catch((e) => ({ result: { successful: false, error: e.message } }));
         if (listed.result?.successful === false) return { ...empty, status: "failed", error: String(typeof listed.result.error === "string" ? listed.result.error : JSON.stringify(listed.result.error ?? "the list call failed")).slice(0, 300), listing };
         const items = listedItems(listed.result?.data, listing.item_field ?? listing.item_arg);
         // A list that lists nothing says nothing about the area (an error page, another shape): nothing is touched.
         if (!items?.size) return { ...empty, status: "failed", error: "The list call listed no items to read", listing };
+        if (listing.list_is_read) {
+          const versions = Object.fromEntries([...items].slice(0, LIST_READ_MAX).map(([key, { version }]) => [key, version]));
+          const id = listed.id;
+          const out = { ...empty, listed: items.size, partial: isPartial(listed.result.data), ...(listed.created ? { created: [id] } : listed.changed ? { changed: [id] } : { unchanged: 1 }) };
+          return { status: "done", ...out, listing: { ...listing, recipe_id: id ?? listing.recipe_id, versions, listed: items.size, at: now() } };
+        }
         const existing = new Map();
         for (const r of await everyRecipe()) {
           const key = itemOf(listing, r, workspaceId);

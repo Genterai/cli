@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { PLAIN, plainDescription, plainName, plainSections, plainText } from "../src/plain.js";
+import { listSections, PLAIN, plainDescription, plainName, plainSections, plainText } from "../src/plain.js";
 
 const b64 = (text) => Buffer.from(text).toString("base64");
 
@@ -45,5 +45,17 @@ describe("plain reads: an area's item described from its own text, with no model
     assert.equal(plainName({ owner: "o", repo: "r", path: "a/b.md" }), "a/b.md");
     assert.equal(plainName({ file_id: "1x" }, { data: { name: "Roadmap" } }), "Roadmap");
     assert.equal(plainName({ file_id: "1x" }, {}), "1x");
+  });
+
+  it("P5 a list's items are its sections, each under its title with all its text", () => {
+    const data = { notes: [{ id: "n1", title: "Deploy", body: "Run make ship on Fridays.", url: "https://keep/n1" }, { id: "n2", title: "Rollback", body: "make rollback" }] };
+    assert.deepEqual(listSections(data), [
+      { headings: ["Deploy"], text: "body: Run make ship on Fridays.\nid: n1" },
+      { headings: ["Rollback"], text: "body: make rollback\nid: n2" },
+    ]);
+    const out = plainDescription({ tool: "KEEP_LIST_NOTES", args: { label: "work" }, data });
+    assert.match(out.summary, /^List of 2 "work" \(keep\)/);
+    assert.deepEqual(out.items, ["Deploy: body: Run make ship on Fridays. id: n1", "Rollback: body: make rollback id: n2"]);
+    assert.equal(listSections({ path: "a.md", content: "x" }), null);
   });
 });

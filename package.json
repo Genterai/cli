@@ -46,6 +46,7 @@
     "./cost": "./src/cost.js",
     "./loop": "./src/loop.js",
     "./area": "./src/area.js",
+    "./area-recipe": "./src/area-recipe.js",
     "./local": "./src/local.js",
     "./mcp-server": "./src/mcp-server.js",
     "./lexical": "./src/lexical.js"

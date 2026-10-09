@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isContainer, listingFrom, noText } from "./area.js";
+import { holdsText } from "./area-recipe.js";
 import { cipher, namedApps } from "./genter.js";
 import { appOf, applyEdits, citedRefs, fileEditor, needsCatalogue, refFromUrl, refLabel, refsOfResult, shapeRef, writeHints } from "./refs.js";
 import { inferList, locatorArgs, pick } from "./shape.js";
@@ -666,6 +667,9 @@ export function createAgent({
     const field = String(input.item_field || (list.items.some((i) => i[input.item_arg] != null) ? input.item_arg : list.id));
     const values = [...new Set(list.items.filter((i) => !isContainer(i) && !noText(i[field])).map((i) => i[field]).filter((v) => v != null && v !== ""))];
     if (!values.length) return { content: JSON.stringify({ error: `None of the ${list.items.length} listed items has a ${field} to read (folders and files with no text are left out).` }) };
+    // The list already holds each item's text (notes, issues with their descriptions): the list call is read plainly as the
+    // area's one anchor, a section per item, and no item gets a read of its own.
+    if (holdsText(list.items, field)) return readFromList(run, { list, tool, shared, item_arg: String(input.item_arg), field, values, account: input.account });
     if (run.reads === 0) return { content: JSON.stringify({ error: ROOM_USED, not_read: values.length }) };
     const cap = Math.min(MAX_EACH, run.reads ?? MAX_EACH);
     const calls = values.slice(0, cap).map((v) => ({ tool, args: { ...shared, [input.item_arg]: v }, account: input.account, item: v }));
@@ -677,6 +681,37 @@ export function createAgent({
     const more = cap < MAX_EACH ? `${values.length - cap} more items were not read: ${ROOM_USED}` : `${values.length - cap} more items were not read (at most ${MAX_EACH} per run; the area is carried on by its next relistings).`;
     lastNote = `${lastNote} ${more}`;
     return { content: JSON.stringify({ ...JSON.parse(out.content), not_read: values.length - cap, note: lastNote }) };
+  }
+
+  async function readFromList(run, { list, tool, shared, item_arg, field, values, account }) {
+    const out = await executeOn(run, { id: list.recipe, plain: true }, account).catch((e) => ({ thrown: e.message }));
+    const error = out.thrown ?? (out.result?.successful === false ? out.result?.error : null);
+    if (error) return { content: JSON.stringify({ error: `The list could not be read again: ${errorText(error).slice(0, 160)}` }) };
+    const recipe = out.id ? { id: out.id, created: Boolean(out.created), changed: Boolean(out.changed) } : null;
+    if (recipe) (run.touched ??= {})[recipe.id] = recipe;
+    run.steps.push({ tool: "read_each", from_recipe: null, recipe, ok: true, summary: null, saved: out.id ?? null });
+    const record = await Promise.resolve(genter.recipes?.get?.(list.recipe)).catch(() => null);
+    const versionOf = (v) => (list.version ? String(list.items.find((i) => String(i[field]) === String(v))?.[list.version] ?? "") : "");
+    run.listing = {
+      ...listingFrom({
+        recipe: list.recipe,
+        tool: record?.tool,
+        args: record?.args,
+        account: record?.scope?.account ?? "",
+        list_account: record?.scope?.account ?? "",
+        read_tool: tool,
+        shared_args: shared,
+        item_arg,
+        item_field: field,
+        versions: Object.fromEntries(values.map((v) => [String(v), versionOf(v)])),
+        listed: values.length,
+      }),
+      list_is_read: true,
+    };
+    if (onListing) await Promise.resolve(onListing(run.listing)).catch((e) => console.error("Could not hand the listing over:", e.message));
+    lastNote = `The list holds each item's text: its ${values.length} items are kept as one anchor of the list, with no read per item.`;
+    onEvent({ type: "tool", tool: "read_each", ok: true, summary: lastNote });
+    return { content: JSON.stringify({ requested: values.length, ok: values.length, list_is_read: true, note: lastNote }) };
   }
 
   // How the area was read, handed over with the run (`listing`), so it can be listed again and compared with its anchors

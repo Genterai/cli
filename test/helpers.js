@@ -52,6 +52,8 @@ export function fakeGenter({ connected = [], recipes = [], results = {}, catalog
     schema: async (tool) => ({ tool, args: {} }),
     catalog: async ({ toolkit }) => catalogs[toolkit] ?? [],
     async execute({ id, tool, args = {}, account, remember, plain }) {
+      // An anchor run by its id runs the call it was made by (rcp_<n>: the n-th call of the test).
+      if (id && !tool && /^rcp_\d+$/.test(id)) ({ tool, args } = { ...executed[Number(id.slice(4)) - 1], args: { ...executed[Number(id.slice(4)) - 1]?.args, ...args } });
       executed.push({ id, tool, args, account, ...(remember === false && { remember }), ...(plain && { plain }) });
       const out = results[tool];
       if (out === undefined) return { result: { successful: false, error: `no fake result for ${tool}` } };
