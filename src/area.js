@@ -54,9 +54,10 @@ export function itemOf(listing, record, workspaceId) {
 
 // What a reconcile does, with no calls made yet. listed: listedItems of the list call now; existing: Map(value -> { id,
 // status }) of the area's anchors; partial: the list was cut (a page, a truncated tree), so what it misses is not gone.
-// Returns { read: [value], recheck: [{ id, key }], gone: [{ id, key }], versions, excluded, pending } within `budget` calls
-// (new items first, then changed ones); versions holds the baseline for items that already had an anchor.
-export function planReconcile({ listing, listed, existing, partial = false, budget = 40 }) {
+// Returns { read: [value], recheck: [{ id, key }], gone: [{ id, key }], versions, excluded, pending, limited } within `budget`
+// calls (new items first, then changed ones); versions holds the baseline for items that already had an anchor.
+// room: how many new items the plan has room for (the rest is `limited`: not read, and not pending either).
+export function planReconcile({ listing, listed, existing, partial = false, budget = 40, room = Infinity }) {
   const known = listing.versions ?? {};
   const failed = listing.failed ?? {};
   const versions = { ...known };
@@ -76,14 +77,16 @@ export function planReconcile({ listing, listed, existing, partial = false, budg
     else if (before === undefined) versions[key] = version; // first seen with its anchor: the baseline, no call
   }
   const gone = partial ? [] : [...existing].filter(([key, a]) => !listed.has(key) && a.status !== "gone").map(([key, a]) => ({ id: a.id, key }));
-  const reads = read.slice(0, budget);
+  const allowed = Math.max(0, Math.min(read.length, Number.isFinite(room) ? Math.floor(room) : read.length));
+  const limited = read.length - allowed;
+  const reads = read.slice(0, Math.min(budget, allowed));
   const rechecks = recheck.slice(0, Math.max(0, budget - reads.length));
-  return { read: reads, recheck: rechecks, gone, versions, excluded, pending: read.length - reads.length + recheck.length - rechecks.length };
+  return { read: reads, recheck: rechecks, gone, versions, excluded, pending: allowed - reads.length + recheck.length - rechecks.length, limited };
 }
 
 // The listing a prepare run's read_each leaves: the list call's anchor and how each item was read. versions: the items
-// whose read worked, with their version.
-export function listingFrom({ recipe, tool, args, account, list_account, read_tool, shared_args, item_arg, item_field, versions = {} }) {
+// whose read worked, with their version; listed: how many items the list call listed (to read), so the unread are known.
+export function listingFrom({ recipe, tool, args, account, list_account, read_tool, shared_args, item_arg, item_field, versions = {}, listed }) {
   return {
     recipe_id: recipe,
     tool: tool ?? null,
@@ -95,5 +98,6 @@ export function listingFrom({ recipe, tool, args, account, list_account, read_to
     item_arg: String(item_arg),
     item_field: String(item_field ?? item_arg),
     versions,
+    ...(Number.isFinite(listed) && { listed }),
   };
 }

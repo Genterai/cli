@@ -47,6 +47,9 @@ export function createAgent({
   readOnly = false,
   instructions,
   onEvent = () => {},
+  // onListing(listing): a prepare run's listing of an area as it grows (every LISTING_EVERY reads and at the end), so the host
+  // keeps it even when the run is cut off before it ends.
+  onListing = null,
 }) {
   if (!openrouterApiKey) throw new Error("The agent needs an OpenRouter key (OPENROUTER_API_KEY)");
   const { seal, open } = cipher(`${secret}:${userId}:runs`);
@@ -495,7 +498,8 @@ export function createAgent({
   const api = {
     // Start a task. Anchors, candidate tools and connections are fetched in parallel before the first LLM call.
     // target (write): a reference to write at, with its write tools; the briefing ends with it.
-    async start({ task, mode = "run", account, target }) {
+    // reads: the most items a prepare run may read with read_each and read_many together (the plan's room); none: no limit.
+    async start({ task, mode = "run", account, target, reads }) {
       if (readOnly && target) throw new Error(READ_ONLY_ERROR);
       if (readOnly && !READ_ONLY_MODES.includes(mode)) mode = "find";
       onEvent({ type: "step", tool: "search_recipes", input: { query: task } });
@@ -518,6 +522,7 @@ export function createAgent({
         task,
         mode,
         account,
+        ...(Number.isFinite(reads) && { reads: Math.max(0, Math.floor(reads)) }),
         writing: Boolean(target), // a write: the run must write, not only read
         // Active connections, so a call one account cannot see is tried on the app's others (executeOn).
         connections: connected.filter((c) => !c.status || c.status === "ACTIVE").map((c) => ({ toolkit: c.toolkit, account: c.account, alias: c.alias, default: c.default })),
@@ -637,9 +642,13 @@ export function createAgent({
   // A prepare task's fan-out: many independent reads over one area, a few at a time. Every success is an ordinary
   // atomic anchor; the model gets counts and the first failures, never the data.
   async function executeMany(run, input) {
-    const calls = (Array.isArray(input.calls) ? input.calls : []).filter((c) => c?.tool).slice(0, MAX_MANY);
-    if (!calls.length) return { content: JSON.stringify({ error: "Pass calls: [{tool, args, account?}]" }) };
-    return fanOut(run, calls, "read_many");
+    const asked = (Array.isArray(input.calls) ? input.calls : []).filter((c) => c?.tool).slice(0, MAX_MANY);
+    if (!asked.length) return { content: JSON.stringify({ error: "Pass calls: [{tool, args, account?}]" }) };
+    if (run.reads === 0) return { content: JSON.stringify({ error: ROOM_USED, not_read: asked.length }) };
+    const calls = asked.slice(0, run.reads ?? asked.length);
+    const out = await fanOut(run, calls, "read_many");
+    if (calls.length === asked.length) return out;
+    return { content: JSON.stringify({ ...JSON.parse(out.content), not_read: asked.length - calls.length, note: `${lastNote} ${ROOM_USED}` }) };
   }
 
   // The same fan-out over the items a list call of this run listed (a repository's tree, a folder's files, a calendar's
@@ -657,19 +666,23 @@ export function createAgent({
     const field = String(input.item_field || (list.items.some((i) => i[input.item_arg] != null) ? input.item_arg : list.id));
     const values = [...new Set(list.items.filter((i) => !isContainer(i) && !noText(i[field])).map((i) => i[field]).filter((v) => v != null && v !== ""))];
     if (!values.length) return { content: JSON.stringify({ error: `None of the ${list.items.length} listed items has a ${field} to read (folders and files with no text are left out).` }) };
-    const calls = values.slice(0, MAX_EACH).map((v) => ({ tool, args: { ...shared, [input.item_arg]: v }, account: input.account, item: v }));
-    const out = await fanOut(run, calls, "read_each");
-    await keepListing(run, { list, tool, shared, item_arg: String(input.item_arg), field, calls });
-    if (values.length <= MAX_EACH) return out;
-    const more = `${values.length - MAX_EACH} more items were not read (at most ${MAX_EACH} per area).`;
+    if (run.reads === 0) return { content: JSON.stringify({ error: ROOM_USED, not_read: values.length }) };
+    const cap = Math.min(MAX_EACH, run.reads ?? MAX_EACH);
+    const calls = values.slice(0, cap).map((v) => ({ tool, args: { ...shared, [input.item_arg]: v }, account: input.account, item: v }));
+    const how = { list, tool, shared, item_arg: String(input.item_arg), field, calls, listed: values.length };
+    // The listing goes to the host as the reads go on, so a run cut off keeps what it read (the area is carried on from it).
+    const out = await fanOut(run, calls, "read_each", () => keepListing(run, how));
+    await keepListing(run, how);
+    if (values.length <= cap) return out;
+    const more = cap < MAX_EACH ? `${values.length - cap} more items were not read: ${ROOM_USED}` : `${values.length - cap} more items were not read (at most ${MAX_EACH} per run; the area is carried on by its next relistings).`;
     lastNote = `${lastNote} ${more}`;
-    return { content: JSON.stringify({ ...JSON.parse(out.content), not_read: values.length - MAX_EACH, note: lastNote }) };
+    return { content: JSON.stringify({ ...JSON.parse(out.content), not_read: values.length - cap, note: lastNote }) };
   }
 
   // How the area was read, handed over with the run (`listing`), so it can be listed again and compared with its anchors
   // with no model (area.js, genter.recipes.reconcile): the list call's anchor, the read and the arg each item goes in, and
   // the items read with the version the list gave them. The biggest read_each of the run is the area's.
-  async function keepListing(run, { list, tool, shared, item_arg, field, calls }) {
+  async function keepListing(run, { list, tool, shared, item_arg, field, calls, listed }) {
     const read = calls.filter((c) => c.ok);
     if (!list.recipe || !read.length || (run.listing && Object.keys(run.listing.versions).length >= read.length)) return;
     const get = (id) => (id ? Promise.resolve(genter.recipes?.get?.(id)).catch(() => null) : null);
@@ -687,12 +700,16 @@ export function createAgent({
       item_arg,
       item_field: field,
       versions: Object.fromEntries(read.map((c) => [String(c.item), versionOf.get(String(c.item)) ?? ""])),
+      listed,
     });
+    if (onListing) await Promise.resolve(onListing(run.listing)).catch((e) => console.error("Could not hand the listing over:", e.message));
   }
 
-  async function fanOut(run, calls, name) {
+  // progress(): called after every LISTING_EVERY successful reads (one at a time), so what was read is not lost with the run.
+  async function fanOut(run, calls, name, progress = null) {
     const started = Date.now();
     const counts = { requested: calls.length, ok: 0, created: 0, changed: 0, unchanged: 0, failed: 0, skipped: 0 };
+    let handing = Promise.resolve();
     const failures = [];
     let next = 0;
     const worker = async () => {
@@ -707,7 +724,9 @@ export function createAgent({
           counts.failed++;
           continue;
         }
-        const out = await executeOn(run, { tool: c.tool, args: c.args ?? {} }, c.account).catch((e) => ({ thrown: e.message }));
+        if (run.reads != null) run.reads = Math.max(0, run.reads - 1);
+        // A plain read: the item is described from its own text, no model per item (plain.js).
+        const out = await executeOn(run, { tool: c.tool, args: c.args ?? {}, plain: true }, c.account).catch((e) => ({ thrown: e.message }));
         const error = out.thrown ?? (out.result?.successful === false ? out.result?.error : null);
         if (error) {
           run.failed[key] = errorText(error);
@@ -719,6 +738,7 @@ export function createAgent({
         counts.ok++;
         c.ok = true;
         c.id = out.id;
+        if (progress && counts.ok % LISTING_EVERY === 0) handing = handing.then(progress);
         if (out.created) counts.created++;
         else if (out.changed) counts.changed++;
         else counts.unchanged++;
@@ -728,6 +748,7 @@ export function createAgent({
       }
     };
     await Promise.all(Array.from({ length: Math.min(MANY_CONCURRENCY, calls.length) }, worker));
+    await handing;
     run.timing.tool_ms += Date.now() - started;
     run.prepared = Object.fromEntries(["requested", "ok", "created", "changed", "unchanged", "failed", "skipped"].map((k) => [k, (run.prepared?.[k] ?? 0) + counts[k]]));
     const note = `Prepared ${run.prepared.ok} reads: ${run.prepared.created} new anchors, ${run.prepared.changed} updated, ${run.prepared.unchanged} unchanged, ${run.prepared.failed} failed${run.prepared.skipped ? `, ${run.prepared.skipped} skipped (not reads)` : ""}.`;
@@ -1167,6 +1188,8 @@ const MAX_MANY = 100;
 const MAX_EACH = 300; // calls one read_each makes: an area bigger than that is read in part, and the note says how much is left
 const MAX_LISTED = 2000;
 const MANY_CONCURRENCY = 4;
+const LISTING_EVERY = 25; // successful reads of a read_each between two handovers of its listing (onListing)
+const ROOM_USED = "the plan's room for items kept whole is used up, so no more items are read";
 const STRONG_RECIPE = 0.45; // an anchor this close to the task is known ground: the fast model is enough
 
 function briefing({ task, mode, account, found, connected, canExecute, english, named = [], recipeRef = () => undefined }) {
