@@ -77,3 +77,35 @@ node bench/drift/check.mjs
 
 It applies `changes.json` to a temporary copy of `corpus/`, checks every change and every question against both states,
 prints the file counts and the questions per kind, and exits with 1 and one line per problem if anything is off.
+
+## Running it
+
+```bash
+npm run bench                                   # genter and an index built once: no key, no network, about a second
+OPENROUTER_API_KEY=... npm run bench -- --semantic          # + both with embeddings (text-embedding-3-small)
+OPENROUTER_API_KEY=... npm run bench -- --semantic --answer # + a model answers from each arm's passages
+```
+
+The arms:
+
+| Arm | What it is |
+| --- | --- |
+| `genter` | `genter add` at t0, `genter ask` for every question at t0 and t1, words only |
+| `index built once` | the same sections and the same ranking, over the text kept at t0: any index nobody rebuilds |
+| `genter --semantic`, `index built once + vectors` | the same two with embeddings fused in |
+| `mem0` | the real `mem0ai` (its defaults: `gpt-5-mini`, `text-embedding-3-small`, local Qdrant), given every section at t0 with `infer=True` |
+| `mem0 + oracle re-add` | the same, after every file the edits touched had its memories deleted and was added again from t1 |
+
+mem0 runs in Python on its own:
+
+```bash
+python3 -m venv /tmp/mem0env && /tmp/mem0env/bin/pip install mem0ai==2.2.1
+node bench/drift/run.mjs --prepare /tmp/db      # writes t0 and t1 next to each other
+OPENROUTER_API_KEY=... /tmp/mem0env/bin/python bench/drift/mem0_arm.py /tmp/db/t0/northwind /tmp/db/t1/northwind \
+  bench/drift/questions.json bench/drift/changes.json /tmp/mem0out
+node bench/drift/run.mjs --semantic --answer --mem0 /tmp/mem0out/mem0.json,/tmp/mem0out/mem0-oracle.json --out bench/drift/results/latest.json
+```
+
+Each arm answers with its top 5 passages (mem0: its top 5 memories). A question is **fresh** when its current answer is
+among them, **stale** when an answer that has stopped being true is among them (outside a passage marked as replaced)
+and the current one is not, and **missed** otherwise; a deleted fact is stale whenever it comes back.
