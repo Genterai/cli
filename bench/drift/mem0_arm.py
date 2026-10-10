@@ -1,10 +1,12 @@
-"""DriftBench arm for mem0 (pip install mem0ai), the real library with its defaults (gpt-5-mini, text-embedding-3-small,
-local Qdrant), both through OpenRouter (OPENROUTER_API_KEY).
+"""DriftBench arm for a memory that extracts facts with a model: mem0 (pip install mem0ai), the real library with its
+defaults (gpt-5-mini, text-embedding-3-small, local Qdrant), through OpenRouter (OPENROUTER_API_KEY) or any
+OpenAI-compatible gateway (MEM0_BASE_URL + MEM0_API_KEY). The package and version go into the results as methodology;
+the public tables name it by its approach.
 
 The docs go in section by section with infer=True (mem0 extracts facts with its LLM). Then the questions are asked at t0,
 and at t1 twice:
-  mem0            nothing told: what a memory returns when the docs change and nobody re-adds them
-  mem0 + oracle   every file the edits touched has its memories deleted and is added again from t1: a perfect change
+  memory          nothing told: what a memory returns when the docs change and nobody re-adds them
+  memory + oracle every file the edits touched has its memories deleted and is added again from t1: a perfect change
                   feed, which Genter does not need
 Writes two result files for run.mjs --mem0.
 
@@ -50,6 +52,14 @@ def sections(root, rel):
     if "".join(current).strip():
         out.append(current)
     return [(f"From {rel}: " + "".join(s).strip(), rel) for s in out if len("".join(s).strip()) > 20]
+
+
+def about():
+    """The package, its version and how many packages its install brought, from this Python's own metadata."""
+    from importlib import metadata
+
+    names = {d.metadata["Name"].lower() for d in metadata.distributions()} - {"pip", "setuptools", "wheel"}
+    return {"package": f"mem0ai {metadata.version('mem0ai')}", "packages": len(names), "install": f"pip install mem0ai=={metadata.version('mem0ai')}, no extras"}
 
 
 def files(root):
@@ -157,10 +167,10 @@ def main():
     reingest_calls = dict(calls)
     at_t1_oracle, ms2 = ask()
 
-    info = {"sections": len(items), "memories": stored, "errors": errors + errors2, "llm": config["llm"]["config"]["model"], "embed_calls_ingest": ingest_calls["embed"], "reingest": {"files": len(touched), "llm_calls": reingest_calls["llm"], "ms": reingest_ms}}
-    base = {"needs": "OpenAI-compatible key + 35 packages", "t0": at_t0, "ingest_ms": ingest_ms, "model_calls_ingest": ingest_calls["llm"], "info": info}
-    json.dump({**base, "name": "mem0", "t1": at_t1, "ask_ms": ms0 + ms1}, open(os.path.join(out_dir, "mem0.json"), "w"), indent=1)
-    json.dump({**base, "name": "mem0 + oracle re-add", "t1": at_t1_oracle, "ask_ms": ms0 + ms2, "model_calls_ingest": ingest_calls["llm"] + reingest_calls["llm"]}, open(os.path.join(out_dir, "mem0-oracle.json"), "w"), indent=1)
+    info = {**about(), "sections": len(items), "memories": stored, "errors": errors + errors2, "llm": config["llm"]["config"]["model"], "embed": embed_model, "provider": re.sub(r"^https?://([^/]+).*", r"\1", base_url), "embed_calls_ingest": ingest_calls["embed"], "reingest": {"files": len(touched), "llm_calls": reingest_calls["llm"], "ms": reingest_ms}}
+    base = {"t0": at_t0, "ingest_ms": ingest_ms, "model_calls_ingest": ingest_calls["llm"], "info": info}
+    json.dump({**base, "name": "memory", "t1": at_t1, "ask_ms": ms0 + ms1}, open(os.path.join(out_dir, "mem0.json"), "w"), indent=1)
+    json.dump({**base, "name": "memory + oracle re-add", "t1": at_t1_oracle, "ask_ms": ms0 + ms2, "model_calls_ingest": ingest_calls["llm"] + reingest_calls["llm"]}, open(os.path.join(out_dir, "mem0-oracle.json"), "w"), indent=1)
     print(json.dumps(info), file=sys.stderr)
 
 
