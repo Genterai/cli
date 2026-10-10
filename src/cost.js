@@ -3,8 +3,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 // Cost observability: every paid call (a model call or an embeddings call) writes ONE structured event with an estimate
 // of its cost in USD and who/what it was for. Only metadata: never prompts, texts, results or keys.
 //
-// Where it goes: one JSON line on stdout (the platform's log drain ships it to BetterStack, the way the other logs go),
-// and, when BETTERSTACK_INGEST_URL and a token (BETTERSTACK_SOURCE_TOKEN, else the existing BETTERSTACK_API_KEY) are set, straight to a BetterStack source over HTTP.
+// Where it goes: one JSON line on stdout, read in the platform's runtime logs (Vercel's, on the hosted backend). It is
+// posted nowhere else.
 // GENTER_COST_LOG=0 turns the stdout line off (the CLI sets it, so a terminal stays quiet).
 
 // USD per 1M tokens: { in, out }. The one place to update prices. COST_PRICES (JSON, same shape) overrides or adds models.
@@ -47,18 +47,6 @@ let sink = null;
 // Tests and hosts can take the events themselves: setCostSink(fn) (null to go back to the default).
 export const setCostSink = (fn) => (sink = fn);
 
-function ingest(event) {
-  const url = process.env.BETTERSTACK_INGEST_URL;
-  const token = process.env.BETTERSTACK_SOURCE_TOKEN || process.env.BETTERSTACK_API_KEY; // the key already synced from Infisical
-  if (!url || !token) return;
-  fetch(url, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify(event),
-    signal: AbortSignal.timeout(5000),
-  }).catch(() => {}); // observability never breaks a call
-}
-
 // text -> a rough token count, for providers that do not report one (4 characters per token).
 export const roughTokens = (texts) => Math.ceil([].concat(texts ?? []).reduce((n, t) => n + String(t ?? "").length, 0) / 4);
 
@@ -94,7 +82,6 @@ export function logCost(fields) {
     };
     if (sink) sink(event);
     else if (process.env.GENTER_COST_LOG !== "0") console.log(JSON.stringify(event));
-    ingest(event);
   } catch {} // never let logging break a paid call
 }
 
