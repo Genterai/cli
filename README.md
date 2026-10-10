@@ -87,20 +87,20 @@ const { results, changes } = await genter.find("how do we deploy?"); // [{ place
 ## Benchmarks
 
 **[DriftBench](bench/drift)**: the docs of a 40-person company, 61 edits over two months, the same 65 questions before and
-after them, top 5 passages.
+after them, top 5 passages. The tables below are written by the run itself, not by hand.
 
 <!-- driftbench:start -->
-| | needs | before the edits | after the edits: current answer | after the edits: stale answer |
-| -- | -- | -- | -- | -- |
-| **genter** | nothing | 80% | **77%** (89% of the changed facts) | **0%** |
-| an index built once, same ranking | nothing | 80% | 34% (11%) | 42% |
-| **genter --semantic** | an embeddings key | 92% | **88%** (92%) | **0%** |
-| an index built once + vectors | an embeddings key | 92% | 42% (8%) | 43% |
-| mem0 2.2.1, docs not added again | an LLM key, 35 packages, 277 LLM calls to take the docs in | at most 73%¹ | at most 3 of 32 changed facts¹ | 18 of 28 old values kept¹ |
-
-¹ What mem0's memory holds at all, an upper bound for any search over it: its searches did not run (the key ran out
-of credits). [Results](bench/drift/results/2026-10-09.md).
 <!-- driftbench:end -->
+
+**Reproduce it.** No key, no account, nothing to install; a fresh run on a GitHub runner every week
+([bench.yml](.github/workflows/bench.yml)) fails if genter answers anything stale:
+
+```bash
+npx genter-cli demo                                   # see it on a temp folder
+git clone https://github.com/Genterai/genter && cd genter
+npm run bench                                         # the tables above, but the rows that need a key: ~30 s
+node bench/drift/takes.mjs                            # what it takes, alone
+```
 
 **[LoCoMo and LongMemEval](bench/convo)**, the conversational-memory benchmarks: is the evidence among the passages
 Genter finds? Words only, no key, no model.

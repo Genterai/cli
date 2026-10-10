@@ -3,11 +3,18 @@
 //   genter+semantic   the same with embeddings (--semantic, OPENROUTER_API_KEY)
 //   index-once        the same ranking over the text kept when the docs were added: what any index built once returns
 //   index-once+vec    the same with embeddings (with --semantic)
-//   mem0              the real mem0 (bench/drift/mem0_arm.py), read from its results file when given (--mem0 <file>)
+//   memory            a memory that extracts facts with a model (bench/drift/mem0_arm.py), read from its results
+//                     files when given (--memory <file>[,<file>])
+//   over time         genter and an index re-synced every 15 and every 60 minutes, the edits landing at known times
+//                     (--no-time skips it, --seeds N)
+// and what it takes to answer with genter (bench/drift/takes.mjs; --no-takes skips it).
 // A question is fresh when its current answer is in the top 5 passages; stale when an answer that is no longer true is
 // there (outside a passage marked as replaced) and the current one is not; else missed.
 // --answer also has a model answer each question from each arm's passages, judged by the same strings.
-// Usage: node bench/drift/run.mjs [--semantic] [--answer] [--mem0 results.json] [--out file.json] [--prepare dir]
+// Usage: node bench/drift/run.mjs [--semantic] [--answer] [--memory a.json,b.json] [--out results.json] [--md report.md]
+//          [--readme] [--guard README.md] [--prepare dir]
+// --readme writes the tables into the README; --guard fails the run when genter does worse than the README says.
+import { spawnSync } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
@@ -17,12 +24,15 @@ import { createLocal, embedderFor, embeddingProvider, fuse, listFolder } from ".
 import { chatModel, pool } from "../lib.mjs";
 import { splitMarkdown } from "../../src/skills.js";
 import { applyChanges } from "./check.mjs";
+import { fullReport, guard, readmeBlock, replaceReadmeBlock } from "./report.mjs";
+import { whatItTakes } from "./takes.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 const flag = (name) => args.includes(name);
 const option = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : null);
 const K = 5;
+const version = JSON.parse(readFileSync(join(here, "..", "..", "package.json"), "utf8")).version;
 const semantic = flag("--semantic");
 
 const questions = JSON.parse(readFileSync(join(here, "questions.json"), "utf8"));
@@ -101,6 +111,117 @@ async function indexOnceArm({ embed } = {}) {
   return out;
 }
 
+// ---- freshness over time ----
+
+// The edits land one by one at known times; each changed fact is asked again some minutes after the edit that made its
+// current answer, of
+//   genter                      the live folder, read at each question
+//   index re-synced every N     Genter's own search over a copy of the folder taken every N minutes since the docs went
+//                               in: the same ranking, so only freshness differs
+// Times are drawn from a seeded generator (no clock, no key, no network): the same seeds give the same numbers.
+export const DELAYS = [1, 5, 15, 30, 60, 120]; // minutes after the edit
+export const SYNC_EVERY = [15, 60]; // minutes between re-syncs of the index
+const MINUTE = 60_000;
+
+// mulberry32: a small seeded generator, so a timeline is the same on every machine.
+function seeded(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// The corpus after each number of edits: states[j] = Map(relative path -> text) after the first j edits.
+function corpusStates() {
+  const base = mkdtempSync(join(tmpdir(), "driftbench-states-"));
+  const dir = join(base, "northwind");
+  cpSync(join(here, "corpus"), dir, { recursive: true });
+  const read = () => new Map(listFolder(dir).files.map((p) => [relative(dir, p), readFileSync(p, "utf8")]));
+  const out = [read()];
+  for (const c of changes) {
+    applyChanges(dir, [c]);
+    out.push(read());
+  }
+  rmSync(base, { recursive: true, force: true });
+  return out;
+}
+
+// The edit after which a question's answer is where it is at the end: from state k on, the files holding its old and
+// its new answer (and whether they mark themselves as replaced) stay as they are after the last edit. null: never moves.
+export function landing(q, states) {
+  const sig = (state) =>
+    JSON.stringify(
+      [...state]
+        .filter(([, text]) => has(text, q.t0) || has(text, q.t1))
+        .map(([file, text]) => [file, has(text, q.t0), has(text, q.t1), /deprecated/i.test(text.slice(0, 300))])
+        .sort(),
+    );
+  const end = sig(states.at(-1));
+  let k = states.length - 1;
+  while (k > 0 && sig(states[k - 1]) === end) k--;
+  return k === 0 ? null : k;
+}
+
+async function overTimeArm({ seeds = 5 } = {}) {
+  const states = corpusStates();
+  const asked = questions.map((q, i) => ({ q, i, k: landing(q, states) })).filter((x) => x.k != null);
+  const arms = [{ name: "genter", every: null }, ...SYNC_EVERY.map((n) => ({ name: `index re-synced every ${n} min`, every: n }))];
+  const tally = Object.fromEntries(arms.map((a) => [a.name, DELAYS.map((d) => ({ minutes: d, n: 0, fresh: 0, stale: 0, missed: 0 }))]));
+  let span = 0;
+  for (let seed = 1; seed <= seeds; seed++) {
+    const random = seeded(seed);
+    // Edit j lands 2 to 30 minutes after the one before it; the docs went in, and the indexes were built, at 0.
+    const at = [];
+    for (let j = 0, t = 0; j < changes.length; j++) at.push((t += (2 + 28 * random()) * MINUTE));
+    span = Math.max(span, at.at(-1));
+    const base = mkdtempSync(join(tmpdir(), "driftbench-time-"));
+    const folder = (name) => {
+      const dir = join(base, name, "northwind");
+      cpSync(join(here, "corpus"), dir, { recursive: true });
+      return dir;
+    };
+    const live = folder("live");
+    const runs = [];
+    for (const a of arms) {
+      const dir = a.every ? folder(`every-${a.every}`) : live;
+      const local = createLocal({ home: join(base, `home-${a.name}`), secret: "bench", cwd: base });
+      await local.add(dir);
+      runs.push({ ...a, dir, local, synced: 0 });
+    }
+    const events = asked.flatMap((x) => DELAYS.map((d, di) => ({ ...x, di, t: at[x.k - 1] + d * MINUTE }))).sort((a, b) => a.t - b.t);
+    let applied = 0;
+    for (const e of events) {
+      while (applied < changes.length && at[applied] <= e.t) applyChanges(live, [changes[applied++]]);
+      for (const r of runs) {
+        if (r.every) {
+          // The last re-sync before this question copied the folder as it was then.
+          const last = Math.floor(e.t / (r.every * MINUTE)) * r.every * MINUTE;
+          const j = at.filter((x) => x <= last).length;
+          if (j !== r.synced) {
+            rmSync(r.dir, { recursive: true, force: true });
+            for (const [file, text] of states[j]) {
+              mkdirSync(dirname(join(r.dir, file)), { recursive: true });
+              writeFileSync(join(r.dir, file), text);
+            }
+            r.synced = j;
+          }
+        }
+        const found = await r.local.find(e.q.question, { limit: K });
+        const passages = found.results.map((p) => ({ text: p.text, replaced: Boolean(p.anchor.superseded) }));
+        const cell = tally[r.name][e.di];
+        cell.n++;
+        cell[verdict(e.q, passages, "t1")]++;
+      }
+    }
+    rmSync(base, { recursive: true, force: true });
+  }
+  return { seeds, facts: asked.length, edits_span_minutes: Math.round(span / MINUTE), delays: DELAYS, arms: arms.map((a) => ({ name: a.name, every_minutes: a.every, by_delay: tally[a.name] })) };
+}
+
 function top(sections, scores) {
   const per = new Map();
   const picked = [];
@@ -171,25 +292,10 @@ async function answers(arm, m) {
 
 // ---- report ----
 
-const pct = (x, n) => (n ? `${Math.round((100 * x) / n)}%` : "–");
-const median = (xs) => (xs.length ? [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)] : null);
-
-function table(rows) {
-  const lines = [
-    "| arm | needs | before the edits | after: current answer | after: stale answer | after, changed facts | after, unchanged facts | LLM calls to take the docs in | texts embedded | median search |",
-    "| -- | -- | -- | -- | -- | -- | -- | -- | -- | -- |",
-  ];
-  for (const r of rows) {
-    const s = r.score;
-    lines.push(`| ${r.name} | ${r.needs} | ${pct(s.t0.fresh, s.t0.n)} | ${pct(s.t1.fresh, s.t1.n)} | ${pct(s.t1.stale, s.t1.n)} | ${pct(s.t1_changed.fresh, s.t1_changed.n)} | ${pct(s.t1_unchanged.fresh, s.t1_unchanged.n)} | ${r.model_calls_ingest ?? 0} | ${r.embedded ?? 0} | ${r.ask_ms ? `${median(r.ask_ms)} ms` : "–"} |`);
-  }
-  return lines.join("\n");
-}
-function kindsTable(rows) {
-  const kinds = Object.keys(rows[0].score.kinds);
-  const lines = [`| kind (n) | ${rows.map((r) => r.name).join(" | ")} |`, `| -- | ${rows.map(() => "--").join(" | ")} |`];
-  for (const k of kinds) lines.push(`| ${k} (${rows[0].score.kinds[k].n}) | ${rows.map((r) => `${r.score.kinds[k].fresh} fresh · ${r.score.kinds[k].stale} stale`).join(" | ")} |`);
-  return lines.join("\n");
+// Where this run's code is: the commit, when run from a clone.
+function commit() {
+  const out = spawnSync("git", ["rev-parse", "--short", "HEAD"], { cwd: here, encoding: "utf8" });
+  return out.status === 0 ? out.stdout.trim() : null;
 }
 
 async function main() {
@@ -206,45 +312,70 @@ async function main() {
       return fn(texts);
     };
     wrapped.texts = 0;
-    return wrapped;
+    return Object.assign(wrapped, { model: fn.model, provider: fn.provider });
   };
   const rows = [];
-  const run = async (name, needs, fn) => {
+  const method = [`genter-cli ${version}${commit() ? ` at ${commit()}` : ""}; Node ${process.version}.`];
+  const run = async (name, fn) => {
     process.stderr.write(`${name}…\n`);
     const arm = await fn();
-    rows.push({ name, needs, ...arm, score: score(arm), arm });
+    rows.push({ name, ...arm, score: score(arm), arm });
   };
-  await run("genter", "nothing", () => genterArm());
-  await run("index built once", "nothing", () => indexOnceArm());
+  await run("genter", () => genterArm());
+  await run("index built once", () => indexOnceArm());
   if (semantic) {
     const a = counted(embedderFor(embeddingProvider()));
-    await run("genter --semantic", "OpenRouter key", () => genterArm({ embed: a }));
+    await run("genter --semantic", () => genterArm({ embed: a }));
     rows.at(-1).embedded = a.texts;
     const b = counted(embedderFor(embeddingProvider()));
-    await run("index built once + vectors", "OpenRouter key", () => indexOnceArm({ embed: b }));
+    await run("index built once + vectors", () => indexOnceArm({ embed: b }));
     rows.at(-1).embedded = b.texts;
+    method.push(`Embeddings: ${a.model} through ${a.provider}, the first 256 numbers of each vector.`);
   }
-  const mem0 = option("--mem0");
-  for (const file of mem0 ? mem0.split(",") : []) {
+  // The memory that extracts facts with a model, from the results files of bench/drift/mem0_arm.py.
+  const memory = option("--memory") ?? option("--mem0");
+  for (const file of memory ? memory.split(",") : []) {
     const m = JSON.parse(readFileSync(file, "utf8"));
-    rows.push({ name: m.name, needs: m.needs, t0: m.t0, t1: m.t1, ingest_ms: m.ingest_ms, ask_ms: m.ask_ms, model_calls_ingest: m.model_calls_ingest, embedded: m.embedded, score: score(m), arm: m, info: m.info });
+    rows.push({ name: m.name, t0: m.t0, t1: m.t1, ingest_ms: m.ingest_ms, ask_ms: m.ask_ms, model_calls_ingest: m.model_calls_ingest, embedded: m.embedded, score: score(m), arm: m, info: m.info });
+    if (m.info?.package && !method.some((x) => x.includes(m.info.package))) method.push(`The memory that extracts facts: ${m.info.package} (${m.info.install ?? "its default install"}), its LLM ${m.info.llm} and embeddings ${m.info.embed ?? "text-embedding-3-small"} through ${m.info.provider ?? "an OpenAI-compatible gateway"}, local vector store; given each of the ${m.info.sections} sections with fact extraction on, ${m.info.errors?.length ?? 0} of them failed${m.info.reingest ? `; the oracle arm deleted the memories of the ${m.info.reingest.files} files the edits touched and added them again from after the edits (${m.info.reingest.llm_calls} more LLM calls)` : ""}.`);
   }
-  const report = [`DriftBench: ${questions.length} questions, ${changes.length} edits, top ${K} passages (${new Date().toISOString().slice(0, 10)})`, "", table(rows), "", kindsTable(rows)];
+  if (!flag("--no-time")) {
+    process.stderr.write("over time…\n");
+    over = await overTimeArm({ seeds: Number(option("--seeds") ?? 5) });
+  }
+  if (!flag("--no-takes")) {
+    process.stderr.write("what it takes…\n");
+    takes = await whatItTakes({ runs: Number(option("--runs") ?? 5) });
+  }
   if (flag("--answer")) {
-    const answered = [];
     const m = chatModel();
-    for (const r of rows) {
+    for (const r of [...rows]) {
       process.stderr.write(`answers from ${r.name} (${m.provider} ${m.reader})…\n`);
       const a = await answers(r.arm, m);
-      answered.push({ name: r.name, needs: r.needs, score: score(a), answers: a });
+      rows.push({ name: `${r.name} → answer`, score: score(a), answers: a });
     }
-    report.push("", "Answers by a model from each arm's passages (the same strings judge them):", "", table(answered));
-    rows.push(...answered.map((a) => ({ ...a, name: `${a.name} → answer` })));
+    method.push(`Answers: ${m.reader} through ${m.provider}, temperature 0.`);
   }
-  console.log(report.join("\n"));
+  const results = { at: new Date().toISOString(), k: K, questions: questions.length, edits: changes.length, rows: rows.map(({ arm, ...r }) => r), over_time: over, takes, method };
+  console.log(fullReport(results, { method }));
   const file = option("--out");
-  if (file) writeFileSync(file, JSON.stringify({ at: new Date().toISOString(), k: K, questions: questions.length, edits: changes.length, rows: rows.map(({ arm, ...r }) => r) }, null, 2));
+  if (file) writeFileSync(file, JSON.stringify(results, null, 2));
+  const md = option("--md");
+  if (md) writeFileSync(md, fullReport(results, { method }));
+  if (flag("--readme")) {
+    const readme = join(here, "..", "..", "README.md");
+    const link = relative(dirname(readme), md ?? file ?? "bench/drift/results");
+    writeFileSync(readme, replaceReadmeBlock(readFileSync(readme, "utf8"), readmeBlock(results, link)));
+  }
+  const guarded = option("--guard");
+  if (guarded) {
+    const problems = guard(results, readFileSync(guarded, "utf8"));
+    for (const p of problems) console.error(`DriftBench guard: ${p}`);
+    if (problems.length) process.exitCode = 1;
+  }
 }
+let over = null;
+let takes = null;
 
 // Files and their sizes of the corpus, for the report.
 export function corpusSize(dir = join(here, "corpus")) {

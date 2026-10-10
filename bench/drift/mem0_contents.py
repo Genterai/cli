@@ -33,6 +33,7 @@ current = [q for q in changed if q.get("t1")]
 before = [q for q in questions if q["t0"]]
 print(json.dumps({
     "memories": len(points),
+    "memory_bytes": sum(len(p.payload.get("data", "").encode()) for p in points),
     "before_edits_answers_in_memory": [sum(norm(q["t0"]) in blob for q in before), len(before)],
     "after_edits_old_values_in_memory": [sum(norm(q["t0"]) in blob for q in old), len(old)],
     "after_edits_current_values_in_memory": [sum(norm(q["t1"]) in blob for q in current), len(current)],
