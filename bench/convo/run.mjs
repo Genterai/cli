@@ -1,4 +1,4 @@
-// LoCoMo and LongMemEval, the conversational-memory benchmarks mem0, Zep and Letta report on, run on Genter's local
+// LoCoMo and LongMemEval, the conversational-memory benchmarks memory layers report on, run on Genter's local
 // search: every session of a conversation is a Markdown file (a heading with its date, a section per few turns), the
 // folder is added with `genter add`, and each question is asked with `genter ask`.
 //

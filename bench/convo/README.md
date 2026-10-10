@@ -1,7 +1,6 @@
 # LoCoMo and LongMemEval on Genter
 
-The two conversational-memory benchmarks memory layers report on (mem0 and Zep on LoCoMo; Zep, mem0 and Supermemory
-on LongMemEval), run on Genter's local search with nothing added for them: every session of a conversation becomes a
+The two conversational-memory benchmarks memory layers report their scores on, run on Genter's local search with nothing added for them: every session of a conversation becomes a
 Markdown file (a heading with its date, a section every few turns), the folder is added with `genter add`, and each
 question is asked with `genter ask`. Taking a conversation in calls no model.
 
@@ -17,7 +16,7 @@ question is asked with `genter ask`. Taking a conversation in calls no model.
   and *all* of it. This is Genter's own job: it finds, the agent answers.
 - **Answers** (`--answer`, a key of any OpenAI-compatible provider): a model answers each question from the 10 passages,
   and a judge grades it with the benchmark's own prompt: LongMemEval's `evaluate_qa.py`, and for LoCoMo the
-  `llm_judge.py` of mem0's evaluation (gpt-4o-mini). These are the numbers memory layers publish.
+  `llm_judge.py` published with a memory layer's LoCoMo evaluation (gpt-4o-mini). These are the numbers memory layers publish.
 
 ## Running it
 

@@ -116,7 +116,6 @@ try {
       genter,
       openrouterApiKey: process.env.OPENROUTER_API_KEY || config.openrouter_api_key,
       aiGatewayToken: process.env.AI_GATEWAY_TOKEN || process.env.AI_GATEWAY_API_KEY,
-    aiGatewayToken: process.env.AI_GATEWAY_TOKEN || process.env.AI_GATEWAY_API_KEY,
       secret: config.secret,
       userId: process.env.GENTER_USER_ID || config.user_id || "default",
       runs,
