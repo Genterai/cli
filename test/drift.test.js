@@ -85,11 +85,11 @@ describe("Anchor Drift: the answer", () => {
   const fresh = { source_at: new Date(Date.now() - 5 * 86_400_000).toISOString(), updated_at: new Date().toISOString(), source: "notion/b/" };
   it("the Anchor line is unchanged without a deviation, and gets one bracketed fact with it", () => {
     const plain = recipesResultText({ status: "done", results: [r("rcp_1", fresh), r("rcp_2", undefined)] });
-    assert.match(plain, /^Anchor 1: rcp_1 · T\n/);
-    assert.match(plain, /\nAnchor 2: rcp_2 · T\n/);
+    assert.match(plain, /^Anchor 1: rcp_1 · T · saved path\n/);
+    assert.match(plain, /\nAnchor 2: rcp_2 · T · saved path\n/);
     const text = recipesResultText({ status: "done", results: [r("rcp_1", old, { title: "Guide" }), r("rcp_2", fresh)] });
-    assert.match(text, /^Anchor 1: rcp_1 · T — Guide \[source last changed 2019-03; another source in this answer changed within the last 30 days\]\n/);
-    assert.match(text, /\nAnchor 2: rcp_2 · T\n/);
+    assert.match(text, /^Anchor 1: rcp_1 · T — Guide · saved path \[source last changed 2019-03; another source in this answer changed within the last 30 days\]\n/);
+    assert.match(text, /\nAnchor 2: rcp_2 · T · saved path\n/);
   });
   it("two or more different sources add one instruction line; one source adds none", () => {
     const meta = (t) => JSON.parse(t.slice(t.lastIndexOf("\n") + 1));

@@ -313,7 +313,7 @@ export function createAgent({
       }
       case "connect_app": {
         if (!canConnect) {
-          return { content: "", pause: { status: "needs_connection", toolkit: input.toolkit, answer: `${input.toolkit} is not connected. Ask a workspace admin to connect it.` } };
+          return { content: "", pause: { status: "needs_connection", toolkit: input.toolkit, answer: `${input.toolkit} is not connected. Ask a workspace owner or admin to connect it.` } };
         }
         const { connect_url } = await genter.register_tool({ toolkit: input.toolkit, alias: input.alias });
         return {

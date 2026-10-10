@@ -251,7 +251,7 @@ Composio schemas (`test/fixtures/catalogues.json`: Linear, Slack, Jira, Trello, 
 | H1–H4 | gpt-oss calls as text | a call written as harmony text (`to=functions.execute json{…}`) is made, not shown; the final channel is the answer, reasoning alone is sent back once then fails; a slug called as a function is an execute; a tool of an app that is not connected names the connected apps and their tools |
 | L1–L3, loop.test.js | an answer that falls into a loop | written again once (temperature 1, told the piece it repeated, the loop not sent back); looping again, cut where it starts; all loop: asked for the answer; tables, code rules and short repeats are no loop |
 | A8–A10 | refused | a number without its run, an unknown number, a tool of another app, a viewer; `GENTER_WRITE` only where writing is on |
-| R1–R7 | read-only MCP (`readOnly`) | without actions the MCP tools are `GENTER_FIND` and `GENTER_CONTINUE_TASK`, and every description says Genter finds and the client writes; a read-only agent runs a task as a find, refuses `write()`, continues a run started elsewhere read-only; a read-only run looks up an anchor id it did not meet before running it (a saved send does not run) and refuses a tool its mode does not offer (`recheck_recipe` outside an event); a write's change goes there word for word |
+| R1–R7 | read-only MCP (`readOnly`) | without actions the MCP tools are `GENTER_FIND`, `GENTER_CONTINUE_TASK` and `GENTER_CONNECT`, and every description says Genter finds and the client writes; a read-only agent runs a task as a find, refuses `write()`, continues a run started elsewhere read-only; a read-only run looks up an anchor id it did not meet before running it (a saved send does not run) and refuses a tool its mode does not offer (`recheck_recipe` outside an event); a write's change goes there word for word |
 
 ## Preparing an area, triggers
 
@@ -315,7 +315,8 @@ what changed.
 
 The agent tools run as a remote MCP server with OAuth (Google or email) in
 [genter-backend](https://github.com/Genterai/genter-backend). Genter finds; the client's own model thinks and writes:
-`agentTools()` is `GENTER_FIND` and `GENTER_CONTINUE_TASK` (read-only), and `agentTools({ actions: true })` adds
+`agentTools()` is `GENTER_FIND` and `GENTER_CONTINUE_TASK` (read-only) and `GENTER_CONNECT` (the connections and a link per
+app to connect, served by the host; `connectResultText` formats its answer), and `agentTools({ actions: true })` adds
 `GENTER_RUN_TASK` and `GENTER_WRITE`, which carry out an action the client has decided, with the exact text it wrote
 (`agentInstructions`, plus `actionInstructions` where actions are on). `createAgent({ readOnly: true })` is the agent
 behind the read-only tools: every run is a find, a run continued there goes on as one, `write()` refuses.

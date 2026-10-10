@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import { createAgent } from "../src/agent.js";
 import { cipher } from "../src/genter.js";
-import { actionInstructions, agentInstructions, agentResultText, agentTools, connectedInstructions, readable, readQuestion, recipesResultText } from "../src/tools.js";
+import { actionInstructions, agentInstructions, agentResultText, agentTools, connectedInstructions, connectResultText, readable, readQuestion, recipesResultText, startInstructions } from "../src/tools.js";
 import { answer, briefingOf, call, catalogues, fakeGenter, fakeModel, lastOf, memoryRuns } from "./helpers.js";
 
 let model;
@@ -925,8 +925,8 @@ describe("MCP raw anchors text", () => {
   it("each result under a line naming its call, then the JSON line with the anchors in that order", () => {
     const text = recipesResultText({ run_id: "r1", status: "done", answer: "rcp_1", results: [result({ account: "work" }), result({ id: "rcp_2", tool: "GITHUB_LIST_COMMITS", args: {}, data: [], created: false, title: "Commits" })], credits: 2 });
     const parts = text.split("\n\n");
-    assert.equal(parts[0], 'Anchor 1: rcp_1 · GMAIL_FETCH_EMAILS {"query":"from:anna"} (account work)\n{"messages":[{"id":"m1"}]}');
-    assert.equal(parts[1], "Anchor 2: rcp_2 · GITHUB_LIST_COMMITS — Commits\n[]");
+    assert.equal(parts[0], 'Anchor 1: rcp_1 · GMAIL_FETCH_EMAILS {"query":"from:anna"} (account work) · saved now\n{"messages":[{"id":"m1"}]}');
+    assert.equal(parts[1], "Anchor 2: rcp_2 · GITHUB_LIST_COMMITS — Commits · saved path\n[]");
     const meta = JSON.parse(parts.at(-1));
     assert.deepEqual(meta, { run_id: "r1", status: "done", recipes: [{ id: "rcp_1", tool: "GMAIL_FETCH_EMAILS", created: true }, { id: "rcp_2", tool: "GITHUB_LIST_COMMITS" }], credits: 2 });
     assert.doesNotMatch(text, /^rcp_1$/m); // the model's ids are not repeated as an answer
@@ -1136,10 +1136,10 @@ describe("Read-only MCP (below Enterprise): Genter finds, the client writes", ()
   const SEND = { id: "rcp_send", tool: "GMAIL_SEND_EMAIL", args: { to: "anna@x.com", body: "hi" }, title: "Email to Anna", status: "fresh", score: 0.5 };
   const mail = { messages: [{ messageId: "1", threadId: "t1", subject: "Contract", snippet: "Please sign" }] };
 
-  it("R1 without actions the MCP tools only read; with them RUN_TASK and WRITE come too", () => {
-    assert.deepEqual(Object.keys(agentTools()).sort(), ["GENTER_CONTINUE_TASK", "GENTER_FIND"]);
+  it("R1 [spec:mcp/ac-pro-tools-connect] without actions the MCP tools only read, and connect; with them RUN_TASK and WRITE come too", () => {
+    assert.deepEqual(Object.keys(agentTools()).sort(), ["GENTER_CONNECT", "GENTER_CONTINUE_TASK", "GENTER_FIND"]);
     assert.equal(agentTools().GENTER_CONTINUE_TASK.annotations.readOnlyHint, true);
-    assert.deepEqual(Object.keys(agentTools({ actions: true })).sort(), ["GENTER_CONTINUE_TASK", "GENTER_FIND", "GENTER_RUN_TASK", "GENTER_WRITE"]);
+    assert.deepEqual(Object.keys(agentTools({ actions: true })).sort(), ["GENTER_CONNECT", "GENTER_CONTINUE_TASK", "GENTER_FIND", "GENTER_RUN_TASK", "GENTER_WRITE"]);
     // Every tool and the instructions say Genter only finds: the client's own model writes and rewrites.
     assert.match(agentInstructions, /Genter finds; you think and write/);
     assert.doesNotMatch(agentInstructions, /GENTER_RUN_TASK|GENTER_WRITE/);
@@ -1153,6 +1153,58 @@ describe("Read-only MCP (below Enterprise): Genter finds, the client writes", ()
     assert.equal(text(agentTools({ connected: [{ toolkit: "gmail" }] })), text(agentTools()));
     assert.equal(text(agentTools({ actions: true, connected: [{ toolkit: "gmail" }] })), text(agentTools({ actions: true })));
     assert.doesNotMatch(text(agentTools({ actions: true })), /Connected for this user/);
+  });
+
+  it("[spec:mcp/connect-tool] GENTER_CONNECT is the same on every plan, and its description names no person", () => {
+    const text = (t) => JSON.stringify([t.GENTER_CONNECT.description, t.GENTER_CONNECT.annotations, Object.keys(t.GENTER_CONNECT.input.shape)]);
+    assert.equal(text(agentTools()), text(agentTools({ actions: true })));
+    assert.deepEqual(Object.keys(agentTools().GENTER_CONNECT.input.shape), ["apps", "website", "mcp_server", "account"]);
+    assert.ok(agentTools().GENTER_CONNECT.input.safeParse({}).success); // nothing given: only the list
+    assert.ok(!agentTools().GENTER_CONNECT.input.safeParse({ website: "not a url" }).success);
+    assert.match(agentInstructions, /GENTER_CONNECT/);
+  });
+
+  it("[spec:mcp/connect-link] [spec:mcp/connect-lists] the connections, then a Markdown link per app to connect, then the JSON line", () => {
+    const text = connectResultText({
+      connections: [{ toolkit: "github", label: "Main", status: "ACTIVE", default: true }],
+      apps: [
+        { asked: "Gmail", name: "Gmail", toolkit: "gmail", state: "link", url: "https://accounts.example/o" },
+        { asked: "github", name: "GitHub", toolkit: "github", state: "connected", label: "Main" },
+        { asked: "frobnicator", state: "unknown" },
+      ],
+      website: { url: "https://docs.example.com", state: "added", note: "added; its pages are being read now" },
+      mcp_server: { address: "https://mcp.example.com/mcp", state: "link", url: "https://mcp.example.com/authorize" },
+    });
+    const parts = text.split("\n\n");
+    assert.equal(parts[0], "Connections (1):\n- github · Main · ACTIVE · default");
+    assert.equal(parts[1], "Connect:\n- [Connect Gmail](https://accounts.example/o)\n- GitHub: already connected (Main). Pass account to connect one more account.\n- No app called frobnicator\n- Website https://docs.example.com: added; its pages are being read now\n- [Connect MCP server https://mcp.example.com/mcp](https://mcp.example.com/authorize)");
+    const meta = JSON.parse(parts.at(-1));
+    assert.deepEqual({ ...meta, next: undefined }, { status: "done", connections: 1, links: 2, credits: 0, next: undefined });
+    assert.match(meta.next, /Markdown link/);
+  });
+
+  it("[spec:mcp/connect-refused] [spec:mcp/connect-free] someone who may not connect is told whom to ask, with no link and 0 credits", () => {
+    const text = connectResultText({ connections: [], apps: [{ asked: "gmail", name: "Gmail", toolkit: "gmail", state: "refused" }] });
+    assert.match(text, /^No apps are connected yet\./);
+    assert.match(text, /- Gmail: Ask a workspace owner or admin to connect it\./);
+    assert.doesNotMatch(text, /\]\(/);
+    assert.deepEqual(JSON.parse(text.slice(text.lastIndexOf("\n") + 1)), { status: "done", connections: 0, credits: 0 });
+  });
+
+  it("[spec:mcp/start-connect] [spec:mcp/start-first-question] [spec:mcp/start-done] the next Get started step for the instructions", () => {
+    assert.match(startInstructions({ app: false, ask: false, mayConnect: true }), /Ask the user which apps they work with.*GENTER_CONNECT/);
+    assert.match(startInstructions({ app: false, ask: true, mayConnect: false }), /only a workspace owner or admin can connect/);
+    assert.doesNotMatch(startInstructions({ app: false, mayConnect: false }), /call GENTER_CONNECT with those apps/);
+    assert.match(startInstructions({ app: true, ask: false, mayConnect: true }), /Suggest a first question.*GENTER_FIND/);
+    assert.equal(startInstructions({ app: true, ask: true, mayConnect: true }), "");
+  });
+
+  it("[spec:mcp/saved-marker] [spec:mcp/ac-saved-now] a line says whether its anchor was saved now or is a saved path; no anchor, no mark", () => {
+    const line = (r) => recipesResultText({ status: "done", results: [{ tool: "T", args: {}, data: { x: 1 }, ...r }] }).split("\n")[0];
+    assert.equal(line({ id: "rcp_1", created: true }), "Anchor 1: rcp_1 · T · saved now");
+    assert.equal(line({ id: "rcp_1", created: false }), "Anchor 1: rcp_1 · T · saved path");
+    assert.equal(line({ id: null }), "Anchor 1: T");
+    assert.match(agentInstructions, /" · saved now" is a path Genter saved just now: tell the user it is remembered/);
   });
 
   it("[spec:mcp/connected-in-instructions] the connected apps are a line for the server's instructions, once each", () => {
