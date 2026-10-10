@@ -90,6 +90,35 @@ const { results, changes } = await genter.find("how do we deploy?"); // [{ place
 after them, top 5 passages. The tables below are written by the run itself, not by hand.
 
 <!-- driftbench:start -->
+| | needs | before the edits | after the edits: current answer | after the edits: stale answer |
+| -- | -- | -- | -- | -- |
+| **genter** | nothing | 80% | **77%** (89% of the changed facts) | **0%** |
+| an index built once, same ranking | nothing | 80% | 34% (11% of the changed facts) | 42% |
+| **genter --semantic** | an embeddings key | 92% | **88%** (92% of the changed facts) | **0%** |
+| an index built once + vectors | an embeddings key | 92% | 42% (8% of the changed facts) | 43% |
+| a memory that extracts facts with a model, docs not added again | an LLM key, 34 packages, 277 LLM calls to take the docs in | 75% | 40% (11% of the changed facts) | 32% |
+| the same memory, every edited file deleted from it and added again | an LLM key, 34 packages, 277 LLM calls to take the docs in, 320 more to add the edited files again | 75% | 75% (75% of the changed facts) | 3% |
+
+**Over time.** The same 61 edits land one by one, 2 to 30 minutes apart; each of the 36 changed facts is asked again some time after its edit. An index re-synced every N minutes is genter's own search over a copy of the docs taken every N minutes. Current answer · stale answer (5 seeded timelines):
+
+| time since the edit | 1 min | 5 min | 15 min | 30 min | 1 h | 2 h |
+| -- | -- | -- | -- | -- | -- | -- |
+| **genter**, reading the docs at each question | **89% · 0%** | **89% · 0%** | **89% · 0%** | **89% · 0%** | **89% · 0%** | **89% · 0%** |
+| an index re-synced every 15 minutes, same ranking | 20% · 55% | 41% · 37% | 89% · 0% | 89% · 0% | 89% · 0% | 89% · 0% |
+| an index re-synced every 60 minutes, same ranking | 13% · 69% | 18% · 64% | 29% · 52% | 54% · 30% | 89% · 0% | 89% · 0% |
+
+**What it takes**, measured by `bench/drift/takes.mjs` (Node v22.22.0, linux x64). The store keeps each file's place, title, headings, dates, size and a digest of its text, sealed: 38155 bytes for 96396 bytes of docs.
+
+| | **genter** | a memory that extracts facts with a model |
+| -- | -- | -- |
+| packages installed with it | **0** | 34 |
+| model calls to take the docs in | **0** | 277 |
+| network connections · servers started | **0 · 0** | a model provider's API on every add and search |
+| from a cold start to the first answer (34 docs) | **184 ms** | 14 min to take the docs in |
+| median search | **3 ms** | 288 ms |
+| of the docs' text, it keeps | **0 of 1065 lines of body text (0 bytes); its headings** | 569 facts written by its model |
+
+[Results, 2026-10-10](bench/drift/results/2026-10-10.md).
 <!-- driftbench:end -->
 
 **Reproduce it.** No key, no account, nothing to install; a fresh run on a GitHub runner every week

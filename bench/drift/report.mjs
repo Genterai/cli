@@ -26,7 +26,8 @@ function needs(r) {
   if (r.name === "genter" || r.name === "index built once") return "nothing";
   if (r.name.includes("--semantic") || r.name.includes("vectors")) return "an embeddings key";
   const packages = r.info?.packages ? `, ${r.info.packages} packages` : "";
-  return `an LLM key${packages}, ${r.model_calls_ingest} LLM calls to take the docs in`;
+  const again = r.info?.reingest && r.name.includes("oracle") ? r.info.reingest.llm_calls : 0;
+  return `an LLM key${packages}, ${r.model_calls_ingest - again} LLM calls to take the docs in${again ? `, ${again} more to add the edited files again` : ""}`;
 }
 
 // The arms that ran on the docs before and after the edits (not the answers of a model).
@@ -73,7 +74,7 @@ export function readmeBlock(results, file) {
   const out = [mainTable(results), ""];
   if (t) {
     out.push(
-      `**Over time.** The same ${results.edits} edits land one by one, 2 to 30 minutes apart; each of the ${t.facts} changed facts is asked again some time after its edit. Current answer · stale answer (${t.seeds} seeded timelines):`,
+      `**Over time.** The same ${results.edits} edits land one by one, 2 to 30 minutes apart; each of the ${t.facts} changed facts is asked again some time after its edit. An index re-synced every N minutes is genter's own search over a copy of the docs taken every N minutes. Current answer · stale answer (${t.seeds} seeded timelines):`,
       "",
       overTimeTable(t),
       "",
@@ -82,7 +83,7 @@ export function readmeBlock(results, file) {
   if (results.takes) {
     const s = results.takes.store;
     out.push(
-      `**What it takes**, measured by \`bench/drift/takes.mjs\` (${results.takes.node}, ${results.takes.platform}). The store keeps each file's place, title, headings, dates, size and a digest of its text, sealed: ${s.bytes} bytes for ${results.takes.docs.bytes} bytes of docs.`,
+      `**What it takes**, measured by \`bench/drift/takes.mjs\` (Node ${results.takes.node}, ${results.takes.platform}). The store keeps each file's place, title, headings, dates, size and a digest of its text, sealed: ${s.bytes} bytes for ${results.takes.docs.bytes} bytes of docs.`,
       "",
       takesTable(results),
       "",

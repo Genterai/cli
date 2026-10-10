@@ -138,3 +138,5 @@ US$1 through an OpenAI-compatible gateway on 2026-10-10.
 Each arm answers with its top 5 passages (the memory: its top 5 memories). A question is **fresh** when its current answer is
 among them, **stale** when an answer that has stopped being true is among them (outside a passage marked as replaced)
 and the current one is not, and **missed** otherwise; a deleted fact is stale whenever it comes back.
+
+Latest full run: [2026-10-10](results/2026-10-10.md) (numbers in `results/2026-10-10.json`; `node bench/drift/run.mjs --from bench/drift/results/2026-10-10.json --md bench/drift/results/2026-10-10.md --readme`, from the repository root, writes its report and the README tables again).

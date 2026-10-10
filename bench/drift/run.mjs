@@ -12,7 +12,7 @@
 // there (outside a passage marked as replaced) and the current one is not; else missed.
 // --answer also has a model answer each question from each arm's passages, judged by the same strings.
 // Usage: node bench/drift/run.mjs [--semantic] [--answer] [--memory a.json,b.json] [--out results.json] [--md report.md]
-//          [--readme] [--guard README.md] [--prepare dir]
+//          [--readme] [--guard README.md] [--prepare dir] [--from results.json]
 // --readme writes the tables into the README; --guard fails the run when genter does worse than the README says.
 import { spawnSync } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -305,6 +305,9 @@ async function main() {
     console.log(JSON.stringify({ t0, t1, questions: join(here, "questions.json") }));
     return;
   }
+  // --from <results.json>: the reports again from a kept run, nothing run (and nothing paid) twice.
+  const from = option("--from");
+  if (from) return write(JSON.parse(readFileSync(from, "utf8")));
   // Embedding requests are counted: they are model calls too (an LLM writes nothing in these arms).
   const counted = (fn) => {
     const wrapped = async (texts) => {
@@ -337,7 +340,7 @@ async function main() {
   for (const file of memory ? memory.split(",") : []) {
     const m = JSON.parse(readFileSync(file, "utf8"));
     rows.push({ name: m.name, t0: m.t0, t1: m.t1, ingest_ms: m.ingest_ms, ask_ms: m.ask_ms, model_calls_ingest: m.model_calls_ingest, embedded: m.embedded, score: score(m), arm: m, info: m.info });
-    if (m.info?.package && !method.some((x) => x.includes(m.info.package))) method.push(`The memory that extracts facts: ${m.info.package} (${m.info.install ?? "its default install"}), its LLM ${m.info.llm} and embeddings ${m.info.embed ?? "text-embedding-3-small"} through ${m.info.provider ?? "an OpenAI-compatible gateway"}, local vector store; given each of the ${m.info.sections} sections with fact extraction on, ${m.info.errors?.length ?? 0} of them failed${m.info.reingest ? `; the oracle arm deleted the memories of the ${m.info.reingest.files} files the edits touched and added them again from after the edits (${m.info.reingest.llm_calls} more LLM calls)` : ""}.`);
+    if (m.info?.package && !method.some((x) => x.includes(m.info.package))) method.push(`The memory that extracts facts: ${m.info.package} (${m.info.install ?? "its default install"}), its LLM ${m.info.llm} and embeddings ${m.info.embed ?? "text-embedding-3-small"} through ${m.info.provider ?? "an OpenAI-compatible gateway"}, local vector store; given each of the ${m.info.sections} sections with fact extraction on, ${m.info.errors?.length ?? 0} of them failed${m.info.extraction_replies_not_json ? ` (and ${m.info.extraction_replies_not_json} extraction replies were not valid JSON${m.info.inserts_failed ? `, ${m.info.inserts_failed} inserts failed` : ""}: logged by the library, which went on)` : ""}${m.info.reingest ? `; the oracle arm deleted the memories of the ${m.info.reingest.files} files the edits touched and added them again from after the edits (${m.info.reingest.llm_calls} more LLM calls)` : ""}.`);
   }
   if (!flag("--no-time")) {
     process.stderr.write("over time…\n");
@@ -356,7 +359,11 @@ async function main() {
     }
     method.push(`Answers: ${m.reader} through ${m.provider}, temperature 0.`);
   }
-  const results = { at: new Date().toISOString(), k: K, questions: questions.length, edits: changes.length, rows: rows.map(({ arm, ...r }) => r), over_time: over, takes, method };
+  write({ at: new Date().toISOString(), k: K, questions: questions.length, edits: changes.length, rows: rows.map(({ arm, ...r }) => r), over_time: over, takes, method });
+}
+
+function write(results) {
+  const method = results.method ?? [];
   console.log(fullReport(results, { method }));
   const file = option("--out");
   if (file) writeFileSync(file, JSON.stringify(results, null, 2));
