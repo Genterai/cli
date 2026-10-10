@@ -92,9 +92,11 @@ do all of that yourself from the data it returns. Never ask Genter to change, re
   Leave it out when you only look something up.
   Ask only for what to find (who, what, when, which app), never for what to do with it: for "rewrite the intro of our README", find "the README of <repo>" and rewrite it yourself.
 - GENTER_CONTINUE_TASK: answer a run's question, continue after the user connected an app, or narrow or widen the same search.
+- GENTER_CONNECT: connect the user's apps (or a website, or an MCP server by its address) and see what is connected: it returns a link for each app to connect.
 Call them whenever the user mentions or implies an app, an account or their own data. Never say you have no access before trying.
 Pass every known detail (names, dates, apps, accounts) in one call, in the user's words.
 Show connect links to the user as Markdown links.
+A result line ending " · saved now" is a path Genter saved just now: tell the user it is remembered, so the same question is answered at once next time. " · saved path" is one saved before, run live now.
 References under GENTER_FIND's results (whose items carry _ref: n) say what each is and where: a path, a link, the ids that point to it.
 A reference's "read" line is the GENTER_FIND call that reads that place in full (an email's body, a whole file, a skill's section, a page): make it when the answer needs more than the result shows.`;
 
@@ -105,6 +107,19 @@ export const actionInstructions = `Actions (this workspace may change things in 
 - GENTER_WRITE: write where a result pointed: run_id + ref (the [n] of its References) + the exact text. Each reference's "write" line names the app's write tools for that exact place, args already known.
   A file: pass edits ([{find, replace}], exact pieces of its current text and the new text you wrote) and message: one commit, only those pieces change.
 Write every text yourself first (from what GENTER_FIND returned), then hand it over; never ask Genter to write or rewrite it.`;
+
+// The person's next Get started step over MCP (the dashboard's steps: an app connected, a first question asked), for the
+// server's instructions: what the client should offer next, or "" when both are done. mayConnect: the person (or the agent's
+// person) is an owner or admin, who may connect.
+export function startInstructions({ app = false, ask = false, mayConnect = false } = {}) {
+  if (!app && mayConnect)
+    return "Getting started: nothing is connected yet. Ask the user which apps they work with (email, calendar, files, code, chat, docs), then call GENTER_CONNECT with those apps and show its links as Markdown links.";
+  if (!app)
+    return "Getting started: nothing is connected for this user yet, and only a workspace owner or admin can connect apps. Tell the user to ask one of them; GENTER_CONNECT lists what is connected.";
+  if (!ask)
+    return "Getting started: apps are connected. Suggest a first question about the user's own data in them (their latest emails, today's meetings, open pull requests) and ask it with GENTER_FIND.";
+  return "";
+}
 
 // The apps connected for the person, for the server's instructions (never the tool descriptions, which stay the same for
 // everyone on a plan so a client or a catalog that keeps them once stays right). connected: [{ toolkit, alias? }].
@@ -159,6 +174,21 @@ export function agentTools({ actions = false } = {}) {
         message: z.string().describe("The user's answer, or what else to find"),
       }),
       annotations: { title: "Continue a search", readOnlyHint: !actions, destructiveHint: false, openWorldHint: true },
+    },
+    GENTER_CONNECT: {
+      description:
+        "Connect the user's apps to Genter, or see what is connected. Returns the user's connections with their status and, for each app asked, " +
+        "a link that connects it: show each link to the user as a Markdown link, and once they have connected, call GENTER_FIND.\n" +
+        "Also adds a website (its pages are read and found like an app's data) or a remote MCP server, by its https address. Costs nothing.\n" +
+        "Only a workspace's owners and admins, and their agents, connect; for anyone else it says to ask them.\n" +
+        "Example: {apps: [\"gmail\", \"Google Calendar\", \"github\"]}. With nothing given it only lists the connections.",
+      input: z.object({
+        apps: z.array(z.string().max(60)).max(10).optional().describe("Apps to connect, by name or slug, e.g. [\"gmail\", \"Google Calendar\"]"),
+        website: z.string().url().optional().describe("Optional. A website to add by its https address; its pages are read and kept"),
+        mcp_server: z.string().url().optional().describe("Optional. A remote MCP server to add by its https address"),
+        account: z.string().max(40).optional().describe("Optional. A label for the new connection, to connect one more account of an app already connected, e.g. work"),
+      }),
+      annotations: { title: "Connect your apps", readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
     ...(actions && {
       GENTER_RUN_TASK: {
@@ -265,7 +295,7 @@ export function recipesResultText(out, { write = false, instructions } = {}) {
   // Skills and guides picked by GENTER_FIND's goal: their own section after the data, never counted among the anchors.
   const skills = out.skills ?? [];
   const skillBlocks = skills.length
-    ? [`Skills for the goal (guides on how to do it, not data to answer from):\n\n${skills.map((r, i) => `Skill ${i + 1}: ${recipeLine(r, i + 1).replace(/^Anchor \d+: /, "")}\n${JSON.stringify(readable(r.data) ?? null)}`).join("\n\n")}`]
+    ? [`Skills for the goal (guides on how to do it, not data to answer from):\n\n${skills.map((r, i) => `Skill ${i + 1}: ${recipeLine(r, i + 1, [], { saved: false }).replace(/^Anchor \d+: /, "")}\n${JSON.stringify(readable(r.data) ?? null)}`).join("\n\n")}`]
     : [];
   const sources = sourceCount(results);
   const told = [instructions, ...results.map((r) => r.instructions), sources >= 2 ? sourcesLine(sources) : ""].map((t) => String(t ?? "").trim()).filter((t, i, all) => t && all.indexOf(t) === i);
@@ -288,13 +318,50 @@ export function recipesResultText(out, { write = false, instructions } = {}) {
   return [note, ...blocks, ...skillBlocks, listed, JSON.stringify(meta)].filter(Boolean).join("\n\n");
 }
 
-// Anchor 1: rcp_… · GMAIL_FETCH_EMAILS {"query":"from:anna"} — Emails from Anna (account work)
+// Anchor 1: rcp_… · GMAIL_FETCH_EMAILS {"query":"from:anna"} — Emails from Anna (account work) · saved path
+// " · saved now": the anchor was saved by this call (a path remembered for next time); " · saved path": saved before, run
+// live now. A result kept as no anchor (no id) has neither; skills' lines leave it out (saved: false).
 // Anchor Drift (drift.js): a bracketed fact is added ONLY when the anchor's source deviates (old while others around it are
 // fresh, marked as replaced); otherwise the line is exactly as before. others: the signals of the whole answer.
-export const recipeLine = (r, i, others = []) => {
+export const savedMark = (r) => (r.id ? (r.created ? " · saved now" : " · saved path") : "");
+export const recipeLine = (r, i, others = [], { saved = true } = {}) => {
   const facts = driftFacts(r.signals, others);
-  return `Anchor ${i}: ${[r.id, r.tool].filter(Boolean).join(" · ")}${Object.keys(r.args ?? {}).length ? ` ${JSON.stringify(r.args)}` : ""}${r.title ? ` — ${r.title}` : ""}${r.account ? ` (account ${r.account})` : ""}${facts.length ? ` [${facts.join("; ")}]` : ""}`;
+  return `Anchor ${i}: ${[r.id, r.tool].filter(Boolean).join(" · ")}${Object.keys(r.args ?? {}).length ? ` ${JSON.stringify(r.args)}` : ""}${r.title ? ` — ${r.title}` : ""}${r.account ? ` (account ${r.account})` : ""}${saved ? savedMark(r) : ""}${facts.length ? ` [${facts.join("; ")}]` : ""}`;
 };
+
+// GENTER_CONNECT's result: the person's connections and, for each app asked, its link (or why there is none), then the JSON
+// line. out: { connections: [{ toolkit, name?, label, status, default? }], apps: [{ asked, name?, toolkit?, state, url? , error? }],
+// website?: { url, state, error? }, mcp_server?: { address, state, url?, error? }, credits }. state: link | connected |
+// added | refused | unknown | failed. No model is called: the credits are 0.
+export const CONNECT_REFUSED = "Ask a workspace owner or admin to connect it.";
+export function connectResultText(out) {
+  const connections = out.connections ?? [];
+  const listed = connections.length
+    ? `Connections (${connections.length}):\n${connections.map((c) => `- ${c.name ?? c.toolkit} · ${c.label} · ${c.status}${c.default ? " · default" : ""}`).join("\n")}`
+    : "No apps are connected yet.";
+  const line = (what, x) => {
+    if (x.state === "link") return `- [Connect ${what}](${x.url})`;
+    if (x.state === "connected") return `- ${what}: already connected${x.label ? ` (${x.label})` : ""}. Pass account to connect one more account.`;
+    if (x.state === "added") return `- ${what}: ${x.note ?? "added"}`;
+    if (x.state === "refused") return `- ${what}: ${CONNECT_REFUSED}`;
+    if (x.state === "unknown") return `- No app called ${what}`;
+    return `- ${what}: ${x.error ?? "could not be connected"}`;
+  };
+  const asked = [
+    ...(out.apps ?? []).map((a) => line(a.name ?? a.asked, a)),
+    ...(out.website ? [line(`Website ${out.website.url}`, out.website)] : []),
+    ...(out.mcp_server ? [line(`MCP server ${out.mcp_server.address ?? out.mcp_server.url}`, out.mcp_server)] : []),
+  ];
+  const links = [...(out.apps ?? []), out.website, out.mcp_server].filter((x) => x?.state === "link").length;
+  const meta = {
+    status: "done",
+    connections: connections.length,
+    ...(links && { links }),
+    credits: out.credits ?? 0,
+    ...(links && { next: "Show each link to the user as a Markdown link; when they have connected, call GENTER_FIND (or GENTER_CONNECT to see the connection)." }),
+  };
+  return [listed, asked.length ? `Connect:\n${asked.join("\n")}` : "", JSON.stringify(meta)].filter(Boolean).join("\n\n");
+}
 
 // A result as the app sent it, except file contents sent as base64 (GitHub's {encoding: "base64", content}, at the top
 // or one level down): decoded, so a model can read them. Contents that are not text stay as they came.
